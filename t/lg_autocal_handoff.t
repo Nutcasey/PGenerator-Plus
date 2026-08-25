@@ -13,7 +13,9 @@ sub read_source {
 }
 
 my $worker=read_source("$Bin/../usr/bin/meter_lg_autocal.pl");
-my $webui=read_source("$Bin/../usr/share/PGenerator/webui.pm");
+my $webui=read_source("$Bin/../usr/share/PGenerator/webui.pm")
+          .read_source("$Bin/../usr/share/PGenerator/webui-app.js")
+          .read_source("$Bin/../usr/share/PGenerator/webui-workspace.js");
 my $lg=read_source("$Bin/../usr/share/PGenerator/lg.pm");
 
 my $finalising_at=rindex($worker,'$state->{"phase"}="finalising"');
@@ -32,6 +34,14 @@ like($webui,qr/sub webui_meter_lg_3d_autocal_start \(@\).*?webui_meter_lg_autoca
  'the greyscale-to-3D LUT boundary uses the hand-off guard');
 like($lg,qr/sub webui_meter_lg_dv_profile_start \(@\).*?webui_meter_lg_autocal_handoff_guard\(\)/s,
  'the greyscale-to-Dolby Vision profile boundary uses the hand-off guard');
+like($lg,qr/sub webui_meter_lg_dv_profile_start \(@\).*?flock\([^,]+,\s*LOCK_EX\).*?webui_meter_lg_autocal_handoff_guard\(\)/s,
+ 'Dolby Vision profile startup serializes the check-and-spawn boundary');
+like($lg,qr/sub webui_meter_lg_dv_profile_start \(@\).*?webui_meter_lg_dv_profile_same_run_running\(\$body\).*?"status":"started"/s,
+ 'a duplicate start for the same Full AutoCal run is idempotent');
+like($lg,qr/sub webui_lg_autocal_run_end \(@\).*?stale_run_ignored.*?return/s,
+ 'a delayed run-end callback cannot tear down the current run');
+like($lg,qr/sub webui_lg_autocal_run_end \(@\).*?stale_run_ignored.*?return/s,
+ 'a delayed run-end callback cannot tear down the current run');
 
 like($webui,qr/function meterFullAutoCalTransitionBusy\(response\).*?hasOwnProperty\.call\(response,'retryable'\).*?response\.retryable===true/s,
  'the browser honours explicit retryable true and false responses instead of relying only on message text');
@@ -41,5 +51,15 @@ like($webui,qr/async function meterDvAutoCalStartProfile\(firstStatus\).*?\/api\
  'a timed-out Dolby Vision profile start adopts an already-running worker');
 like($webui,qr/async function meterStartLg3dAutoCal\(options\).*?meterFullAutoCalTransitionBusy\(r\)/s,
  'the 3D LUT hand-off consumes the structured retry response');
+like($webui,qr/function meterFullAutoCalSaveState\(\).*?controllerId:meterFullAutoCalControllerId\(\)/s,
+ 'the browser persists the owning tab with Full AutoCal state');
+like($webui,qr/function meterFullAutoCalRestoreSavedState\(\).*?meterFullAutoCalSavedStateOwnedByThisTab\(saved\)/s,
+ 'only the owning browser tab restores a Full AutoCal workflow');
+like($webui,qr/async function meterPollAutoCal\(options\).*?meterFullAutoCalCanDriveStatus\(r\).*?return;/s,
+ 'a non-owner status poll cannot drive a Full AutoCal stage transition');
+like($webui,qr/function meterAutoCalSetOverlay\(active,status\).*?const showUseCase=overlayActive&&phase==='usecase'.*?const showGamma=overlayActive&&phase==='gammatarget'.*?const showDisplayType=overlayActive&&phase==='displaytype'/s,
+ 'closing the AutoCal overlay clears every phase-specific setup control');
+like($webui,qr/function meterFullAutoCalConfirmDialog\(options\).*?'meterAutoCalUseCaseBox'.*?'meterAutoCalGammaBox'.*?'meterAutoCalDisplayTypeBox'.*?'meterAutoCalUseCaseContinueBtn'.*?'meterAutoCalGammaContinueBtn'.*?'meterAutoCalDisplayTypeContinueBtn'/s,
+ 'the Full AutoCal dialog hides all setup panels and buttons from an interrupted prior wizard');
 
 done_testing();
