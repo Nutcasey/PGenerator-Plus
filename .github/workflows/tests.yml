@@ -9,12 +9,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Perl module dependencies
+      - name: Install test dependencies
         # The Web UI render tests load the daemon's real module list, which
-        # imports the non-core XML::Simple and URI::Escape.
+        # imports the non-core XML::Simple and URI::Escape. The ICC parity
+        # tests exercise the NumPy production path.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libxml-simple-perl liburi-perl
+          sudo apt-get install -y --no-install-recommends libxml-simple-perl liburi-perl python3-numpy
       - name: Syntax-check the AutoCal worker
         run: perl -c usr/bin/meter_lg_autocal.pl
       - name: Syntax-check Web UI helpers
