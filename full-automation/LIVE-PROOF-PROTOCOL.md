@@ -55,11 +55,11 @@ Short, cheap, repeatable. Any picture mode is allowed. Suggested shapes, each a 
 |---|---|---|---|
 | `smoke-measure-sdr` | SDR, Filmmaker | pre-readings only, `greyscale-21` only | Proves setup, verify, series capture, history rendering. Under 5 minutes. |
 | `smoke-settings-hdr` | HDR10, Filmmaker | pre-readings only, `greyscale-21`, pinned G3-supported `backlight` and `energySaving` | Proves A1's first half and hazard pinning on the live G3. |
-| `smoke-cal-sdr` | SDR, Cinema | calibration only, apply-to-all on, `max_iterations` reduced through the item config | Proves reset, reapply, greyscale, 3D, session close, apply-all. Reduce iteration caps in the item to keep it short; do not change worker defaults. |
+| `smoke-cal-sdr` | SDR, Filmmaker | calibration only, apply-to-all on, `max_iterations` reduced through the item config | Proves reset, reapply, greyscale, 3D, session close, apply-all. Reduce iteration caps in the item to keep it short; do not change worker defaults. |
 | `smoke-cal-dv` | DV, Filmmaker | calibration only | Proves map-mode sequencing and the profile stage. |
 | `smoke-target-light` | SDR, Expert (Bright space) | calibration only, `target` panel-light policy, target 100 nits | Proves A12. |
 
-Queue them in pairs to prove A5 (same mode twice) and item boundaries (SDR then HDR).
+Queue them in pairs to prove A5 (same mode twice) and item boundaries (SDR then HDR). The short calibration smoke is shaped toward the owner-chosen Filmmaker full-length queue.
 
 Failure injection for A4: use the runner's test-only fault hook (goal section 4.1): create `/var/lib/PGenerator/automation/fault.json` containing `{"stage":"apply-all","mode":"error"}` before the item reaches c9. The runner treats the apply-all response as an explicit error, stops the queue, and records the injected fault in the item. Delete the file, Resume, and observe c9 rerun with c4 to c8 untouched by timestamps. Record in NOTES.md that the fault hook was used.
 
@@ -69,7 +69,7 @@ Failure injection for A11: `ssh pgen '/etc/init.d/PGenerator restart >/tmp/pgsta
 
 Announce before starting: the queue contents, the expected duration, and that the browser will be closed for at least one item. Then proceed unless told otherwise.
 
-Minimum queue: three SDR modes (for example Filmmaker, Cinema, Game Optimiser) then two HDR10 modes, every item with pre-readings, calibration with apply-to-all, post-readings, default sweeps on both sides, and quality limits enabled on at least one item. Owner-chosen pinned settings per mode.
+The owner-chosen full-length queue is exactly three items in this order: SDR Filmmaker, HDR10 Filmmaker, and Dolby Vision Filmmaker. Every item has pre-readings, calibration with apply-to-all, post-readings, and default sweeps on both sides; quality limits are enabled on at least one item. Use owner-chosen pinned settings per mode.
 
 Afterwards leave the TV in the last item's mode with its settings, as the design requires. Do not restore anything.
 

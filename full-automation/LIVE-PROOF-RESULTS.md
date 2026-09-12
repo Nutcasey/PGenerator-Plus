@@ -18,7 +18,7 @@ The live target is an LG `OLED55G36LA` (G3), firmware `23.25.55`, webOS 23, webO
 | A10 | Stop portion passed on the live G3. Stop during greyscale produced run `stopped`, item `stopped`, `greyscale-done` `interrupted`, worker exit evidence, calibration mode off, and visible gray50 cleanup. | `20260912-2157-stop-path-proof-g3/` |
 | A11 | Pending: daemon restart and killed-runner interrupted/resume proof. Pi reboot remains owner-authorized only. | — |
 | A12 | Pending: SDR target panel-light convergence and post-reset enforcement proof. | — |
-| A13 | Pending: announced full-length queue of at least three SDR then two HDR10 items, owner history review. | — |
+| A13 | Pending: announced full-length queue of SDR Filmmaker, HDR10 Filmmaker, and Dolby Vision Filmmaker, owner history review. | — |
 
 ## Stalled black-screen run
 

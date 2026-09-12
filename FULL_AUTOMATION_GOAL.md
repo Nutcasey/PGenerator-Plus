@@ -25,7 +25,7 @@ All of the following, in this order of proof:
 1. **Branch and PR.** All work on `feature/full-automation` off `main`. Exactly one pull request to `origin/main` at the end. Do not merge. Commit `FULL_AUTOMATION_DESIGN.md`, this file and `full-automation/` on the branch.
 2. **CI green.** The existing 88 tests still pass and every `perl -c` in the workflow passes, including the new runner script added to that workflow.
 3. **Every acceptance example in section 6 proved live** on the owner's TV, with the evidence bundle described in the live-proof protocol.
-4. **One full-length proof run**: a queue of at least three SDR picture modes followed by at least two HDR picture modes, each with pre-readings, calibration with apply-to-all, and post-readings, run unattended from start to finish with the browser closed for at least one whole item. The run must appear in the history view with every item's graphs.
+4. **One full-length proof run**: a queue of exactly three items in this order: SDR Filmmaker, HDR10 Filmmaker, and Dolby Vision Filmmaker. Each item has pre-readings, calibration with apply-to-all, post-readings, and the default sweeps; quality limits are enabled on at least one item. Run the queue unattended from start to finish with the browser closed for at least one whole item. The run must appear in the history view with every item's graphs.
 5. **Owner review of history.** The owner opens the full-length run in the history view and confirms it. This is the only human gate.
 6. **PR body** lists the acceptance examples with a one-line result each and links the evidence bundle.
 
@@ -57,7 +57,7 @@ These were decided by the owner on 12 September 2026. Do not re-open them. The f
 | Known bugs | Out of scope. Being fixed elsewhere. |
 | Tests | No unit-test requirement. Do not restore deleted tests. |
 | Live access | The agent deploys to the Pi, restarts the service, and drives the TV and meter itself (section 8). |
-| Proof budget | Short smoke recipes freely, in any picture mode. One announced full-length proof at the end. |
+| Proof budget | Short smoke recipes freely, in any picture mode. One announced full-length proof at the end, using the owner-chosen SDR Filmmaker, HDR10 Filmmaker, and Dolby Vision Filmmaker queue. |
 
 ## 3. Verified findings that change the design text
 
@@ -249,7 +249,7 @@ The eight from the design, each with how it is proved live, plus five added by t
 | A10 | Pause lands at the next checkpoint, Resume continues from it; Stop mid-worker marks the stage interrupted and closes the calibration session. | Checkpoint records and `/api/lg/status` showing calibration mode off after Stop. |
 | A11 | A daemon restart during a worker stage does not lose the run; a Pi reboot leaves it `interrupted` and resumable. | Restart the service mid-stage and see the run continue. Reboot is the owner's call; if not exercised, prove the boot marking with a killed runner instead. |
 | A12 | An SDR item with the `target` panel-light policy settles within tolerance and the settled value survives the reset and is the value enforced afterwards. | `panel-light.json` iterations, and c8 to c10 checks showing the settled value. |
-| A13 | The full-length multi-mode run of section 1 item 4 completes and is reviewed by the owner. | History entry. |
+| A13 | The full-length SDR Filmmaker, HDR10 Filmmaker, and Dolby Vision Filmmaker run of section 1 item 4 completes and is reviewed by the owner. | History entry. |
 
 ## 7. Constraints on the implementation
 
@@ -319,7 +319,7 @@ Fixing entries in `Bugs/`; notifications or webhooks; recipe or queue export and
 | 8, 20 | Known bugs | Initially "named blockers in scope", revised to "ignore, fixed elsewhere". The revision stands. |
 | 9 | Agent access | Deploy to Pi, restart service, drive TV and meter, with the prohibitions in section 8. |
 | 10 | Proof budget | Smoke recipes freely; one announced full-length proof. |
-| 11 | Protecting existing calibration | Any picture mode is fair game during proofs. The real use is several SDR modes then several HDR modes in the user's order. |
+| 11 | Protecting existing calibration | Any picture mode is fair game during proofs. The owner-chosen full-length proof is one SDR Filmmaker item, one HDR10 Filmmaker item, and one Dolby Vision Filmmaker item, in that order. |
 | 12 | Display scope | LG webOS only. |
 | 13 | Sweeps | Exactly the existing three report sets. |
 | 14 | Exclusion | Global execution lock. |
@@ -335,3 +335,4 @@ Fixing entries in `Bugs/`; notifications or webhooks; recipe or queue export and
 | 26, 27 | Tests | Live proof only; no unit-test requirement; deleted tests stay deleted; fix the stale README text. |
 | 28 | Recipes | Queue items are full snapshots copied at add time. |
 | 29 | Guided flow | Unchanged apart from the lock. |
+| 30 | Full-length proof queue | On 12 September 2026, the owner chose exactly three Filmmaker items in this order: SDR, HDR10, Dolby Vision. Each item uses pre-readings, calibration with apply-to-all, post-readings, and default sweeps; quality limits are enabled on at least one item. |
