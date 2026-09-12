@@ -9,7 +9,13 @@ The live target is the owner's LG `OLED55G36LA` G3, webOS 23, software/firmware 
 - **A3 measurement-only:** run `20260912-202614-c14ff8` completed with 21 physical SDR greyscale readings. The item applied and verified its settings, performed no calibration reset, and stored `pre/greyscale-21.json`. Evidence: `/Users/garry.casey/PGenerator-automation-evidence/20260912-2027-smoke-measure-g3/`.
 - **A1 half:** run `20260912-203842-bf30b8` completed with 21 physical HDR10 greyscale readings using the G3-supported fixed `backlight=100` and `energySaving=off`. Settings setup and readings passed; a successful HDR calibration reset and reapply proof remains open. Evidence: `/Users/garry.casey/PGenerator-automation-evidence/20260912-2040-smoke-settings-hdr-g3/`.
 - **A10 stop:** run `20260912-215737-194374` stopped during greyscale. The run and item are `stopped`, `greyscale-done` is `interrupted` with `verified=false`, the worker exited after the graceful stop path, calibration mode was closed, and the visible pattern was restored to gray50. Evidence: `/Users/garry.casey/PGenerator-automation-evidence/20260912-2157-stop-path-proof-g3/`.
+- **A9 queue-side lock:** while run `20260912-222523-2ae30e` was active, the live 1D, 3D, series, DV-profile, and single-read starts returned `error_code=automation-active` without an automation token. Evidence is being held in `/Users/garry.casey/PGenerator-automation-evidence/20260912-2225-smoke-cal-sdr-filmmaker/checks/A9-lock-responses.json`; the reverse guided-worker-to-queue refusal remains open.
 - **Readiness and identity:** live readiness names the G3 model, firmware, generation, and supported picture keys. The hazard probes report the controls that the TV does not expose.
+
+## Prepared proof inputs
+
+- Saved on the Pi: `smoke-cal-hdr10-filmmaker` recipe `20260912-224645-2a7597` and `smoke-cal-dv-filmmaker` recipe `20260912-224645-46813f`. Both use Filmmaker mode, fixed G3-supported `backlight`, calibration, and apply-to-all; the short versions skip pre/post sweeps.
+- A4 fault step: before a calibration item reaches c9, write `/var/lib/PGenerator/automation/fault.json` as `{"stage":"apply-all","mode":"error"}`. Let the runner stop, remove the fault file, resume the same run, and verify c9 reruns while c4–c8 timestamps and artefacts remain unchanged.
 
 ## Current plan
 
