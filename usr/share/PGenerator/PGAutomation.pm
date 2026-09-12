@@ -2,12 +2,18 @@ package PGAutomation;
 
 use strict;
 use warnings;
+BEGIN {
+    my $directory = __FILE__;
+    $directory =~ s{/[^/]+$}{};
+    unshift @INC, $directory;
+}
 
 use Fcntl qw(:DEFAULT :flock);
 use File::Path qw(make_path remove_tree);
 use JSON::PP ();
 use POSIX qw(strftime);
 use Time::HiRes qw(time);
+use PGMath ();
 
 our $VERSION = '1.0';
 
@@ -36,7 +42,7 @@ sub ensure_store {
 }
 
 sub json_encoder {
-    return JSON::PP->new->canonical(1)->utf8(0);
+    return JSON::PP->new->canonical(1)->utf8(1);
 }
 
 sub encode_json {
@@ -232,13 +238,51 @@ sub remove_run {
     my ($run_id) = @_;
     my $dir = run_dir($run_id);
     return 0 if $dir eq '' || !-d $dir;
-    my $errors = [];
-    remove_tree($dir, { error => $errors });
+    my $errors;
+    remove_tree($dir, { error => \$errors });
     return !-e $dir && !@$errors;
 }
 
 sub now {
     return time();
+}
+
+sub quality_summary {
+    my ($snapshot, $formula, $white) = @_;
+    $white = {x => 0.3127, y => 0.3290} if ref($white) ne 'HASH';
+    my (@values, $missing);
+    $missing = 0;
+    my $number = sub { defined($_[0]) && !ref($_[0]) && "$_[0]" =~ /^-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i };
+    my $reference = ref($snapshot->{white_reading}) eq 'HASH' ? $snapshot->{white_reading} : {};
+    my $white_y = $reference->{Y} // $reference->{luminance};
+    foreach my $reading (@{$snapshot->{readings} || []}) {
+        next if ref($reading) ne 'HASH';
+        my $scale = $reading->{series_target_white_y} || $white_y;
+        my $x = $reading->{target_x} // $white->{x};
+        my $y = $reading->{target_y} // $white->{y};
+        my $target = $reading->{custom_target_nits};
+        $target = $reading->{target_Yn} * $scale
+            if !$number->($target) && $number->($reading->{target_Yn}) && $number->($scale);
+        if (grep { !$number->($_) } ($reading->{X}, $reading->{Y}, $reading->{Z}, $x, $y, $target, $scale)) {
+            $missing++; next;
+        }
+        if ($y <= 0 || $scale <= 0 || $target < 0) { $missing++; next; }
+        my $xyz = [$target * $x / $y, $target, $target * (1 - $x - $y) / $y];
+        my $value;
+        if ($formula eq 'deitp') {
+            $value = PGMath::delta_e_itp_xyz(@$reading{qw(X Y Z)}, @$xyz);
+        } elsif ($formula eq 'de2000') {
+            my $reference_white = [$scale * $white->{x} / $white->{y}, $scale,
+                $scale * (1 - $white->{x} - $white->{y}) / $white->{y}];
+            $value = PGMath::delta_e_2000_xyz([@$reading{qw(X Y Z)}], $xyz, $reference_white);
+        }
+        if (!$number->($value)) { $missing++; next; }
+        push @values, $value;
+    }
+    return (undef, undef, 0, $missing) if !@values;
+    my $sum = 0; $sum += $_ for @values;
+    my ($maximum) = sort {$b <=> $a} @values;
+    return ($sum / @values, $maximum, scalar(@values), $missing);
 }
 
 1;

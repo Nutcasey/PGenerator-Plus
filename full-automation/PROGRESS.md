@@ -1,6 +1,6 @@
 # Full automation progress
 
-Status: implementation and live proof are in progress on `feature/full-automation`. No full-length proof has been run yet, and no pull request has been opened.
+Status: preparation review and fixes are deployed on `feature/full-automation`. The owner has switched the TV off and explicitly limited further work to preparation. No full-length proof has been run, and no pull request has been opened.
 
 The live target is the owner's LG `OLED55G36LA` G3, webOS 23, software/firmware `23.25.55`, webOS release `9.2.2`, with a physical Calibrite/X-Rite i1Display Pro Plus. The G3 exposes `backlight`, `energySaving`, and `pictureMode` through the current control API. It does not expose the original G5 `oledPixelBrightness` key.
 
@@ -19,11 +19,23 @@ The live target is the owner's LG `OLED55G36LA` G3, webOS 23, software/firmware 
 
 ## Current plan
 
-1. Deploy and live-test the meter-session cleanup patch. The runner now posts `/api/meter/session/stop` from both `_stop_active` and `_finish`. Readiness treats a persistent session as reusable when no guided worker or meter series is active.
-2. Let the active SDR Filmmaker calibration smoke finish without intervention. If the G3 repeats the exact-zero low-shadow readings, record the recurrence as FAB-107 and treat calibration completion as blocked while proving the remaining examples around it.
-3. Prove the remaining short examples: calibration-only and apply-all, fault and resume, consecutive same-mode items, browser-closed execution, rerun history, warning or unverified history, mutual locks, daemon restart, and target panel-light settling.
-4. Announce the full-length proof before starting it. Run exactly SDR Filmmaker, HDR10 Filmmaker, and Dolby Vision Filmmaker in that order, with pre-readings, calibration, apply-to-all, post-readings, and default sweeps on every item; enable quality limits on at least one item. Include one complete item with the browser closed. Capture the bundle before any restart and obtain the owner's history review.
-5. Run the repository checks, review the complete diff and history, commit milestones, push `feature/full-automation`, and open exactly one PR to `origin/main`. Do not merge it.
+1. Leave the Pi idle for the owner's batch test. No TV connection, settings write, measurement, or calibration is required for further preparation.
+2. When live testing is authorized again, prove the remaining short examples: calibration-only and apply-all, fault and resume, consecutive same-mode items, browser-closed execution, rerun history, warning or unverified history, mutual locks, daemon restart, and target panel-light settling. Meter-session cleanup is deployed but still needs the live success-path proof. An unrelated persistent meter session now correctly blocks a new queue; only the owning automation token may reuse it.
+3. Announce the full-length proof before starting it. Run exactly SDR Filmmaker, HDR10 Filmmaker, and Dolby Vision Filmmaker in that order, with pre-readings, calibration, apply-to-all, post-readings, and default sweeps on every item; enable quality limits on at least one item. Include one complete item with the browser closed. Capture the bundle before any restart and obtain the owner's history review.
+4. Open exactly one PR to `origin/main` after the required live evidence and owner review. Do not merge it. Local preparation checks do not satisfy the live acceptance criteria.
+
+## Preparation review
+
+- Merged `origin/main` through `65f49669`, including LG display-control support reasons, favicon assets, and deploy-console fixes. Both upstream and automation CI checks are retained.
+- Rebuilt the setup as a queue with a per-item modal: signal and picture mode, before/after sweep selection, explicitly pinned TV settings, fixed/target panel light, luminance, white point, gamma/gamut, dE target/formula, 3D LUT method/export size, Dolby Vision profile explanation, and per-sweep quality limits. Measurement settings and advanced recipe fields stay in each snapshot. Picture pins can be prepared offline; readiness checks actual support before a run.
+- Fixed queue draft persistence, saved-queue selection, safe pending-item edits under the run lock, stale editor rejection, and loss of edited pending items when the runner advances or completes.
+- Corrected worker payloads, stop responsiveness during long HTTP calls, interrupted-run recovery, partial reading preservation, calibration closure verification, apply-all verification, and panel-light settling evidence. Missing verification is recorded as unverified, not success.
+- Quality limits now calculate dE from saved measured XYZ and target metadata. Missing or unusable measurements cannot pass a quality check. Zero-valued quality limits, patch delays, settle delays, and optional polishing budgets are preserved.
+- Fixed first-item artifact access (`items/0` was falsely rejected), Unicode storage, history deletion, and graph rendering from the otherwise hidden calibration workspace. History uses saved artifacts, not a fresh measurement.
+- Backed up and stopped stale interrupted run `20260912-222523-2ae30e`. Its history remains. Because the TV was off, calibration closure was explicitly recorded as unverified. No batch is active.
+- Local verification: 11 test files / 135 tests pass; all workflow Perl syntax checks and relevant JavaScript checks pass; `git diff --check` passes. Browser checks on the Pi cover workspace navigation, per-item editing and zero-value round trips, and saved-history rendering. Run `20260912-202614-c14ff8` renders 21 saved readings and five greyscale charts without browser errors. This is saved-data/UI proof, not a new physical calibration proof.
+- Review evidence and screenshots: `/Users/garry.casey/PGenerator-automation-evidence/20260912-review/`. Existing user-owned untracked files and `Bugs/` were not changed or included.
+- Final offline browser check built separate SDR/HDR10/Dolby Vision items with distinct dE targets, explicit energy-saving pins, SDR target luminance, and zero delays; duplication did not alias snapshots, reordering preserved them, and all three survived reload. No POST requests occurred. The item modal also fits a 390-pixel viewport without horizontal overflow.
 
 ## Known bug and open items
 
@@ -31,7 +43,7 @@ The failed run `20260912-210733-972f3e` recorded FAB-107: repeated exact-zero XY
 
 Runs `20260912-205309-c46858` and `20260912-210152-e4d509` remain unsuccessful smoke evidence for the LG WebSocket drop and pre-token worker guard failure. Their `NOTES.md` files now state the target and exact failure.
 
-At 22:52, the browser could not render the active run because `runs/current` returned about 429 KB in 3.3–4.9 seconds and `runs` returned about 429 KB in 22.7–23.6 seconds, exceeding the WebUI's 5-second read timeout. The local fix is ready but deployment is held until the active run finishes: current state will expose only the run summary and integer active-item index, the history endpoint will return listing rows, full detail will be loaded from `runs/<id>`, and series files will be fetched through the artefact route when a history entry opens. The runner will persist only the six-field worker summary in `run.json`; full worker state remains under the item calibration directory.
+At 22:52, the browser could not render the active run because `runs/current` returned about 429 KB in 3.3–4.9 seconds and `runs` returned about 429 KB in 22.7–23.6 seconds, exceeding the WebUI's 5-second read timeout. The fix is now deployed: current state exposes only the run summary and integer active-item index, the history endpoint returns listing rows, full detail loads from `runs/<id>`, and series files are fetched through the artefact route when a history entry opens. The runner persists only the six-field worker summary in `run.json`; full worker state remains under the item calibration directory.
 
 Goal section 4.3 specifies the automation endpoints on the `tv` lane. The read-only `GET` routes for runs, current state, run detail, and artefacts now route on the general lane as an explicit deviation. They only read automation files, and moving them prevents a slow LG command from blocking live status and history; readiness and all writes remain on the `tv` lane.
 

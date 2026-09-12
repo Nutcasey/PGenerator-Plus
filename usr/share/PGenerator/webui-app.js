@@ -2756,7 +2756,7 @@ const PG_METER_CONFIG_COLLAPSE_KEY='pgen.ui.meterConfigCollapsed';
 const PG_DESKTOP_MIN_WIDTH=1024;
 const PG_DESKTOP_WORKSPACES={
  output:'Output',patterns:'Patterns',calibration:'Calibration','3d-lut':'3D LUT','icc-profile':'Display Profiler','meter-profile':'Meter Profiler',
- 'display-control':'LG Display',connectivity:'Connectivity',session:'Session','ui-settings':'UI Settings',system:'System'
+ 'display-control':'LG Display',automation:'Automation',connectivity:'Connectivity',session:'Session','ui-settings':'UI Settings',system:'System'
 };
 let pgThemeMode='dark';
 let pgLayoutPreference='tablet';

@@ -14,10 +14,12 @@ BEGIN {
 use Fcntl qw(:flock);
 use File::Path qw(make_path);
 use HTTP::Tiny;
+use IO::Select;
 use JSON::PP ();
 use POSIX qw(strftime);
 use Time::HiRes qw(time);
 use PGAutomation ();
+use PGMath ();
 
 my ($RUN_ID, $TOKEN) = @ARGV;
 die "usage: pgen_automation_runner.pl RUN_ID TOKEN\n"
@@ -44,6 +46,7 @@ my $STOPPING = 0;
 my $ACTIVE_ITEM;
 my $ACTIVE_STAGE = '';
 my $ACTIVE_WORKER = '';
+my ($ACTIVE_SERIES_KEY, $ACTIVE_SERIES_PHASE);
 my $LAST_CONTROL_POLL = 0;
 my $LAST_HEARTBEAT = 0;
 my $RUNNER_LOCK;
@@ -150,7 +153,7 @@ sub _heartbeat {
     my $now = time();
     return if !$force && $now - $LAST_HEARTBEAT < 2;
     $LAST_HEARTBEAT = $now;
-    _update_run(sub {
+    my $saved = _update_run(sub {
         my ($run) = @_;
         $run->{heartbeat} = $now;
         $run->{heartbeat_at} = strftime('%Y-%m-%dT%H:%M:%SZ', gmtime($now));
@@ -160,6 +163,7 @@ sub _heartbeat {
         delete($run->{active_grey_state});
         $run->{active_stage} = $ACTIVE_STAGE if $ACTIVE_STAGE ne '';
     });
+    die 'Unable to persist automation heartbeat' if !ref($saved);
     die 'Unable to write automation execution heartbeat' if !_write_execution();
 }
 
@@ -184,7 +188,7 @@ sub _shell_quote {
 }
 
 sub _api_once {
-    my ($method, $path, $payload) = @_;
+    my ($method, $path, $payload, $allow_stop) = @_;
     my $url = 'http://127.0.0.1' . $path;
     my %options = (
         headers => {
@@ -197,7 +201,40 @@ sub _api_once {
         $options{headers}{'Content-Type'} = 'application/json';
         $options{content} = PGAutomation::encode_json($body);
     }
-    my $response = eval { $HTTP->request($method, $url, \%options) };
+    # Poll controls and maintain the heartbeat even while a reset or readiness
+    # request holds the TV lane for several minutes.
+    pipe(my $reader, my $writer) or die "Unable to create HTTP response pipe: $!";
+    my $child = fork();
+    die "Unable to launch HTTP request: $!" if !defined($child);
+    if (!$child) {
+        close($reader);
+        $SIG{TERM} = 'DEFAULT'; $SIG{INT} = 'DEFAULT';
+        my $timeout = ref($payload) eq 'HASH' && $payload->{helper_timeout}
+            ? $payload->{helper_timeout} + 20 : 60;
+        $timeout = 300 if $path eq '/api/automation/readiness';
+        my $client = HTTP::Tiny->new(agent => 'PGenerator-automation/1', timeout => $timeout);
+        my $response = eval { $client->request($method, $url, \%options) };
+        print {$writer} PGAutomation::encode_json($response || {});
+        close($writer);
+        POSIX::_exit(0);
+    }
+    close($writer);
+    my $select = IO::Select->new($reader);
+    my $raw = '';
+    while (1) {
+        _refresh_control();
+        _heartbeat(0);
+        if ($STOP_REQUESTED && !$STOPPING && !$allow_stop) {
+            kill('TERM', $child); close($reader); waitpid($child, 0);
+            return {status => 'error', error_code => 'stopped', message => 'Automation stop requested'};
+        }
+        next if !$select->can_read(0.5);
+        my $read = sysread($reader, my $chunk, 65536);
+        last if !defined($read) || !$read;
+        $raw .= $chunk;
+    }
+    close($reader); waitpid($child, 0);
+    my $response = PGAutomation::decode_json($raw);
     if (!$response || !$response->{success}) {
         my $status = $response ? ($response->{status} || 0) : 0;
         my $reason = $response ? ($response->{reason} || 'HTTP request failed') : ($@ || 'HTTP request failed');
@@ -293,7 +330,7 @@ sub _api {
             $lg_preflighted = 1;
             _ensure_lg_connection();
         }
-        $last = _api_once($method, $path, $payload);
+        $last = _api_once($method, $path, $payload, $allow_stop);
         if (!$last->{_transport_error}) {
             if ($lg_action && _lg_connection_failure($last) && $lg_reconnects < 3) {
                 $lg_reconnects++;
@@ -391,19 +428,27 @@ sub _default_range {
     return '2';
 }
 
+sub _measurement_options {
+    my ($item) = @_;
+    return map { $_ => $item->{$_} } grep {
+        /^patch_insert/ || /^(?:measurement_meter_port|measurement_meter_usb_id|observer|low_light)$/
+    } keys %$item;
+}
+
 sub _series_payload {
     my ($item, $key, $run_id) = @_;
     my ($type, $points) = _series_info($key);
     my $signal = _signal($item);
     my $cal = ref($item->{calibration}) eq 'HASH' ? $item->{calibration} : {};
-    my $target_gamma = $item->{target_gamma} || $cal->{target_gamma} || 'bt1886';
+    my $target_gamma = $item->{target_gamma} || $cal->{target_gamma}
+        || ($signal eq 'sdr' ? 'bt1886' : $signal eq 'hlg' ? 'hlg' : 'st2084');
     $target_gamma = 'st2084' if $signal eq 'dv';
     my $payload = {
         type => $type,
         points => $points,
         display_type => $item->{display_type} || 'lcd',
         ccss_override => $item->{ccss_override} || '',
-        delay_ms => int($item->{delay_ms} || 1000),
+        delay_ms => int($item->{delay_ms} // 1000),
         patch_size => int($item->{patch_size} || 10),
         signal_mode => $signal,
         signal_range => _default_range($item),
@@ -419,13 +464,17 @@ sub _series_payload {
         measurement_meter_usb_id => $item->{measurement_meter_usb_id} || '',
         observer => '1931_2',
         pattern_provider => $item->{pattern_provider} || 'local',
-        series_target_white_y => $item->{target_luminance} || $item->{white_luminance} || '',
+        target_white_use_measured => JSON::PP::true,
+        custom_d65_enabled => JSON::PP::true,
+        target_white_x => ($item->{target_white} || $cal->{target_white} || {})->{x} // 0.3127,
+        target_white_y => ($item->{target_white} || $cal->{target_white} || {})->{y} // 0.3290,
         series_report_key => $key,
         full_autocal_run_id => $run_id,
         require_device_ready => JSON::PP::false,
     };
-    $payload->{target_white_luminance} = $item->{target_luminance}
-        if defined($item->{target_luminance});
+    foreach my $key (keys %$item) {
+        $payload->{$key} = $item->{$key} if $key =~ /^patch_insert/ || $key eq 'low_light';
+    }
     return $payload;
 }
 
@@ -493,11 +542,12 @@ sub _grey_payload {
     my $target_gamma = $cal->{target_gamma} || $item->{target_gamma} || 'bt1886';
     $target_gamma = '2.2' if $signal eq 'hdr10' || $signal eq 'dv';
     my $body = {
+        _measurement_options($item),
         type => 'greyscale',
         points => 26,
         display_type => $item->{display_type} || 'lcd',
         ccss_override => $item->{ccss_override} || '',
-        delay_ms => int($item->{delay_ms} || 1000),
+        delay_ms => int($item->{delay_ms} // 1000),
         patch_size => int($item->{patch_size} || 10),
         signal_mode => $signal,
         signal_range => _default_range($item),
@@ -521,11 +571,12 @@ sub _grey_payload {
         restore_factory_levels => JSON::PP::false,
         reset_ddc_baseline => JSON::PP::false,
         full_workflow => JSON::PP::true,
+        full_autocal_run_id => $RUN_ID,
         full_autocal_phase => 'first-greyscale',
         max_iterations => int($cal->{max_iterations} || 36),
         headroom_max_iterations => int($cal->{headroom_max_iterations} || 60),
-        max_polish_iterations => int($cal->{max_polish_iterations} || 16),
-        precision_polish_iterations => int($cal->{precision_polish_iterations} || 18),
+        max_polish_iterations => int($cal->{max_polish_iterations} // 16),
+        precision_polish_iterations => int($cal->{precision_polish_iterations} // 18),
         low_light => ref($item->{low_light}) eq 'HASH' ? $item->{low_light} : {},
         refresh_rate => $item->{refresh_rate} || '',
         require_device_ready => JSON::PP::false,
@@ -572,11 +623,12 @@ sub _three_d_payload {
         if ref($grey) ne 'HASH' || !%$grey;
     $grey = {} if ref($grey) ne 'HASH';
     my $body = {
+        _measurement_options($item),
         method => $method,
         type => 'lg-3d-lut',
         display_type => $item->{display_type} || 'lcd',
         ccss_override => $item->{ccss_override} || '',
-        delay_ms => int($item->{delay_ms} || 1000),
+        delay_ms => int($item->{delay_ms} // 1000),
         patch_size => int($item->{patch_size} || 10),
         signal_mode => $signal,
         requested_signal_mode => $signal,
@@ -597,16 +649,21 @@ sub _three_d_payload {
         refresh_rate => $item->{refresh_rate} || '',
         require_device_ready => JSON::PP::false,
         post_check => JSON::PP::false,
+        preflight_lg_generation => $item->{lg_generation},
+        lg_autocal_hdr20_postcal_shadow_enable => $cal->{shadow_fix} ? 1 : 0,
         low_light => ref($item->{low_light}) eq 'HASH' ? $item->{low_light} : {},
     };
     if ($signal eq 'hdr10') {
         $body->{upload_command} = 'BT2020_3D_LUT_DATA';
         $body->{get_command} = 'GET_3D_LUT_DATA';
-        $body->{full_workflow_peak_luminance} = $grey->{hdr20_1d_dpg_white_ref}
+        $body->{full_workflow_peak_luminance} = $grey->{hdr20_1d_tonemap_peak_luminance}
+            || $grey->{hdr_tone_map_peak_luminance} || $grey->{hdr20_1d_dpg_white_ref}
             || $grey->{calibrated_white_luminance} if ref($grey) eq 'HASH';
         $body->{full_workflow_dpg_data} = $grey->{hdr20_1d_dpg_data}
             if ref($grey->{hdr20_1d_dpg_data}) eq 'ARRAY' && @{$grey->{hdr20_1d_dpg_data}} == 3072;
     }
+    $body->{full_workflow_dpg_data} = $grey->{sdr_1d_dpg_data}
+        if $signal eq 'sdr' && ref($grey->{sdr_1d_dpg_data}) eq 'ARRAY' && @{$grey->{sdr_1d_dpg_data}} == 3072;
     delete $body->{$_} for grep { !defined($body->{$_}) } keys %$body;
     return $body;
 }
@@ -616,15 +673,15 @@ sub _dv_payload {
     my $cal = ref($item->{calibration}) eq 'HASH' ? $item->{calibration} : {};
     my $range = _default_range($item);
     return {
+        _measurement_options($item),
         input_max => 4095,
         display_type => $item->{display_type} || 'lcd',
         ccss_override => $item->{ccss_override} || '',
-        delay_ms => int($item->{delay_ms} || 1000),
+        delay_ms => int($item->{delay_ms} // 1000),
         pattern_signal_range => $range,
         signal_range => $range,
         transport_signal_range => $range,
         picture_mode => _picture_mode($item),
-        calibrated_peak_luminance => $item->{target_luminance} || undef,
         patch_size => int($item->{patch_size} || 10),
         refresh_rate => $item->{refresh_rate} || '',
         upload => JSON::PP::false,
@@ -639,6 +696,27 @@ sub _dv_payload {
 sub _status_terminal {
     my ($status) = @_;
     return defined($status) && $status =~ /^(?:complete|error|failed|cancelled|stopped|idle)$/;
+}
+
+sub _start_worker {
+    my ($path, $status_path, $payload) = @_;
+    my $result;
+    for my $attempt (1..6) {
+        $result = _api('POST', $path, $payload, 0, 0);
+        return $result if ($result->{status} || '') eq 'started';
+        return $result if $STOP_REQUESTED;
+        my $probe = _api('GET', $status_path, undef, 0, 0);
+        if (($probe->{status} || '') eq 'running' && $payload->{full_autocal_run_id}
+            && ($probe->{full_autocal_run_id} || '') eq $payload->{full_autocal_run_id}) {
+            return {status => 'started', adopted => JSON::PP::true};
+        }
+        last if !$result->{retryable} && !$result->{_transport_error}
+            && ($result->{error_code} || '') !~ /finishing/;
+        my $delay = ($result->{retry_after_ms} || 1000) / 1000;
+        $delay = 3 if $delay > 3; $delay = 0.25 if $delay < 0.25;
+        _sleep_controlled($delay) or last;
+    }
+    return $result;
 }
 
 sub _wait_worker {
@@ -661,7 +739,7 @@ sub _wait_worker {
                 _ensure_lg_connection();
                 $tv = _api('GET', '/api/lg/status', undef, 0, 0);
             }
-            if (ref($tv) ne 'HASH' || ($tv->{status} || '') eq 'error'
+            if (ref($tv) ne 'HASH' || ($tv->{status} || '') eq 'error' || $tv->{disconnected}
                 || lc($tv->{tv_power} || $tv->{power} || '') =~ /^(?:off|standby|powering-off)$/) {
                 $status = {
                     status => 'error',
@@ -679,6 +757,10 @@ sub _wait_worker {
             my $active_item = _active_item_number();
             $run->{active_item} = $active_item if defined($active_item);
         });
+        if ($state eq 'idle' && _worker_process_alive($ACTIVE_WORKER)) {
+            _sleep_controlled(2) or return undef;
+            next;
+        }
         return $status if _status_terminal($state);
         return { status => 'error', error_code => 'worker-timeout', message => "$kind exceeded six hours" }
             if time() - $started >= 21600;
@@ -768,10 +850,10 @@ sub _snapshot_series {
     $snapshot{points} = (_series_info($key))[1] if !exists($snapshot{points});
     $snapshot{steps} = [] if ref($snapshot{steps}) ne 'ARRAY';
     $snapshot{readings} = [] if ref($snapshot{readings}) ne 'ARRAY';
-    $snapshot{signal_mode} = _signal(_item_snapshot($ACTIVE_ITEM)) if !defined($snapshot{signal_mode});
-    $snapshot{target_gamma} = 'bt1886' if !defined($snapshot{target_gamma});
-    $snapshot{max_luma} = 0 if !defined($snapshot{max_luma});
-    $snapshot{dv_map_mode} = '' if !defined($snapshot{dv_map_mode});
+    my $context = _series_payload(_item_snapshot($ACTIVE_ITEM), $key, $RUN_ID);
+    foreach my $field (qw(signal_mode target_gamma max_luma dv_map_mode)) {
+        $snapshot{$field} = $context->{$field} if !defined($snapshot{$field});
+    }
     $snapshot{status} = $status->{status} || 'error' if !defined($snapshot{status});
     $snapshot{report_key} = $key;
     return undef if !_write_artifact("$directory/$key.json", \%snapshot);
@@ -788,6 +870,8 @@ sub _run_series {
         return 0 if $STOP_REQUESTED;
         _log("launching meter worker series $key for $which readings");
         $ACTIVE_WORKER = 'series';
+        ($ACTIVE_SERIES_KEY, $ACTIVE_SERIES_PHASE) = ($key, $which);
+        _update_run(sub { $_[0]{active_series} = {key=>$key, phase=>$which}; });
         my $started = _api('POST', '/api/meter/series', _series_payload($item, $key, $RUN_ID));
         if (!$started || ($started->{status} || '') ne 'started') {
             $ACTIVE_WORKER = '';
@@ -800,7 +884,6 @@ sub _run_series {
             _log("meter worker series $key retained for stop cleanup");
             return 0;
         }
-        $ACTIVE_WORKER = '';
         return 0 if !ref($status);
         my $snapshot = _snapshot_series($item_number, $which, $key, $status);
         if (!ref($snapshot)) {
@@ -811,11 +894,13 @@ sub _run_series {
             $::LAST_ERROR = $status->{message} || "Series $key did not complete";
             return 0;
         }
+        $ACTIVE_WORKER = '';
         _update_run(sub {
             my ($run) = @_;
             $run->{last_series} = { item => $item_number, phase => $which, key => $key };
         });
     }
+    undef $ACTIVE_SERIES_KEY; undef $ACTIVE_SERIES_PHASE;
     return 1;
 }
 
@@ -1225,7 +1310,10 @@ sub _reset_for_calibration {
     return 0 if !_write_artifact(PGAutomation::item_dir($RUN_ID, $item_number) . '/calibration/reset.json', {
         completed_at => time(),
         responses => \@responses,
-        calibration_session_unconfirmed => scalar(grep { ref($_) eq 'HASH' && $_->{calibration_session_unconfirmed} } @responses) ? JSON::PP::true : JSON::PP::false,
+        calibration_session_unconfirmed => scalar(grep {
+            my $response = $_;
+            grep { ref($_) eq 'HASH' && $_->{calibration_session_unconfirmed} } values %$response
+        } @responses) ? JSON::PP::true : JSON::PP::false,
     });
     return 1;
 }
@@ -1238,22 +1326,27 @@ sub _read_white {
     my $pattern = _api('POST', '/api/pattern', {
         name => 'patch',
         r => $code, g => $code, b => $code,
-        input_max => $max_bpc >= 10 ? 1023 : 255,
+        input_max => $max_bpc == 12 ? 4095 : $max_bpc >= 10 ? 1023 : 255,
         size => int($item->{patch_size} || 10),
         signal_mode => 'sdr',
         signal_range => $range,
     });
     return undef if !$pattern || ($pattern->{status} || '') ne 'ok';
     my $read = _api('POST', '/api/meter/read', {
+        _measurement_options($item),
+        display_type => $item->{display_type} || 'lcd',
+        ccss_override => $item->{ccss_override} || '',
+        refresh_rate => $item->{refresh_rate} || '',
         name => 'panel-light-white',
         patch_name => 'panel-light-white',
         r => $code, g => $code, b => $code,
-        input_max => $max_bpc >= 10 ? 1023 : 255,
+        input_max => $max_bpc == 12 ? 4095 : $max_bpc >= 10 ? 1023 : 255,
         size => int($item->{patch_size} || 10),
+        patch_size => int($item->{patch_size} || 10),
         signal_mode => 'sdr',
         signal_range => $range,
         transport_signal_range => $range,
-        delay_ms => int($item->{delay_ms} || 1000),
+        delay_ms => int($item->{delay_ms} // 1000),
     });
     return undef if !$read || (($read->{status} || '') ne 'measuring' && ($read->{status} || '') ne 'starting' && ($read->{status} || '') ne 'ok');
     my $deadline = time() + 240;
@@ -1270,7 +1363,7 @@ sub _read_white {
 sub _luminance {
     my ($reading) = @_;
     return undef if ref($reading) ne 'HASH';
-    foreach my $key (qw(luminance Y y luminance_nits Y_nits white_luminance)) {
+    foreach my $key (qw(luminance Y luminance_nits Y_nits white_luminance)) {
         return 0 + $reading->{$key} if defined($reading->{$key}) && "$reading->{$key}" =~ /^-?\d+(?:\.\d+)?$/;
     }
     foreach my $key (qw(reading result data)) {
@@ -1315,7 +1408,16 @@ sub _panel_light_stage {
         return 0;
     }
     my $target = 0 + ($panel->{target_luminance} || $item->{target_luminance} || 100);
-    my $current = 0 + ($panel->{initial_value} || (ref($item->{settings}) eq 'HASH' ? $item->{settings}{$key} : 0) || 50);
+    $item->{settings} = {} if ref($item->{settings}) ne 'HASH';
+    my $observed = _observed_settings(_api('POST', '/api/lg/picture-settings', {
+        keys => [$key], picture_mode => _picture_mode($item), signal_mode => _signal($item),
+    }));
+    my $current = int($item->{settings}{$key} // $panel->{initial_value} // $observed->{$key} // 50);
+    $current = 0 if $current < 0; $current = 100 if $current > 100;
+    my $initial = _apply_one_setting($item, $key, $current, 'picture');
+    if (!_response_ok($initial)) { $::LAST_ERROR = $initial->{message} || 'Unable to set initial panel light'; return 0; }
+    $item->{settings}{$key} = $current;
+    _sleep_controlled(2) or return 0;
     my @iterations;
     my $converged = 0;
     my $last_read;
@@ -1325,7 +1427,9 @@ sub _panel_light_stage {
         my $luma = _luminance($reading);
         my $entry = { iteration => $iteration, value => $current, reading => $reading, luminance => $luma };
         if (!defined($luma) || $luma <= 0) {
-            $entry->{result} = 'unverifiable';
+            $entry->{result} = 'measurement-failed';
+            $::LAST_ERROR = 'Panel-light control did not receive a valid white luminance measurement';
+            $stage_failed = 1;
             push @iterations, $entry;
             last;
         }
@@ -1338,12 +1442,18 @@ sub _panel_light_stage {
             push @iterations, $entry;
             last;
         }
-        my $next = $current * $target / $luma;
+        if ($iteration == 8) { push @iterations, $entry; last; }
+        my $next = int(($current || 1) * $target / $luma + 0.5);
         $next = 0 if $next < 0;
         $next = 100 if $next > 100;
+        if ($next == $current) {
+            $entry->{result} = ($current == 0 || $current == 100) ? 'clamped' : 'resolution-limit';
+            push @iterations, $entry;
+            last;
+        }
         $entry->{next_value} = $next;
         push @iterations, $entry;
-        my $result = _apply_one_setting($item, $key, sprintf('%.2f', $next), 'picture');
+        my $result = _apply_one_setting($item, $key, $next, 'picture');
         if (!$result || ($result->{status} || '') ne 'ok') {
             $entry->{result} = 'set-failed';
             $::LAST_ERROR = $result->{message} || "Unable to adjust panel light $key";
@@ -1351,7 +1461,7 @@ sub _panel_light_stage {
             last;
         }
         $current = $next;
-        $item->{settings}{$key} = sprintf('%.2f', $current) if ref($item->{settings}) eq 'HASH';
+        $item->{settings}{$key} = $current;
         my $verified = _read_and_verify_settings($item_number, $item, 'c5-panel-iteration');
         if (!$verified->{verified} && $verified->{verified} ne 'unverifiable') {
             $entry->{result} = 'set-unverified';
@@ -1361,7 +1471,11 @@ sub _panel_light_stage {
         }
         _sleep_controlled(2) or last;
     }
-    my $unreachable = !$converged && @iterations >= 8;
+    my $unreachable = !$converged && ($current == 0 || $current == 100);
+    if (!$converged && !$unreachable && !$stage_failed) {
+        $stage_failed = 1;
+        $::LAST_ERROR = 'Panel light did not reach the luminance tolerance within eight measurements';
+    }
     my $warning = $converged ? undef : ($unreachable ? 'panel-light-target-unreachable' : 'panel-light-unverifiable');
     my $final_check = { verified => 'unverifiable' };
     if (!$stage_failed) {
@@ -1404,7 +1518,7 @@ sub _calibration_greyscale_stage {
     return 0 if !_set_dv_map($item, '2');
     _log('launching LG greyscale AutoCal worker');
     $ACTIVE_WORKER = 'grey';
-    my $grey_start = _api('POST', '/api/meter/lg-autocal', _grey_payload($item));
+    my $grey_start = _start_worker('/api/meter/lg-autocal', '/api/meter/lg-autocal/status', _grey_payload($item));
     if (!$grey_start || ($grey_start->{status} || '') ne 'started') {
         $ACTIVE_WORKER = '';
         $::LAST_ERROR = $grey_start->{message} || 'Unable to start LG greyscale AutoCal';
@@ -1417,10 +1531,16 @@ sub _calibration_greyscale_stage {
         _log('LG greyscale AutoCal worker retained for stop cleanup');
         return 0 if !$copied || $STOP_REQUESTED;
     }
-    $ACTIVE_WORKER = '';
     return 0 if !$copied;
-    return 0 if !ref($grey) || ($grey->{status} || '') ne 'complete';
-    return 1;
+    if (!ref($grey) || ($grey->{status} || '') ne 'complete') {
+        $::LAST_ERROR = $grey->{message} || $grey->{error} || 'Greyscale worker did not complete';
+        return 0;
+    }
+    $ACTIVE_WORKER = '';
+    my $verified = $grey->{ddc_upload_verified} || $grey->{final_1d_lut_upload_verified};
+    return {verified => $verified ? JSON::PP::true : 'unverifiable',
+        final_1d_lut_upload_verified => $grey->{final_1d_lut_upload_verified},
+        ddc_upload_verified => $grey->{ddc_upload_verified}};
 }
 
 sub _calibration_volume_stage {
@@ -1430,7 +1550,7 @@ sub _calibration_volume_stage {
         return 0 if !_set_dv_map($item, '2');
         _log('launching Dolby Vision profile worker');
         $ACTIVE_WORKER = 'dv';
-        my $start = _api('POST', '/api/lg/dv-profile/start', _dv_payload($item));
+        my $start = _start_worker('/api/lg/dv-profile/start', '/api/lg/dv-profile/status', _dv_payload($item));
         if (!$start || ($start->{status} || '') ne 'started') {
             $ACTIVE_WORKER = '';
             $::LAST_ERROR = $start->{message} || 'Unable to start Dolby Vision profile measurement';
@@ -1443,9 +1563,9 @@ sub _calibration_volume_stage {
             _log('Dolby Vision profile worker retained for stop cleanup');
             return 0 if !$copied || $STOP_REQUESTED;
         }
-        $ACTIVE_WORKER = '';
         return 0 if !$copied;
         return 0 if !ref($dv) || ($dv->{status} || '') ne 'complete';
+        $ACTIVE_WORKER = '';
         my $measurements = $dv->{measurements} || $dv->{dv_profile_measurements} || $dv->{result};
         if (ref($measurements) ne 'HASH') {
             $::LAST_ERROR = 'Dolby Vision profile did not return measurements';
@@ -1467,7 +1587,7 @@ sub _calibration_volume_stage {
     }
     _log('launching LG 3D LUT AutoCal worker');
     $ACTIVE_WORKER = '3d';
-    my $start = _api('POST', '/api/meter/lg-3d-autocal/start', _three_d_payload($item, _run(), $item_number));
+    my $start = _start_worker('/api/meter/lg-3d-autocal/start', '/api/meter/lg-3d-autocal/status', _three_d_payload($item, _run(), $item_number));
     if (!$start || ($start->{status} || '') ne 'started') {
         $ACTIVE_WORKER = '';
         $::LAST_ERROR = $start->{message} || 'Unable to start LG 3D LUT AutoCal';
@@ -1486,13 +1606,14 @@ sub _calibration_volume_stage {
         _log('LG 3D LUT AutoCal worker retained for stop cleanup');
         return 0 if !$copied || $STOP_REQUESTED;
     }
-    $ACTIVE_WORKER = '';
     return 0 if !$copied;
     if (!ref($three_d) || ($three_d->{status} || '') ne 'complete') {
         $::LAST_ERROR = $three_d->{message} || '3D LUT AutoCal did not complete';
         return 0;
     }
-    return 1;
+    $ACTIVE_WORKER = '';
+    return {verified => ($three_d->{terminal_commit_verified} || $three_d->{upload_verified})
+        ? JSON::PP::true : 'unverifiable', terminal_commit_verified => $three_d->{terminal_commit_verified}};
 }
 
 sub _close_calibration {
@@ -1505,7 +1626,8 @@ sub _close_calibration {
             signal_mode => _signal($item),
         });
         $status = _api('GET', '/api/lg/status', undef);
-        $closed = ref($status) eq 'HASH' && !$status->{calibration_mode};
+        $closed = ref($status) eq 'HASH' && ($status->{status} || '') eq 'ok'
+            && !$status->{disconnected} && exists($status->{calibration_mode}) && !$status->{calibration_mode};
         last if $closed;
         _sleep_controlled(1) or last;
     }
@@ -1528,7 +1650,8 @@ sub _ensure_calibration_mode_off {
             signal_mode => _signal($item),
         });
         my $status = _api('GET', '/api/lg/status', undef);
-        return 1 if ref($status) eq 'HASH' && !$status->{calibration_mode};
+        return 1 if ref($status) eq 'HASH' && ($status->{status} || '') eq 'ok'
+            && !$status->{disconnected} && exists($status->{calibration_mode}) && !$status->{calibration_mode};
         _sleep_controlled(1) or return 0;
     }
     $::LAST_ERROR = 'LG calibration mode could not be confirmed off';
@@ -1570,7 +1693,8 @@ sub _quality_stage {
         my $limits = ref($quality->{limits}) eq 'HASH' ? $quality->{limits} : {};
         foreach my $key (_series_selection($item, 'post')) {
             my $snapshot = PGAutomation::read_json_file(PGAutomation::item_dir($RUN_ID, $item_number) . "/post/$key.json") || {};
-            my ($average, $max, $count) = _quality_value($snapshot);
+            my ($average, $max, $count, $missing) = PGAutomation::quality_summary(
+                $snapshot, $result->{formula}, $item->{target_white});
             my $limit = ref($limits->{$key}) eq 'HASH' ? $limits->{$key} : {};
             my $miss = (defined($average) && defined($limit->{avg}) && $average > $limit->{avg})
                 || (defined($max) && defined($limit->{max}) && $max > $limit->{max});
@@ -1579,7 +1703,8 @@ sub _quality_stage {
                 maximum => $max,
                 readings => $count,
                 limits => $limit,
-                passed => $miss ? JSON::PP::false : JSON::PP::true,
+                missing_readings => $missing,
+                passed => !$count || $missing ? undef : ($miss ? JSON::PP::false : JSON::PP::true),
             };
             push @{$result->{warnings}}, {
                 code => 'quality-limit',
@@ -1587,6 +1712,9 @@ sub _quality_stage {
                 average => $average,
                 maximum => $max,
             } if $miss;
+            push @{$result->{warnings}}, {code => 'quality-unverifiable', series => $key,
+                message => 'Missing measurements or target metadata; quality was not verified'}
+                if !$count || $missing;
         }
     }
     return undef if !_write_artifact(PGAutomation::item_dir($RUN_ID, $item_number) . '/quality.json', $result);
@@ -1610,7 +1738,7 @@ sub _apply_all {
         $::LAST_ERROR = 'Test fault injected at apply-all';
         return 0;
     }
-    my $check = _apply_and_verify($item_number, $item, 'c9');
+    my $check = _read_and_verify_settings($item_number, $item, 'c9')->{verified};
     return 0 if !$check && $check ne 'unverifiable';
     my $response = _api('POST', '/api/lg/picture-settings/apply-all-inputs', {
         picture_mode => _picture_mode($item),
@@ -1634,7 +1762,7 @@ sub _apply_all {
     }
     $item->{warnings} ||= [];
     push @{$item->{warnings}}, 'apply-all-unverified' if $outcome eq 'unverified';
-    return 1;
+    return {verified => $outcome eq 'confirmed' ? JSON::PP::true : 'unverifiable', outcome => $outcome};
 }
 
 sub _checkpoint_record {
@@ -1686,11 +1814,13 @@ sub _checkpoint_exists {
 sub _last_checkpoint {
     my ($item) = @_;
     return undef if ref($item->{checkpoints}) ne 'ARRAY' || !@{$item->{checkpoints}};
-    return $item->{checkpoints}[-1];
+    my @records = grep { ($_->{status} || '') ne 'skipped' } @{$item->{checkpoints}};
+    return $records[-1];
 }
 
 sub _skip_stage {
     my ($item_number, $item, $name) = @_;
+    return if grep { ($_->{name} || '') eq $name && ($_->{status} || '') eq 'skipped' } @{$item->{checkpoints} || []};
     die($::LAST_ERROR || "Unable to persist skipped checkpoint $name")
         if !ref(_checkpoint_record($item_number, $item, $name, 'unverifiable', { skipped => JSON::PP::true }, 'skipped'));
 }
@@ -1722,7 +1852,7 @@ sub _stage {
     }
     if (!$ok) {
         my $message = $::LAST_ERROR || ($@ || "Stage $name failed");
-        my $resumable = $name eq 'apply-all-done' ? 1 : 0;
+        my $resumable = 1;
         $item->{status} = $resumable ? 'interrupted' : 'failed';
         $item->{failure} = { stage => $name, message => "$message", at => time() };
         $item->{failure}{error_code} = $::LAST_ERROR_CODE if $::LAST_ERROR_CODE;
@@ -1737,6 +1867,11 @@ sub _stage {
         return 0;
     }
     my $verified = ref($ok) eq 'HASH' ? ($ok->{verified} // 1) : 1;
+    if (defined($verified) && $verified eq 'unverifiable') {
+        $item->{warnings} ||= [];
+        push @{$item->{warnings}}, "$name-unverified"
+            if !grep { !ref($_) && $_ eq "$name-unverified" } @{$item->{warnings}};
+    }
     my $evidence = ref($ok) eq 'HASH' ? $ok : { result => $ok };
     my $checkpoint = _checkpoint_record($item_number, $item, $name, $verified, $evidence);
     if (!ref($checkpoint)) {
@@ -1851,24 +1986,37 @@ sub _stop_active {
             _log("stop cleanup $ACTIVE_WORKER process_alive=" . (_worker_process_alive($ACTIVE_WORKER) ? 1 : 0));
         }
     }
+    if ($ACTIVE_WORKER eq 'series' && $ACTIVE_ITEM && $ACTIVE_SERIES_KEY && $ACTIVE_SERIES_PHASE) {
+        my $partial = PGAutomation::read_json_file('/tmp/meter_series.json');
+        _snapshot_series($ACTIVE_ITEM->{item_number} || 0, $ACTIVE_SERIES_PHASE, $ACTIVE_SERIES_KEY, $partial)
+            if ref($partial) eq 'HASH';
+    }
     my $meter_session = _api('POST', '/api/meter/session/stop', {}, 1, 0);
     _log('stop cleanup meter session=' . (($meter_session && ref($meter_session) eq 'HASH' && ($meter_session->{status} || '') eq 'ok') ? 'ok' : 'failed'));
     if ($ACTIVE_ITEM && ref($ACTIVE_ITEM) eq 'HASH') {
         my $item = $ACTIVE_ITEM;
         my $number = $item->{item_number} || 0;
-        my $preserve_failure = ($item->{status} || '') eq 'failed' && !$STOP_REQUESTED;
+        my $preserve_failure = ref($item->{failure}) eq 'HASH' && !$STOP_REQUESTED;
         my $interrupted_stage = $ACTIVE_STAGE || $item->{active_stage} || 'unknown';
-        _api('POST', '/api/lg/calibration-mode', {
+        my $off = _api('POST', '/api/lg/calibration-mode', {
             enabled => JSON::PP::false,
             picture_mode => _picture_mode($item),
             signal_mode => _signal($item),
         }, 1, 0);
-        _api('POST', '/api/lg/autocal/run/end', {
+        my $end = _api('POST', '/api/lg/autocal/run/end', {
             status => 'aborted',
             note => 'Automation stopped',
             run_id => $RUN_ID,
             client_run_token => $TOKEN,
         }, 1, 0);
+        my $status = _api('GET', '/api/lg/status', undef, 1, 0);
+        my $closed = _response_ok($off) && _response_ok($end) && _response_ok($status)
+            && !$status->{disconnected} && exists($status->{calibration_mode}) && !$status->{calibration_mode};
+        _write_artifact(PGAutomation::item_dir($RUN_ID, $number) . '/calibration/stop-cleanup.json', {
+            verified => $closed ? JSON::PP::true : JSON::PP::false,
+            calibration_mode => $off, run_end => $end, tv_status => $status,
+        });
+        push @{$item->{warnings}}, 'stop-cleanup-unverified' if !$closed;
         my $visible = _api('POST', '/api/pattern', {
             name => 'gray50',
             signal_mode => _signal($item),
@@ -1906,6 +2054,7 @@ sub _restore_hazards {
     my $restore = ref($item->{hazard_restore}) eq 'HASH' ? $item->{hazard_restore} : {};
     foreach my $key (keys %$restore) {
         my $record = $restore->{$key};
+        next if $key eq 'energySaving' || $key eq 'aiPicture';
         my ($value,$category);
         if (ref($record) eq 'HASH') {
             $value = $record->{value};
@@ -1915,7 +2064,12 @@ sub _restore_hazards {
             $category = _setting_category($item, $key);
         }
         next if !defined($value);
-        _apply_one_setting($item, $key, $value, $category);
+        my $result = _api('POST', '/api/lg/picture-settings/set', {
+            settings => { $key => $value }, category => $category,
+            picture_mode => _picture_mode($item), signal_mode => _signal($item),
+        }, 1, 0);
+        _log("Hazard restoration failed for $key: " . ($result->{message} || 'no response'))
+            if !_response_ok($result);
     }
 }
 
@@ -1985,8 +2139,14 @@ sub _resume_calibration_artifacts_ok {
 
 sub _prepare_resume {
     my ($item_number, $item) = @_;
+    die($::LAST_ERROR || 'Unable to restore the queued signal format') if !_apply_signal($item);
     my $last = _last_checkpoint($item);
     return if !ref($last);
+    my $failure_stage = ref($item->{failure}) eq 'HASH' ? ($item->{failure}{stage} || '') : '';
+    if ($item->{drift_recovery_pending} || $failure_stage =~ /^(?:reset-and-reapply-verified|panel-light-settled|greyscale-done|volume-done|session-closed)$/) {
+        _drop_resume_checkpoints($item, { map { $_ => 1 } qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete) });
+        return;
+    }
     my $name = $last->{name} || '';
     if (($last->{status} || '') ne 'done') {
         if ($name eq 'apply-all-done') {
@@ -2035,8 +2195,8 @@ sub _prepare_resume {
                 'reset-and-reapply-verified' => [qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete)],
                 'panel-light-settled' => [qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete)],
                 'session-closed' => [qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete)],
-                'apply-all-done' => [qw(apply-all-done post-readings-done item-complete)],
-                'post-readings-done' => [qw(post-readings-done item-complete)],
+                'apply-all-done' => [qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete)],
+                'post-readings-done' => [qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete)],
             );
             _drop_resume_checkpoints($item, { map { $_ => 1 } @{$drop_from{$name} || []} });
         }
@@ -2048,11 +2208,6 @@ sub _run_item {
     $ACTIVE_ITEM = $item;
     $item->{item_number} = $item_number;
     _ensure_lg_connection();
-    if (($item->{status} || '') eq 'interrupted'
-        && ref($item->{failure}) eq 'HASH'
-        && ($item->{failure}{stage} || '') eq 'apply-all-done') {
-        delete $item->{failure};
-    }
     $item->{status} = 'running';
     my $has_prior_checkpoint = ref($item->{checkpoints}) eq 'ARRAY' && @{$item->{checkpoints}};
     if ($has_prior_checkpoint) {
@@ -2080,6 +2235,7 @@ sub _run_item {
         }
         _prepare_resume($item_number, $item);
     }
+    delete $item->{failure};
     _update_item_snapshot($item_number, $item);
     _update_run(sub {
         my ($run) = @_;
@@ -2133,7 +2289,7 @@ sub _run_item {
     }
     return 0 if _pause_after_checkpoint();
     if ($stages->{calibration}) {
-        my $drift_recovery_attempts = 0;
+        my $drift_recovery_attempts = $item->{drift_recovery_attempts} || 0;
         while (1) {
             return 0 if !_stage($item_number, $item, 'reset-and-reapply-verified', sub {
                 die($::LAST_ERROR || 'Calibration reset failed') if !_reset_for_calibration($item_number, $item);
@@ -2148,23 +2304,27 @@ sub _run_item {
                 die($::LAST_ERROR || 'Calibration mode did not close before panel-light control')
                     if !_ensure_calibration_mode_off($item);
                 die($::LAST_ERROR || 'Panel-light stage failed') if !_panel_light_stage($item_number, $item);
-                return 1;
+                my $evidence = PGAutomation::read_json_file(PGAutomation::item_dir($RUN_ID, $item_number) . '/panel-light.json') || {};
+                return {verified => $evidence->{settings_verified} // $evidence->{verified} // 'unverifiable',
+                    panel_light => $evidence};
             });
             return 0 if _pause_after_checkpoint();
             return 0 if !_stage($item_number, $item, 'greyscale-done', sub {
-                if (!_calibration_greyscale_stage($item_number, $item)) {
+                my $result = _calibration_greyscale_stage($item_number, $item);
+                if (!$result) {
                     return 0 if $STOP_REQUESTED;
                     die($::LAST_ERROR || 'Greyscale calibration failed');
                 }
-                return 1;
+                return $result;
             });
             return 0 if _pause_after_checkpoint();
             return 0 if !_stage($item_number, $item, 'volume-done', sub {
-                if (!_calibration_volume_stage($item_number, $item)) {
+                my $result = _calibration_volume_stage($item_number, $item);
+                if (!$result) {
                     return 0 if $STOP_REQUESTED;
                     die($::LAST_ERROR || 'Volume calibration failed');
                 }
-                return 1;
+                return $result;
             });
             return 0 if _pause_after_checkpoint();
             my $settings_drifted = 0;
@@ -2176,6 +2336,7 @@ sub _run_item {
                 my $verified = _read_and_verify_settings($item_number, $item, 'c8');
                 if (!$verified->{verified} && $verified->{verified} ne 'unverifiable') {
                     $settings_drifted = 1;
+                    $item->{drift_recovery_pending} = 1;
                     my $reapplied = _apply_and_verify($item_number, $item, 'c8-recovery');
                     die($::LAST_ERROR || 'Settings could not be restored after calibration drift')
                         if !$reapplied && $reapplied ne 'unverifiable';
@@ -2191,7 +2352,6 @@ sub _run_item {
                 }
                 return { verified => $verified->{verified}, calibration_status => $status };
             });
-            return 0 if _pause_after_checkpoint();
             last if !$settings_drifted;
             if ($drift_recovery_attempts++ >= 1) {
                 $::LAST_ERROR = 'LG settings drifted after the allowed c4-c8 recovery cycle';
@@ -2207,6 +2367,8 @@ sub _run_item {
                 return 0;
             }
             my %repeat = map { $_ => 1 } qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed);
+            $item->{drift_recovery_attempts} = $drift_recovery_attempts;
+            delete $item->{drift_recovery_pending};
             $item->{checkpoints} = [grep {
                 ref($_) eq 'HASH' && !$repeat{$_->{name} || ''}
             } @{$item->{checkpoints} || []}];
@@ -2214,11 +2376,14 @@ sub _run_item {
             $item->{checkpoint_status} = 'done';
             _update_item_snapshot($item_number, $item);
             _update_run(sub { $_[0]{items}[$item_number] = $item if ref($_[0]{items}) eq 'ARRAY'; });
+            return 0 if _pause_after_checkpoint();
         }
+        return 0 if _pause_after_checkpoint();
         if ($stages->{apply_all}) {
             return 0 if !_stage($item_number, $item, 'apply-all-done', sub {
-                die($::LAST_ERROR || 'Apply-to-all failed') if !_apply_all($item_number, $item);
-                return 1;
+                my $result = _apply_all($item_number, $item);
+                die($::LAST_ERROR || 'Apply-to-all failed') if !$result;
+                return $result;
             });
         } else {
             _skip_stage($item_number, $item, 'apply-all-done');
@@ -2234,7 +2399,7 @@ sub _run_item {
             die($::LAST_ERROR || 'Calibration mode did not close before post-readings')
                 if !_ensure_calibration_mode_off($item);
             die('Unable to switch DV to Absolute map') if !_set_dv_map($item, '1');
-            my $verified = _apply_and_verify($item_number, $item, 'c10');
+            my $verified = _read_and_verify_settings($item_number, $item, 'c10')->{verified};
             die($::LAST_ERROR || 'Settings did not verify before post-readings') if !$verified && $verified ne 'unverifiable';
             die($::LAST_ERROR || 'Post-readings failed') if !_run_series($item_number, $item, 'post');
             my $quality = _quality_stage($item_number, $item);
@@ -2290,10 +2455,29 @@ sub _main {
     }));
     die 'Unable to claim automation execution' if !_write_execution();
     _heartbeat(1);
+    if (_control()->{request} eq 'stop') {
+        $STOP_REQUESTED = 1;
+        my $number = $run->{active_item};
+        $number = $number->{item_number} if ref($number) eq 'HASH';
+        if (defined($number) && ref($run->{items}[$number]) eq 'HASH') {
+            $ACTIVE_ITEM = $run->{items}[$number];
+            $ACTIVE_ITEM->{item_number} = $number;
+            $ACTIVE_STAGE = $run->{active_stage} || $ACTIVE_ITEM->{active_stage} || '';
+            my %workers = ('greyscale-done'=>'grey','volume-done'=>_signal($ACTIVE_ITEM) eq 'dv'?'dv':'3d',
+                'pre-readings-done'=>'series','post-readings-done'=>'series');
+            $ACTIVE_WORKER = $workers{$ACTIVE_STAGE} || '';
+            if (ref($run->{active_series}) eq 'HASH') {
+                ($ACTIVE_SERIES_KEY, $ACTIVE_SERIES_PHASE) = @{$run->{active_series}}{qw(key phase)};
+            }
+        }
+        _stop_active();
+        _restore_run_hazards($run, $run->{items});
+        _finish('stopped');
+        return;
+    }
     _ensure_lg_connection();
     my $readiness = _api('POST', '/api/automation/readiness', {
-        queue => $run->{queue_snapshot},
-        items => $run->{queue_snapshot}{items},
+        items => [grep { ($_->{status} || '') !~ /^complete/ } @{$run->{items} || []}],
     });
     if (!$readiness->{ready}) {
         _finish('failed', { stage => 'readiness', message => $readiness->{message} || 'Automation readiness failed' });
@@ -2303,8 +2487,15 @@ sub _main {
     my $items = ref($run->{items}) eq 'ARRAY' ? $run->{items}
         : ref($run->{queue_snapshot}{items}) eq 'ARRAY' ? $run->{queue_snapshot}{items} : [];
     for (my $i = 0; ; $i++) {
-        my $latest_items = _run()->{items};
-        $items = $latest_items if ref($latest_items) eq 'ARRAY';
+        my $claimed = _update_run(sub {
+            my ($state) = @_;
+            if ($i >= @{$state->{items}}) { $state->{status} = 'completing'; return; }
+            return if ($state->{items}[$i]{status} || '') =~ /^complete/;
+            $state->{active_item} = $i;
+            $state->{items}[$i]{status} = 'running';
+        });
+        die 'Unable to claim next queue item' if !ref($claimed);
+        $items = $claimed->{items};
         last if $i >= @$items;
         _refresh_control();
         last if $STOP_REQUESTED;
@@ -2328,6 +2519,8 @@ sub _main {
     }
     if (($latest->{status} || '') eq 'interrupted') {
         my $failure_stage = ref($latest->{failure}) eq 'HASH' ? ($latest->{failure}{stage} || '') : '';
+        _stop_active() if $failure_stage ne 'apply-all-done' && ($ACTIVE_WORKER || ref($ACTIVE_ITEM) eq 'HASH');
+        _restore_run_hazards($latest, $items);
         _park_interrupted($latest->{active_stage} || $failure_stage || 'interrupted');
         return;
     }
@@ -2340,7 +2533,6 @@ sub _main {
     _restore_run_hazards($latest, $items);
     _update_run(sub {
         my ($state) = @_;
-        $state->{items} = $items;
         $state->{active_item} = undef;
         $state->{active_stage} = '';
     });

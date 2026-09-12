@@ -944,8 +944,7 @@ sub webui_route_device_lane (@) {
  # them on the general lane so a slow LG command cannot make the live card
  # report the TV lane as unavailable. Writes and readiness stay on the TV lane
  # because they coordinate the LG automation lock.
- if($method eq "GET" && ($path eq "/api/automation/runs" || $path eq "/api/automation/runs/current"
-  || $path=~m{^/api/automation/runs/[A-Za-z0-9][A-Za-z0-9_.-]*(?:/artifact(?:/.*)?|/items/\d+/.*)?$})) {
+ if($method eq "GET" && $path=~m{^/api/automation(?:/|$)}) {
   return "";
  }
  return "tv" if($path=~m{^/api/automation(?:/|$)});
@@ -12931,7 +12930,7 @@ sub webui_automation_error (@) {
 
 sub webui_automation_active_status (@) {
  my $status=shift||"";
- return ($status eq "starting" || $status eq "running" || $status eq "paused" || $status eq "stopping" || $status eq "interrupted") ? 1 : 0;
+ return ($status eq "starting" || $status eq "running" || $status eq "paused" || $status eq "stopping" || $status eq "completing" || $status eq "interrupted") ? 1 : 0;
 }
 
 sub webui_automation_read_execution (@) {
@@ -13020,14 +13019,14 @@ sub webui_automation_read_run (@) {
  $run_id=PGAutomation::safe_component($run_id);
  return undef if($run_id eq "");
  my $run=PGAutomation::read_json_file(PGAutomation::run_dir($run_id)."/run.json");
+ $run->{active_item}=$run->{active_item}{item_number} if(ref($run) eq "HASH" && ref($run->{active_item}) eq "HASH");
  $run->{id}=$run_id if(ref($run) eq "HASH" && (!defined($run->{id}) || $run->{id} eq ""));
  return $run if(ref($run) eq "HASH");
  return undef;
 }
 
 sub webui_automation_run (@) {
- my ($run_id)=@_;
- my $include_series=shift ? 1 : 0;
+ my ($run_id,$include_series)=@_;
  $run_id=PGAutomation::safe_component($run_id);
  return undef if($run_id eq "");
  my $dir=PGAutomation::run_dir($run_id);
@@ -13037,11 +13036,9 @@ sub webui_automation_run (@) {
  $run->{id}=$run_id if(!defined($run->{id}) || $run->{id} eq "");
  my @items;
  my $raw_items=ref($run->{items}) eq "ARRAY" ? $run->{items} : [];
- my @item_numbers=PGAutomation::list_dirs($dir."/items");
- my $count=@$raw_items > @item_numbers ? scalar(@$raw_items) : scalar(@item_numbers);
+ my $count=scalar(@$raw_items);
  for(my $i=0;$i<$count;$i++) {
-  my $item=PGAutomation::read_json_file($dir."/items/$i/item.json");
-  $item=$raw_items->[$i] if(ref($item) ne "HASH" && ref($raw_items->[$i]) eq "HASH");
+  my $item=PGAutomation::clone($raw_items->[$i]);
   $item={} if(ref($item) ne "HASH");
   $item->{item_number}=$i;
   if($include_series) {
@@ -13233,7 +13230,7 @@ sub webui_automation_normalize_item (@) {
  foreach my $phase (qw(pre_series post_series)) {
   my $list=$item->{$phase};
   $list=$item->{series} if(ref($list) ne "ARRAY");
-  $list=[qw(greyscale-21 colors-30 saturations-24)] if(ref($list) ne "ARRAY" || !@$list);
+  $list=[qw(greyscale-21 colors-30 saturations-24)] if(ref($list) ne "ARRAY");
   my %valid=map { $_=>1 } qw(greyscale-21 colors-30 saturations-24);
   my @clean=grep { defined($_) && $valid{$_} } @$list;
   $item->{$phase}=\@clean;
@@ -13317,12 +13314,12 @@ sub webui_automation_readiness_data (@) {
  my $meter_detected=$meter->{detected} ? 1 : 0;
  my $meter_simulated=$meter->{simulated} ? 1 : 0;
  $check->($meter_detected && !$meter_simulated,"meter-detected",$meter_simulated ? "The simulated meter cannot run calibration" : $meter_detected ? "Meter detected" : "Connect a physical meter before starting automation");
- # meter_session.sh is a persistent, reusable session. A live session by
- # itself is not an active operation; guided workers and meter series are
- # the operation locks that must prevent a new automation run.
  my $guided_busy=(&webui_meter_series_alive() || &webui_meter_lg_autocal_running() || &webui_meter_lg_3d_autocal_running() || &webui_meter_lg_dv_profile_running()) ? 1 : 0;
  my $session_alive=&webui_meter_session_alive() ? 1 : 0;
- my $busy=$guided_busy ? 1 : 0;
+ my $execution=&webui_automation_read_execution();
+ my $owns_session=ref($execution) eq "HASH" && ($payload->{automation_token}||"") ne ""
+  && ($payload->{automation_token}||"") eq ($execution->{token}||"");
+ my $busy=$guided_busy || ($session_alive && !$owns_session) ? 1 : 0;
  my $meter_message=$busy ? "Stop the active meter operation before starting automation" : ($session_alive ? "Meter session is reusable" : "Meter is idle");
  $check->(!$busy,"meter-idle",$meter_message);
  my $free_mb;
@@ -13344,10 +13341,16 @@ sub webui_automation_readiness_data (@) {
   $check->($mode_ok,"item-$index-mode","Picture mode $item->{picture_mode} matches $signal",$index);
   my $stage_count=grep { $item->{stages}{$_} } qw(pre_readings calibration post_readings);
   $check->($stage_count>0,"item-$index-stages","At least one stage is enabled",$index);
+  foreach my $phase (qw(pre post)) {
+   $check->(@{$item->{$phase."_series"}} > 0,"item-$index-$phase-series","Choose at least one $phase readings sweep",$index)
+    if($item->{stages}{$phase."_readings"});
+  }
   my $settings=ref($item->{settings}) eq "HASH" ? $item->{settings} : {};
   my @keys=sort keys %$settings;
   push @keys,"pictureMode" if($item->{picture_mode} ne "");
   my $panel_key=$item->{panel_light}{key}||"";
+  $check->($panel_key eq "" || $panel_key=~/^(?:backlight|oledLight|oledPixelBrightness)$/,
+   "item-$index-panel-key","Panel-light control must be backlight, OLED light or OLED pixel brightness",$index);
   push @keys,$panel_key if($panel_key ne "" && !grep { $_ eq $panel_key } @keys);
   my $read_response=PGAutomation::decode_json(eval { &webui_lg_picture_settings(&webui_automation_json({
    keys=>\@keys,picture_mode=>$item->{picture_mode},signal_mode=>$signal,category=>"picture",
@@ -13397,6 +13400,8 @@ sub webui_automation_readiness_data (@) {
   }
   if($item->{panel_light}{policy} eq "target") {
    $check->($signal eq "sdr","item-$index-panel-light-signal","target luminance not supported for this format",$index);
+   $check->($item->{stages}{calibration},"item-$index-panel-light-calibration","Target panel light requires a calibration stage",$index);
+   $item->{target_luminance}=$item->{panel_light}{target_luminance};
   }
   my @hazards;
   my %hazard_categories=(
@@ -13437,6 +13442,7 @@ sub webui_automation_readiness_data (@) {
  foreach my $item (@prepared) {
   foreach my $hazard (@{$item->{hazards}||[]}) {
    next if(ref($hazard) ne "HASH" || !$hazard->{controllable} || !defined($hazard->{key}) || !defined($hazard->{value}));
+   next if($hazard->{key} eq "energySaving" || $hazard->{key} eq "aiPicture");
    $hazard_restore{$hazard->{key}}={value=>$hazard->{value},category=>$hazard->{category}||"picture"}
     if(!exists($hazard_restore{$hazard->{key}}));
   }
@@ -13570,7 +13576,7 @@ sub webui_automation_control (@) {
  $run_id=PGAutomation::safe_component($run_id);
  return &webui_automation_error("Invalid run id","invalid-id") if($run_id eq "");
  $action=lc($action||"");
- my $run=&webui_automation_run($run_id);
+ my $run=&webui_automation_read_run($run_id);
  return &webui_automation_error("Automation run not found","not-found") if(ref($run) ne "HASH");
  if($action eq "pause") {
   return &webui_automation_error("Run is not active","not-active") if(($run->{status}||"") ne "running");
@@ -13630,35 +13636,50 @@ sub webui_automation_control (@) {
  return &webui_automation_error("Unknown automation control action","invalid-action");
 }
 
+sub webui_automation_first_pending (@) {
+ my ($run)=@_;
+ my $items=$run->{items}||[];
+ my $first=0;
+ for(my $i=0;$i<@$items;$i++) {
+  $first=$i+1 if(($items->[$i]{status}||"queued") ne "queued" || @{$items->[$i]{checkpoints}||[]});
+ }
+ my $active=$run->{active_item};
+ $active=$active->{item_number} if(ref($active) eq "HASH");
+ $first=$active+1 if(defined($active) && $active=~/^\d+$/ && $active+1>$first);
+ return $first;
+}
+
 sub webui_automation_edit_run (@) {
  my ($run_id,$payload)=@_;
- my $run=&webui_automation_run($run_id);
- return &webui_automation_error("Automation run not found","not-found") if(ref($run) ne "HASH");
- return &webui_automation_error("Run is already finished","not-editable") if(($run->{status}||"") =~ /^(?:complete|failed|stopped)$/);
- return &webui_automation_error("A replacement item list is required","invalid-items") if(ref($payload->{items}) ne "ARRAY");
- my $active=defined($run->{active_item}) ? int($run->{active_item}) : scalar(@{$run->{items}||[]});
- my $old=$run->{items}||[];
- my $new=[map { &webui_automation_normalize_item($_) } @{$payload->{items}}];
- for(my $i=0;$i<@$new;$i++) {
- if($i<=$active && ref($old->[$i]) eq "HASH") {
-   my $old_id=$old->[$i]{id}||""; my $new_id=$new->[$i]{id}||"";
-   return &webui_automation_error("Completed or active queue items cannot be edited","item-locked") if($old_id ne $new_id || PGAutomation::encode_json($old->[$i]) ne PGAutomation::encode_json($new->[$i]));
-  } elsif($i>$active) {
-   $new->[$i]{recheck}=1;
-  }
- }
+ $run_id=PGAutomation::safe_component($run_id);
+ return &webui_automation_error("Invalid run id","invalid-id") if($run_id eq "");
+ return &webui_automation_error("A pending item list is required","invalid-items") if(ref($payload->{items}) ne "ARRAY");
+ my $failure="";
  my ($updated,$updated_run,$update_error)=PGAutomation::with_lock(PGAutomation::run_dir($run_id)."/run.json",sub {
   my ($current)=@_;
-  return undef if(ref($current) ne "HASH");
-  $current->{items}=$new;
-  $current->{queue_snapshot}{items}=$new if(ref($current->{queue_snapshot}) eq "HASH");
+  if(ref($current) ne "HASH") { $failure="Automation run not found"; return undef; }
+  if(($current->{status}||"") !~ /^(?:starting|running|paused|interrupted)$/) { $failure="Run is already finished"; return undef; }
+  my $first=&webui_automation_first_pending($current);
+  my $requested=$payload->{first_pending};
+  if(!defined($requested) || $requested!~/^\d+$/ || $requested!=$first) {
+   $failure="The active item changed. Reload pending items before saving."; return undef;
+  }
+  my @pending=map { &webui_automation_normalize_item($_) } @{$payload->{items}};
+  foreach my $item (@pending) {
+   delete @$item{qw(item_number status checkpoints checkpoint checkpoint_status active_stage stage_started_at failure warnings hazard_restore drift_recovery_attempts drift_recovery_pending)};
+   $item->{status}="queued"; $item->{recheck}=1;
+  }
+  splice(@{$current->{items}},$first,scalar(@{$current->{items}})-$first,@pending);
+  for(my $i=$first;$i<@{$current->{items}};$i++) {
+   my $path=PGAutomation::item_dir($run_id,$i)."/item.json";
+   my ($saved)=PGAutomation::with_lock($path,sub { return $current->{items}[$i]; });
+   die "Unable to save pending item" if(!$saved);
+  }
   $current->{edited_at}=PGAutomation::now();
   return $current;
  });
- return &webui_automation_error("Unable to update automation run".($update_error ? ": $update_error" : ""),"write-failed") if(!$updated || ref($updated_run) ne "HASH");
- $run=$updated_run;
- return &webui_automation_error("Unable to write queued item manifests","write-failed") if(!&webui_automation_write_item_files($run_id,$new));
- return &webui_automation_json({status=>"ok",run=>&webui_automation_public_run($run)});
+ return &webui_automation_error($failure||$update_error||"Unable to update run","item-locked") if(!$updated || ref($updated_run) ne "HASH");
+ return &webui_automation_json({status=>"ok",run=>&webui_automation_public_run($updated_run)});
 }
 
 sub webui_automation_delete_run (@) {
@@ -13682,7 +13703,7 @@ sub webui_automation_artifact (@) {
  $run_id=PGAutomation::safe_component($run_id);
  return undef if($run_id eq "" || !defined($relative) || $relative eq "");
  my @parts=split(m{/},$relative,-1);
- return undef if(!@parts || grep { $_ eq "" || !PGAutomation::safe_component($_) || $_ eq "." || $_ eq ".." } @parts);
+ return undef if(!@parts || grep { PGAutomation::safe_component($_) eq "" || $_ eq "." || $_ eq ".." } @parts);
  my $path=PGAutomation::run_dir($run_id)."/".join("/",@parts);
  return undef if(!-f $path || -l $path);
  my $data=PGAutomation::read_raw($path);
@@ -13697,13 +13718,14 @@ sub webui_automation_boot_recover (@) {
   my $run_path=PGAutomation::run_dir($run_id)."/run.json";
   my ($recovery_ok,$recovered,$recovery_error)=PGAutomation::with_lock($run_path,sub {
    my ($run)=@_;
-   return undef if(ref($run) ne "HASH" || ($run->{status}||"") ne "running" && ($run->{status}||"") ne "starting");
+   return undef if(ref($run) ne "HASH" || ($run->{status}||"") !~ /^(?:running|starting|completing|stopping)$/);
    my $pid=$run->{runner_pid}||0;
    return undef if PGAutomation::pid_is_live($pid,"pgen_automation_runner.pl");
    my $now=PGAutomation::now();
    $run->{status}="interrupted"; $run->{interrupted_at}=$now; $run->{runner_pid}=0;
    $run->{failure}={stage=>$run->{active_stage}||"daemon-restarted",error_code=>"daemon-restarted",message=>"The daemon restarted while this automation run was active",at=>$now};
-   if(defined($run->{active_item}) && ref($run->{items}[$run->{active_item}]) eq "HASH") {
+   $run->{active_item}=$run->{active_item}{item_number} if(ref($run->{active_item}) eq "HASH");
+   if(defined($run->{active_item}) && $run->{active_item}=~/^\d+$/ && ref($run->{items}[$run->{active_item}]) eq "HASH") {
     my $number=int($run->{active_item});
     my $item=$run->{items}[$number];
     $item->{status}="interrupted"; $item->{failure}=$run->{failure};
@@ -13723,7 +13745,7 @@ sub webui_automation_boot_recover (@) {
   my ($execution)=@_;
   return undef if(ref($execution) ne "HASH" || !&webui_automation_active_status($execution->{status}));
   my $run=&webui_automation_run($execution->{run_id});
-  if(ref($run) eq "HASH" && ($run->{status}||"") =~ /^(?:running|starting)$/) {
+  if(ref($run) eq "HASH" && ($run->{status}||"") =~ /^(?:running|starting|completing|stopping)$/) {
    my $pid=$run->{runner_pid}||$execution->{pid}||0;
    return undef if PGAutomation::pid_is_live($pid,"pgen_automation_runner.pl");
   }
@@ -13760,6 +13782,11 @@ sub webui_automation_api (@) {
   return &webui_automation_json({status=>"ok",execution=>$public_execution,run=>ref($run) eq "HASH" ? &webui_automation_public_run($run) : undef});
  }
  if($path=~m{^/api/automation/runs/([^/]+)/edit$} && $method eq "POST") { return &webui_automation_edit_run($1,$payload); }
+ if($path=~m{^/api/automation/runs/([^/]+)/edit$} && $method eq "GET") {
+  my $run=&webui_automation_read_run($1);
+  return &webui_automation_error("Automation run not found","not-found") if(ref($run) ne "HASH");
+  return &webui_automation_json({status=>"ok",items=>$run->{items},first_pending=>&webui_automation_first_pending($run)});
+ }
  if($path=~m{^/api/automation/runs/([^/]+)/delete$} && $method eq "POST") { return &webui_automation_delete_run($1); }
  if($path=~m{^/api/automation/runs/([^/]+)/control/(pause|resume|stop)$} && $method eq "POST") { return &webui_automation_control($1,$2); }
  if($path=~m{^/api/automation/runs/(pause|resume|stop)$} && $method eq "POST") { return &webui_automation_control($payload->{run_id},$1); }

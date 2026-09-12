@@ -76,7 +76,7 @@ sub lg_automation_guard_json (@) {
  return "" if(ref($execution) ne "HASH");
  my $status=$execution->{status}||"";
  return "" if($status ne "starting" && $status ne "running"
-  && $status ne "paused" && $status ne "stopping" && $status ne "interrupted");
+  && $status ne "paused" && $status ne "stopping" && $status ne "completing" && $status ne "interrupted");
  my $payload=eval { JSON::PP::decode_json($body||"") };
  $payload={} if(ref($payload) ne "HASH");
  my $token=$payload->{automation_token}||"";
@@ -3425,7 +3425,7 @@ sub webui_lg_api (@) {
  my $path=shift;
  my $method=shift;
  my $body=shift;
- if($method eq "POST") {
+ if($method eq "POST" && $path ne "/api/lg/picture-settings") {
   my $automation_guard=&lg_automation_guard_json($body);
   return $automation_guard if($automation_guard ne "");
  }
