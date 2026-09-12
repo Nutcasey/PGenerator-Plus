@@ -25,5 +25,7 @@ jobs:
           perl -c usr/sbin/pgenerator-lg
           perl -c usr/share/PGenerator/lg.pm
           perl -c usr/share/PGenerator/webui.pm
+          perl -c usr/share/PGenerator/PGAutomation.pm
+          perl -c usr/bin/pgen_automation_runner.pl
       - name: Run the test suite
         run: prove -v t/

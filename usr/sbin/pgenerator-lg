@@ -1305,7 +1305,7 @@ sub lg_current_input_info (@) {
 }
 
 sub lg_picture_get_workflow (@) {
- my ($ip,$client_key,$connect_timeout,$keys,$requested_picture_mode,$tv_input,$force_ddc_white_balance,$signal_mode,$include_current_input)=@_;
+ my ($ip,$client_key,$connect_timeout,$keys,$requested_picture_mode,$tv_input,$force_ddc_white_balance,$signal_mode,$include_current_input,$category)=@_;
  $keys=[] if(ref($keys) ne "ARRAY");
  $requested_picture_mode="" if(!defined($requested_picture_mode));
  $signal_mode="" if(!defined($signal_mode));
@@ -1314,6 +1314,7 @@ sub lg_picture_get_workflow (@) {
  $tv_input=lc($tv_input);
  $tv_input="" if($tv_input !~ /^hdmi[1-4](?:_pc)?$/);
  $force_ddc_white_balance=$force_ddc_white_balance ? 1 : 0;
+ $category="picture" if(!defined($category) || $category eq "" || $category !~ /\A[A-Za-z0-9$_.-]{1,200}\z/);
  my $auth=&lg_authenticated_session($ip,$client_key,$connect_timeout,$DEFAULT_PAIR_TIMEOUT,0);
  return $auth if(($auth->{"status"}||"") ne "ok");
  my $session=$auth->{"session"};
@@ -1408,14 +1409,15 @@ sub lg_picture_get_workflow (@) {
 	  my $allowed_response={};
 	  if(@allowed) {
 	   my $allowed_settings;
-	   ($allowed_settings,$allowed_response)=$get_supported_settings->(\@allowed,$connect_timeout + 2);
+   ($allowed_settings,$allowed_response)=$get_supported_settings->(\@allowed,$connect_timeout + 2,$category);
 	   if(ref($allowed_settings) eq "HASH") {
 	    %native_settings=%{$allowed_settings};
 	    foreach my $key (keys(%{$allowed_settings})) {
 	     $picture_settings->{$key}=$allowed_settings->{$key};
 	    }
 	   }
-	   $picture_settings=$merge_scoped_panel_light_settings->($picture_settings,$picture_mode);
+   $picture_settings=$merge_scoped_panel_light_settings->($picture_settings,$picture_mode)
+    if($category eq "picture");
 	  }
 	  foreach my $key (@{$keys}) {
 	   next if(!exists($picture_settings->{$key}));
@@ -1439,8 +1441,9 @@ sub lg_picture_get_workflow (@) {
    message => "LG white-balance settings are represented through PGenerator DDC state on this LG generation.",
   });
  }
- my ($supported_settings,$response)=$get_supported_settings->($keys,$connect_timeout + 2);
- $supported_settings=$merge_scoped_panel_light_settings->($supported_settings,$requested_picture_mode);
+ my ($supported_settings,$response)=$get_supported_settings->($keys,$connect_timeout + 2,$category);
+ $supported_settings=$merge_scoped_panel_light_settings->($supported_settings,$requested_picture_mode)
+  if($category eq "picture");
  &websocket_close($session);
  return &json_error("LG TV did not return picture settings",{ ip => $ip }) if(ref($response) ne "HASH");
  my ($get_failed,$get_failure_message)=&response_is_app_failure($response);
@@ -6329,7 +6332,7 @@ sub lg_ddc_1d_white_balance_set (@) {
 }
 
 sub lg_picture_set_workflow (@) {
- my ($ip,$client_key,$connect_timeout,$settings,$readback_keys,$tv_input,$keep_calibration_mode,$fallback_picture_mode,$calibration_mode_active,$reset_ddc_baseline,$verify_ddc_upload,$force_ddc_white_balance,$signal_mode)=@_;
+ my ($ip,$client_key,$connect_timeout,$settings,$readback_keys,$tv_input,$keep_calibration_mode,$fallback_picture_mode,$calibration_mode_active,$reset_ddc_baseline,$verify_ddc_upload,$force_ddc_white_balance,$signal_mode,$category)=@_;
  $keep_calibration_mode=$keep_calibration_mode ? 1 : 0;
  $calibration_mode_active=$calibration_mode_active ? 1 : 0;
  $reset_ddc_baseline=$reset_ddc_baseline ? 1 : 0;
@@ -6342,6 +6345,7 @@ sub lg_picture_set_workflow (@) {
  $signal_mode="" if(!defined($signal_mode));
  $signal_mode=lc($signal_mode);
  $signal_mode="" if($signal_mode ne "sdr" && $signal_mode ne "hdr10" && $signal_mode ne "hlg" && $signal_mode ne "dv");
+ $category="picture" if(!defined($category) || $category eq "" || $category !~ /\A[A-Za-z0-9$_.-]{1,200}\z/);
  $tv_input=lc($tv_input);
  $tv_input="" if($tv_input !~ /^hdmi[1-4](?:_pc)?$/);
  return &json_error("No picture settings were provided",{ ip => $ip }) if(!%{$settings});
@@ -6583,11 +6587,11 @@ sub lg_picture_set_workflow (@) {
  }
 
  my $set_payload={
-	  category => "picture",
+	  category => $category,
 	  settings => $settings_to_apply,
 	 };
  my $panel_light_category=($panel_light_only && $tv_input ne "" && $active_picture_mode ne "") ? "picture\$".$tv_input.".".$active_picture_mode.".2d.x" : "";
- $set_payload->{"dimension"}={ pictureMode => $active_picture_mode } if($active_picture_mode ne "" && !$panel_light_only);
+ $set_payload->{"dimension"}={ pictureMode => $active_picture_mode } if($category eq "picture" && $active_picture_mode ne "" && !$panel_light_only);
 
  &diag_log_append("picture_set:request",{
   ip => $ip,
@@ -6891,8 +6895,8 @@ sub lg_picture_set_workflow (@) {
 	    select(undef,undef,undef,0.4) if($read_attempt<13);
 	   }
 	  } else {
-	   my $readback_category="picture";
-		   if(!$native_white_balance && $tv_input ne "" && $active_picture_mode ne "") {
+	  my $readback_category=$category;
+   if($category eq "picture" && !$native_white_balance && $tv_input ne "" && $active_picture_mode ne "") {
 	    $readback_category="picture\$".$tv_input.".".$active_picture_mode.".2d.x";
 	   }
 	   my $followup_payload={
@@ -7822,6 +7826,8 @@ sub main (@) {
  my $include_current_input=$request->{"include_current_input"} ? 1 : 0;
  my $last_written_picture_mode=$request->{"last_written_picture_mode"}||"";
  my $dpg_data=$request->{"dpg_data"};
+ my $category=$request->{"category"}||"picture";
+ $category="picture" if($category !~ /\A[A-Za-z0-9$_.-]{1,200}\z/);
  my $result;
 
  if(!$ip || !&valid_ipv4($ip)) {
@@ -7831,9 +7837,9 @@ sub main (@) {
  } elsif($action eq "connect" || $action eq "pair") {
   $result=&lg_connect_workflow($ip,$client_key,$connect_timeout,$pair_timeout);
 	 } elsif($action eq "picture_get") {
-	  $result=&lg_picture_get_workflow($ip,$client_key,$connect_timeout,$keys,$picture_mode,$tv_input,$force_ddc_white_balance,$signal_mode,$include_current_input);
+	  $result=&lg_picture_get_workflow($ip,$client_key,$connect_timeout,$keys,$picture_mode,$tv_input,$force_ddc_white_balance,$signal_mode,$include_current_input,$category);
 	 } elsif($action eq "picture_set") {
-		  $result=&lg_picture_set_workflow($ip,$client_key,$connect_timeout,$settings,$readback_keys,$tv_input,$keep_calibration_mode,$picture_mode,$calibration_mode_active,$reset_ddc_baseline,$verify_ddc_upload,$force_ddc_white_balance,$signal_mode);
+		  $result=&lg_picture_set_workflow($ip,$client_key,$connect_timeout,$settings,$readback_keys,$tv_input,$keep_calibration_mode,$picture_mode,$calibration_mode_active,$reset_ddc_baseline,$verify_ddc_upload,$force_ddc_white_balance,$signal_mode,$category);
  } elsif($action eq "picture_reset") {
   $result=&lg_picture_reset_workflow($ip,$client_key,$connect_timeout,$tv_input,$picture_mode,$signal_mode,$require_white_balance_reset,$reset_ddc_state,$last_written_picture_mode);
  } elsif($action eq "picture_apply_all_inputs") {

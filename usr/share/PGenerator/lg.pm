@@ -59,6 +59,37 @@ sub lg_pin_log_file (@) {
  return &lg_pin_session_dir($token)."/helper.log";
 }
 
+sub lg_automation_execution_file (@) {
+ my $base=$ENV{"PGEN_AUTOMATION_DIR"}||"/var/lib/PGenerator/automation";
+ return $base."/execution.json";
+}
+
+sub lg_automation_guard_json (@) {
+ my ($body)=@_;
+ my $execution_file=&lg_automation_execution_file();
+ return "" if(!-f $execution_file);
+ my $raw="";
+ return "" if(!open(my $fh,"<:raw",$execution_file));
+ { local $/; $raw=<$fh>//""; }
+ close($fh);
+ my $execution=eval { JSON::PP::decode_json($raw) };
+ return "" if(ref($execution) ne "HASH");
+ my $status=$execution->{status}||"";
+ return "" if($status ne "starting" && $status ne "running"
+  && $status ne "paused" && $status ne "stopping" && $status ne "interrupted");
+ my $payload=eval { JSON::PP::decode_json($body||"") };
+ $payload={} if(ref($payload) ne "HASH");
+ my $token=$payload->{automation_token}||"";
+ return "" if($token ne "" && $token eq ($execution->{token}||""));
+ my $run_id=$execution->{run_id}||"current run";
+ return &lg_encode_json({
+  status => "error",
+  error_code => "automation-active",
+  message => "Automation queue is active ($run_id). Stop or finish it before starting a guided LG or meter operation.",
+  run_id => $run_id,
+ });
+}
+
 sub lg_helper_path (@) {
  return "/usr/sbin/pgenerator-lg";
 }
@@ -1775,6 +1806,8 @@ sub webui_lg_scan (@) {
 
 sub webui_lg_calibration_mode (@) {
  my $body=shift;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
  my $payload=&lg_decode_json($body);
  my $enabled=$payload->{"enabled"} ? 1 : 0;
  my $clients=&lg_load_clients();
@@ -1838,6 +1871,8 @@ sub webui_lg_picture_settings (@) {
  my $ignore_calibration_picture_mode=$payload->{"ignore_calibration_picture_mode"} ? 1 : 0;
  my $picture_mode=$payload->{"picture_mode"}||"";
  $picture_mode=$clients->{"calibration_picture_mode"}||"" if($picture_mode eq "" && !$ignore_calibration_picture_mode);
+ my $category=$payload->{"category"}||"picture";
+ $category="picture" if($category !~ /\A[A-Za-z0-9$_.-]{1,200}\z/);
 # Read-only poll: if CEC already knows the panel is in standby there is
 # nothing to read, and spawning the helper would burn the full 60s
 # picture_get wrapper on the daemon's single WebUI request thread. The
@@ -1853,8 +1888,9 @@ my $result=&lg_helper_run({
  ip => $ip,
  client_key => $client_key,
   keys => $keys,
-	  picture_mode => $picture_mode,
-	  signal_mode => $payload->{"signal_mode"}||"",
+  picture_mode => $picture_mode,
+  signal_mode => $payload->{"signal_mode"}||"",
+  category => $category,
 	  tv_input => &lg_input_from_cec(),
 	  include_current_input => $payload->{"include_current_input"} ? &lg_json_true() : &lg_json_false(),
 	  force_ddc_white_balance => $payload->{"force_ddc_white_balance"} ? &lg_json_true() : &lg_json_false(),
@@ -1877,6 +1913,8 @@ sub lg_settings_are_ddc_white_balance (@) {
 
 sub webui_lg_picture_settings_set (@) {
  my $body=shift;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
  my $payload=&lg_decode_json($body);
  my $clients=&lg_load_clients();
  ($clients,my $pin_state)=&lg_reconcile_pin_pairing($clients);
@@ -1905,6 +1943,8 @@ sub webui_lg_picture_settings_set (@) {
  my $ignore_calibration_picture_mode=$payload->{"ignore_calibration_picture_mode"} ? 1 : 0;
  my $picture_mode=$payload->{"picture_mode"}||"";
  $picture_mode=$clients->{"calibration_picture_mode"}||"" if($picture_mode eq "" && !$ignore_calibration_picture_mode);
+ my $category=$payload->{"category"}||"picture";
+ $category="picture" if($category !~ /\A[A-Za-z0-9$_.-]{1,200}\z/);
 	 my $ddc_white_balance=&lg_settings_are_ddc_white_balance($settings);
 	 my $keep_calibration_mode=exists($payload->{"keep_calibration_mode"})
 	  ? ($payload->{"keep_calibration_mode"} ? 1 : 0)
@@ -1930,6 +1970,7 @@ sub webui_lg_picture_settings_set (@) {
 		  reset_ddc_baseline => ($payload->{"reset_ddc_baseline"}||$payload->{"clear_ddc_baseline"}) ? &lg_json_true() : &lg_json_false(),
 		  verify_ddc_upload => $payload->{"verify_ddc_upload"} ? &lg_json_true() : &lg_json_false(),
 		  force_ddc_white_balance => $payload->{"force_ddc_white_balance"} ? &lg_json_true() : &lg_json_false(),
+		  category => $category,
 		  helper_timeout => int($payload->{"helper_timeout"}||0),
 	  connect_timeout => 5,
 	 });
@@ -2014,6 +2055,8 @@ sub webui_lg_picture_settings_set (@) {
 
 sub webui_lg_picture_reset (@) {
  my $body=shift;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
  my $payload=&lg_decode_json($body);
  my $clients=&lg_load_clients();
  ($clients,my $pin_state)=&lg_reconcile_pin_pairing($clients);
@@ -2057,6 +2100,8 @@ sub webui_lg_picture_reset (@) {
 
 sub webui_lg_picture_apply_all_inputs (@) {
  my $body=shift;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
  my $payload=&lg_decode_json($body);
  my $clients=&lg_load_clients();
  ($clients,my $pin_state)=&lg_reconcile_pin_pairing($clients);
@@ -2513,15 +2558,25 @@ sub webui_meter_lg_dv_profile_mark_cancelled (@) {
 
 sub webui_meter_lg_dv_profile_kill (@) {
  my $mark=shift;
- if(open(my $fh,">",$_meter_lg_dv_profile_stop_file)) { print $fh time(); close($fh); chmod(0666,$_meter_lg_dv_profile_stop_file); }
+ &webui_meter_lg_dv_profile_request_stop();
  system("sudo pkill -TERM -f '[m]eter_lg_dv_profile\\.pl' 2>/dev/null");
  select(undef,undef,undef,0.4);
  system("sudo pkill -9 -f '[m]eter_lg_dv_profile\\.pl' 2>/dev/null") if(&webui_meter_lg_dv_profile_running());
  &webui_meter_lg_dv_profile_mark_cancelled() if($mark);
 }
 
+sub webui_meter_lg_dv_profile_request_stop (@) {
+ return 0 if(!open(my $fh,">",$_meter_lg_dv_profile_stop_file));
+ my $ok=print $fh time();
+ $ok=0 if(!$ok || !close($fh));
+ chmod(0666,$_meter_lg_dv_profile_stop_file) if($ok);
+ return $ok ? 1 : 0;
+}
+
 sub webui_meter_lg_dv_profile_start (@) {
  my ($body)=@_;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
  return '{"status":"error","message":"Dolby Vision profile payload required"}' if(!defined($body) || $body eq "" || $body!~/^\s*\{/);
  my $start_lock;
  return '{"status":"error","retryable":true,"message":"Unable to serialize Dolby Vision profile startup"}'
@@ -2640,6 +2695,14 @@ sub webui_meter_lg_dv_profile_status (@) {
 }
 
 sub webui_meter_lg_dv_profile_stop (@) {
+ my ($body)=@_;
+ if(defined($body) && $body=~/"automation_graceful"\s*:\s*true/i) {
+  my $automation_guard=&lg_automation_guard_json($body);
+  return $automation_guard if($automation_guard ne "");
+  return &lg_encode_json({status=>"error",message=>"Unable to write Dolby Vision profile stop request"})
+   if(!&webui_meter_lg_dv_profile_request_stop());
+  return &lg_encode_json({status=>"ok",message=>"Dolby Vision profile stop requested"});
+ }
  &webui_meter_lg_dv_profile_kill(1);
  # Strip full-workflow keys from the greyscale status so a refresh right
  # after Stop cannot re-adopt the already-finished greyscale stage as an
@@ -2647,6 +2710,14 @@ sub webui_meter_lg_dv_profile_stop (@) {
  &webui_meter_lg_autocal_clear_full_workflow_state();
  &webui_meter_stop();
  return '{"status":"ok","message":"Dolby Vision profile measurement stopped"}';
+}
+
+sub webui_meter_lg_dv_profile_force_stop (@) {
+ my ($body)=@_;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
+ &webui_meter_lg_dv_profile_kill(1);
+ return '{"status":"ok","message":"Dolby Vision profile force stop requested"}';
 }
 
 sub webui_lg_hdr_calman_reset (@) {
@@ -3354,6 +3425,10 @@ sub webui_lg_api (@) {
  my $path=shift;
  my $method=shift;
  my $body=shift;
+ if($method eq "POST") {
+  my $automation_guard=&lg_automation_guard_json($body);
+  return $automation_guard if($automation_guard ne "");
+ }
  if(($path eq "/api/lg/status" || $path eq "/api/lg/detect") && $method eq "GET") {
   return &webui_lg_status_json();
  }
@@ -3412,7 +3487,10 @@ sub webui_lg_api (@) {
   return &webui_meter_lg_dv_profile_status();
  }
  if($path eq "/api/lg/dv-profile/stop" && $method eq "POST") {
-  return &webui_meter_lg_dv_profile_stop();
+  return &webui_meter_lg_dv_profile_stop($body);
+ }
+ if($path eq "/api/lg/dv-profile/kill" && $method eq "POST") {
+  return &webui_meter_lg_dv_profile_force_stop($body);
  }
  if($path eq "/api/lg/1d-dpg/read" && $method eq "POST") {
   return &webui_lg_1d_dpg_read($body);

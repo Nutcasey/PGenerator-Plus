@@ -24,7 +24,10 @@ use PGCalibrationMath qw(
 use PGSignalCode qw(
  signal_code_nominal_range signal_code_policy signal_percent_to_code
 );
-use Fcntl qw(O_NONBLOCK O_WRONLY);
+use Fcntl qw(O_NONBLOCK O_WRONLY LOCK_EX LOCK_UN);
+use File::Path qw(make_path);
+use JSON::PP ();
+use PGAutomation ();
 use Time::HiRes ();
 # Required for the ":shared" attributes and lock() below: webui_http dispatches
 # requests to a worker thread pool, so the cross-call state at this file scope
@@ -937,6 +940,7 @@ sub webui_route_device_lane (@) {
  $method="" if(!defined($method));
  $path="" if(!defined($path));
  return "renderer" if($path eq "/api/pattern" && $method eq "POST");
+ return "tv" if($path=~m{^/api/automation(?:/|$)});
  return "tv" if($path=~m{^/api/lg(?:/|$)} || $path=~m{^/api/cec(?:/|$)});
  return "meter" if($path=~m{^/api/meter(?:/|$)});
  return "";
@@ -1809,6 +1813,29 @@ sub webui_handle_request (@) {
     my $len=length($result);
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
    }
+    elsif($path=~m{^/api/automation/runs/([A-Za-z0-9][A-Za-z0-9_.-]*)/artifact/(.+)$} && $method eq "GET") {
+     my $artifact=&webui_automation_artifact($1,$2);
+     if(ref($artifact) eq "HASH") {
+      my $len=length($artifact->{data});
+      print $client "HTTP/1.1 200 OK\r\nContent-Type: $artifact->{type}\r\nContent-Length: $len\r\n$cors\r\n".$artifact->{data};
+     } else {
+      print $client "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n$cors\r\n";
+     }
+    }
+    elsif($path=~m{^/api/automation/runs/([A-Za-z0-9][A-Za-z0-9_.-]*)/items/(\d+)/(.*)$} && $method eq "GET") {
+     my $artifact=&webui_automation_artifact($1,"items/".int($2)."/".$3);
+     if(ref($artifact) eq "HASH") {
+      my $len=length($artifact->{data});
+      print $client "HTTP/1.1 200 OK\r\nContent-Type: $artifact->{type}\r\nContent-Length: $len\r\n$cors\r\n".$artifact->{data};
+     } else {
+      print $client "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n$cors\r\n";
+     }
+    }
+    elsif($path=~m{^/api/automation(?:/|$)}) {
+     my $result=&webui_automation_api($path,$method,$body);
+     my $len=length($result);
+     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
+    }
     elsif($path=~/^\/api\/lg\//) {
      my $result=&webui_lg_api($path,$method,$body);
      $result=&lg_public_api_json($result) if(defined(&lg_public_api_json));
@@ -1980,11 +2007,16 @@ sub webui_handle_request (@) {
     my $len=length($result);
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
    }
-	   elsif($path eq "/api/meter/lg-autocal/stop" && $method eq "POST") {
-	    my $result=&webui_meter_lg_autocal_stop();
-	    my $len=length($result);
-	    print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
-	   }
+   elsif($path eq "/api/meter/lg-autocal/stop" && $method eq "POST") {
+    my $result=&webui_meter_lg_autocal_stop($body);
+    my $len=length($result);
+    print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
+   }
+   elsif($path eq "/api/meter/lg-autocal/kill" && $method eq "POST") {
+    my $result=&webui_meter_lg_autocal_force_stop($body);
+    my $len=length($result);
+    print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
+   }
 	   elsif($path eq "/api/meter/lg-autocal/clear-tonemap-pending" && $method eq "POST") {
 	    my $result=&webui_meter_lg_autocal_clear_tonemap_pending();
 	    my $len=length($result);
@@ -2006,7 +2038,12 @@ sub webui_handle_request (@) {
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
    }
    elsif($path eq "/api/meter/lg-3d-autocal/stop" && $method eq "POST") {
-    my $result=&webui_meter_lg_3d_autocal_stop();
+    my $result=&webui_meter_lg_3d_autocal_stop($body);
+    my $len=length($result);
+    print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
+   }
+   elsif($path eq "/api/meter/lg-3d-autocal/kill" && $method eq "POST") {
+    my $result=&webui_meter_lg_3d_autocal_force_stop($body);
     my $len=length($result);
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
    }
@@ -2017,6 +2054,16 @@ sub webui_handle_request (@) {
   }
    elsif($path eq "/api/meter/stop" && $method eq "POST") {
     my $result=&webui_meter_stop();
+    my $len=length($result);
+    print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
+   }
+   elsif($path eq "/api/meter/series/stop" && $method eq "POST") {
+    my $result=&webui_meter_series_stop($body);
+    my $len=length($result);
+    print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
+   }
+   elsif($path eq "/api/meter/series/kill" && $method eq "POST") {
+    my $result=&webui_meter_series_force_stop($body);
     my $len=length($result);
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
    }
@@ -3028,6 +3075,24 @@ sub webui_meter_series_kill (@) {
  return scalar(@pids);
 }
 
+sub webui_meter_series_force_stop (@) {
+ my ($body)=@_;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
+ my $count=&webui_meter_series_kill("-KILL");
+ &webui_meter_stop() if($count);
+ return '{"status":"ok","message":"Meter series force stop requested"}';
+}
+
+sub webui_meter_series_stop (@) {
+ my ($body)=@_;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
+ my $count=&webui_meter_series_signal_stop();
+ &log("WebUI: cooperative meter series stop requested; helper owns spotread shutdown") if($count);
+ return &webui_automation_json({status=>"ok",message=>"Meter series stop requested",workers_signalled=>$count});
+}
+
 sub webui_meter_series_signal_stop (@) {
  my %series_ids;
  if(-f $_meter_series_file) {
@@ -3207,7 +3272,10 @@ sub webui_meter_session_stop_only (@) {
 }
 
 sub webui_meter_session_start (@) {
- my ($display_type,$ccss_file,$refresh_rate,$disable_aio,$config,$signal_mode,$max_luma,$meter_port,$require_device_ready,$averaging,$meter_usb_id,$observer,$pattern_provider)= @_;
+ my ($display_type,$ccss_file,$refresh_rate,$disable_aio,$config,$signal_mode,$max_luma,$meter_port,$require_device_ready,$averaging,$meter_usb_id,$observer,$pattern_provider,$automation_token)= @_;
+ $automation_token="" if(!defined($automation_token));
+ my $automation_guard=&lg_automation_guard_json(PGAutomation::encode_json({automation_token=>$automation_token}));
+ return 0 if($automation_guard ne "");
  $averaging="" if(!defined($averaging));
  $meter_usb_id="" if(!defined($meter_usb_id));
  $meter_usb_id="" if($meter_usb_id!~/^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$/);
@@ -3350,6 +3418,11 @@ sub webui_low_light_stamp_request {
 
 sub webui_meter_read (@) {
  my ($body)=@_;
+
+ my $automation_token="";
+ $automation_token=$1 if(defined($body) && $body=~/"automation_token"\s*:\s*"([A-Za-z0-9_.:-]{1,200})"/);
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
 
  # Claim the meter for this serialized command so the concurrent result-poll
  # lane holds its stale-state reaper while this handler may be mid-way
@@ -3624,7 +3697,7 @@ sub webui_meter_read (@) {
   &log("WebUI: starting meter session (display_type=$display_type, ccss=$ccss_file, refresh=$refresh_rate, aio_off=$disable_aio, port=$measurement_meter_port, ready_gate=$require_device_ready)");
   # Start spotread once in its normal adaptive mode ($session_avg_mode is
   # pinned to off); application sampling never respawns it.
-  if(!&webui_meter_session_start($display_type,$ccss_file,$refresh_rate,$disable_aio,$want_config,$signal_mode,$max_luma,$measurement_meter_port,$require_device_ready,$session_avg_mode,$measurement_meter_usb_id,$observer,$pattern_provider)) {
+  if(!&webui_meter_session_start($display_type,$ccss_file,$refresh_rate,$disable_aio,$want_config,$signal_mode,$max_luma,$measurement_meter_port,$require_device_ready,$session_avg_mode,$measurement_meter_usb_id,$observer,$pattern_provider,$automation_token)) {
     return &webui_meter_session_start_error_json($want_config);
   }
  }
@@ -3657,7 +3730,7 @@ sub webui_meter_read (@) {
   &log("WebUI: meter session command send failed, restarting daemon");
   &webui_meter_session_stop();
   &webui_meter_read_state_write('{"status":"starting"}');
-  if(!&webui_meter_session_start($display_type,$ccss_file,$refresh_rate,$disable_aio,$want_config,$signal_mode,$max_luma,$measurement_meter_port,$require_device_ready,$session_avg_mode,$measurement_meter_usb_id,$observer,$pattern_provider)) {
+  if(!&webui_meter_session_start($display_type,$ccss_file,$refresh_rate,$disable_aio,$want_config,$signal_mode,$max_luma,$measurement_meter_port,$require_device_ready,$session_avg_mode,$measurement_meter_usb_id,$observer,$pattern_provider,$automation_token)) {
      &log("WebUI: meter session restart failed after FIFO send error");
      return &webui_meter_session_start_error_json($want_config);
   }
@@ -4080,6 +4153,8 @@ sub webui_custom_series_steps_from_body (@) {
 
 sub webui_meter_series_start (@) {
  my ($body)=@_;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
  # A cooperatively-cancelled series may still be finishing its current USB
  # transaction after the Stop API has returned. Never start a second owner of
  # the meter during that short drain window.
@@ -6193,11 +6268,19 @@ sub webui_meter_lg_autocal_clear_tonemap_pending (@) {
 
 sub webui_meter_lg_autocal_kill (@) {
  my $mark=shift;
- if(open(my $fh,">",$_meter_lg_autocal_stop_file)) { print $fh time(); close($fh); chmod(0666,$_meter_lg_autocal_stop_file); }
+ &webui_meter_lg_autocal_request_stop();
  system("sudo pkill -TERM -f '[m]eter_lg_autocal\\.pl' 2>/dev/null");
  select(undef,undef,undef,0.4);
  system("sudo pkill -9 -f '[m]eter_lg_autocal\\.pl' 2>/dev/null") if(&webui_meter_lg_autocal_running());
  &webui_meter_lg_autocal_mark_cancelled() if($mark);
+}
+
+sub webui_meter_lg_autocal_request_stop (@) {
+ return 0 if(!open(my $fh,">",$_meter_lg_autocal_stop_file));
+ my $ok=print $fh time();
+ $ok=0 if(!$ok || !close($fh));
+ chmod(0666,$_meter_lg_autocal_stop_file) if($ok);
+ return $ok ? 1 : 0;
 }
 
 sub webui_meter_lg_autocal_body_with_defaults (@) {
@@ -6332,6 +6415,8 @@ sub webui_lg_autocal_dv_map_mode_error (@) {
 
 sub webui_meter_lg_autocal_start (@) {
  my ($body)=@_;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
  return '{"status":"error","message":"LG Auto Cal payload required"}' if(!defined($body) || $body eq "" || $body!~/^\s*\{/);
  # AutoCal writes calibration data into a real TV; simulated readings would
  # upload garbage. Block every launch that would run on the simulated meter.
@@ -6687,6 +6772,14 @@ sub webui_meter_lg_autocal_status (@) {
 }
 
 sub webui_meter_lg_autocal_stop (@) {
+ my ($body)=@_;
+ if(defined($body) && $body=~/"automation_graceful"\s*:\s*true/i) {
+  my $automation_guard=&lg_automation_guard_json($body);
+  return $automation_guard if($automation_guard ne "");
+  return &webui_automation_json({status=>"error",message=>"Unable to write LG Auto Cal stop request"})
+   if(!&webui_meter_lg_autocal_request_stop());
+  return &webui_automation_json({status=>"ok",message=>"LG Auto Cal stop requested"});
+ }
  &webui_meter_lg_autocal_kill(1);
  # Full Auto Cal may already have finished greyscale (status=complete +
  # full_workflow) and be in/after the 3D stage. Kill 3D too and strip the
@@ -6696,6 +6789,14 @@ sub webui_meter_lg_autocal_stop (@) {
  &webui_meter_lg_autocal_clear_full_workflow_state();
  &webui_meter_stop();
  return '{"status":"ok","message":"LG Auto Cal stopped"}';
+}
+
+sub webui_meter_lg_autocal_force_stop (@) {
+ my ($body)=@_;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
+ &webui_meter_lg_autocal_kill(1);
+ return '{"status":"ok","message":"LG Auto Cal force stop requested"}';
 }
 
 sub webui_meter_lg_3d_autocal_running (@) {
@@ -6745,11 +6846,19 @@ sub webui_meter_lg_3d_autocal_mark_cancelled (@) {
 
 sub webui_meter_lg_3d_autocal_kill (@) {
  my $mark=shift;
- if(open(my $fh,">",$_meter_lg_3d_autocal_stop_file)) { print $fh time(); close($fh); chmod(0666,$_meter_lg_3d_autocal_stop_file); }
+ &webui_meter_lg_3d_autocal_request_stop();
  system("sudo pkill -TERM -f '[m]eter_lg_3d_autocal\\.pl' 2>/dev/null");
  select(undef,undef,undef,0.4);
  system("sudo pkill -9 -f '[m]eter_lg_3d_autocal\\.pl' 2>/dev/null") if(&webui_meter_lg_3d_autocal_running());
  &webui_meter_lg_3d_autocal_mark_cancelled() if($mark);
+}
+
+sub webui_meter_lg_3d_autocal_request_stop (@) {
+ return 0 if(!open(my $fh,">",$_meter_lg_3d_autocal_stop_file));
+ my $ok=print $fh time();
+ $ok=0 if(!$ok || !close($fh));
+ chmod(0666,$_meter_lg_3d_autocal_stop_file) if($ok);
+ return $ok ? 1 : 0;
 }
 
 # Full AutoCal is browser-orchestrated, so a page that stayed open across a
@@ -6796,6 +6905,8 @@ sub webui_meter_lg_3d_autocal_complete_full_workflow_dpg (@) {
 
 sub webui_meter_lg_3d_autocal_start (@) {
  my ($body)=@_;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
  lock($_meter_lg_3d_autocal_start_lock);
  return '{"status":"error","message":"LG 3D LUT AutoCal payload required"}' if(!defined($body) || $body eq "" || $body!~/^\s*\{/);
  if(&webui_meter_autocal_blocked_for_simulation($body)) {
@@ -7234,12 +7345,28 @@ sub webui_meter_lg_3d_autocal_status (@) {
 }
 
 sub webui_meter_lg_3d_autocal_stop (@) {
+ my ($body)=@_;
+ if(defined($body) && $body=~/"automation_graceful"\s*:\s*true/i) {
+  my $automation_guard=&lg_automation_guard_json($body);
+  return $automation_guard if($automation_guard ne "");
+  return &webui_automation_json({status=>"error",message=>"Unable to write LG 3D LUT Auto Cal stop request"})
+   if(!&webui_meter_lg_3d_autocal_request_stop());
+  return &webui_automation_json({status=>"ok",message=>"LG 3D LUT Auto Cal stop requested"});
+ }
  &webui_meter_lg_3d_autocal_kill(1);
  # Strip full-workflow keys from greyscale+3D status so a refresh after
  # Stop cannot re-adopt a finished 3D stage as "Full Auto Cal complete".
  &webui_meter_lg_autocal_clear_full_workflow_state();
  &webui_meter_stop();
  return '{"status":"ok","message":"LG 3D LUT AutoCal stopped"}';
+}
+
+sub webui_meter_lg_3d_autocal_force_stop (@) {
+ my ($body)=@_;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
+ &webui_meter_lg_3d_autocal_kill(1);
+ return '{"status":"ok","message":"LG 3D LUT AutoCal force stop requested"}';
 }
 
 sub webui_meter_stop (@) {
@@ -12767,6 +12894,794 @@ elsif($pat eq "" && $name eq "uploaded_diag_video") {
 
 
 ###############################################
+#          Full automation API                #
+###############################################
+sub webui_automation_json (@) {
+ return PGAutomation::encode_json(shift);
+}
+
+sub webui_automation_body (@) {
+ my ($body)=@_;
+ my $value=PGAutomation::decode_json($body||"");
+ return ref($value) eq "HASH" ? $value : {};
+}
+
+sub webui_automation_iso (@) {
+ my $when=shift;
+ $when=PGAutomation::now() if(!defined($when) || $when eq "");
+ return POSIX::strftime("%Y-%m-%dT%H:%M:%SZ",gmtime($when));
+}
+
+sub webui_automation_error (@) {
+ my ($message,$code)=@_;
+ return &webui_automation_json({
+  status => "error",
+  error_code => $code||"automation-error",
+  message => $message||"Automation request failed",
+ });
+}
+
+sub webui_automation_active_status (@) {
+ my $status=shift||"";
+ return ($status eq "starting" || $status eq "running" || $status eq "paused" || $status eq "stopping" || $status eq "interrupted") ? 1 : 0;
+}
+
+sub webui_automation_read_execution (@) {
+ my $execution=PGAutomation::read_json_file(PGAutomation::base_dir()."/execution.json");
+ return ref($execution) eq "HASH" ? $execution : undef;
+}
+
+sub webui_automation_public_run (@) {
+ my ($run)=@_;
+ return {} if(ref($run) ne "HASH");
+ my $copy=PGAutomation::clone($run)||{};
+ delete($copy->{token});
+ delete($copy->{queue_snapshot}{token}) if(ref($copy->{queue_snapshot}) eq "HASH");
+ $copy->{artifact_base}="/api/automation/runs/".($copy->{id}||"")."/artifact" if($copy->{id});
+ return $copy;
+}
+
+sub webui_automation_read_run (@) {
+ my ($run_id)=@_;
+ $run_id=PGAutomation::safe_component($run_id);
+ return undef if($run_id eq "");
+ my $run=PGAutomation::read_json_file(PGAutomation::run_dir($run_id)."/run.json");
+ return $run if(ref($run) eq "HASH");
+ return undef;
+}
+
+sub webui_automation_run (@) {
+ my ($run_id)=@_;
+ $run_id=PGAutomation::safe_component($run_id);
+ return undef if($run_id eq "");
+ my $dir=PGAutomation::run_dir($run_id);
+ return undef if($dir eq "");
+ my $run=PGAutomation::read_json_file($dir."/run.json");
+ return undef if(ref($run) ne "HASH");
+ $run->{id}=$run_id if(!defined($run->{id}) || $run->{id} eq "");
+ my @items;
+ my $raw_items=ref($run->{items}) eq "ARRAY" ? $run->{items} : [];
+ my @item_numbers=PGAutomation::list_dirs($dir."/items");
+ my $count=@$raw_items > @item_numbers ? scalar(@$raw_items) : scalar(@item_numbers);
+ for(my $i=0;$i<$count;$i++) {
+  my $item=PGAutomation::read_json_file($dir."/items/$i/item.json");
+  $item=$raw_items->[$i] if(ref($item) ne "HASH" && ref($raw_items->[$i]) eq "HASH");
+  $item={} if(ref($item) ne "HASH");
+  $item->{item_number}=$i;
+  foreach my $stage (qw(pre post)) {
+   foreach my $key (qw(greyscale-21 colors-30 saturations-24)) {
+    my $path=$dir."/items/$i/$stage/$key.json";
+    my $snapshot=PGAutomation::read_json_file($path);
+    $item->{series}{$stage}{$key}=$snapshot if(ref($snapshot) eq "HASH");
+   }
+  }
+  foreach my $artifact (qw(calibration/reset.json calibration/grey-state.json calibration/3d-state.json calibration/dv-profile-state.json calibration/dv-profile-measurements.json calibration/dv-profile-upload.json panel-light.json apply-all.json quality.json)) {
+   my $value=PGAutomation::read_json_file($dir."/items/$i/$artifact");
+   next if(ref($value) ne "HASH");
+   my ($group,$name)=$artifact=~m{^([^/]+)/(.+)\.json$};
+   if(defined($group) && defined($name)) {
+    $item->{$group}{$name}=$value;
+   } elsif($artifact=~m{^(.+)\.json$}) {
+    $item->{$1}=$value;
+   }
+  }
+  push @items,$item;
+ }
+    $run->{items}=\@items if(@items || @$raw_items==0);
+ return $run;
+}
+
+sub webui_automation_list_runs (@) {
+ my @runs;
+ foreach my $id (PGAutomation::list_run_ids()) {
+  my $run=&webui_automation_run($id);
+  next if(ref($run) ne "HASH");
+  my $summary=PGAutomation::clone($run)||{};
+  delete($summary->{items});
+  push @runs,&webui_automation_public_run($summary);
+ }
+ @runs=sort { ($b->{created_at}||0) <=> ($a->{created_at}||0) } @runs;
+ return \@runs;
+}
+
+sub webui_automation_shell_quote (@) {
+ my $value=defined($_[0]) ? $_[0] : "";
+ $value=~s/'/'"'"'/g;
+ return "'$value'";
+}
+
+sub webui_automation_lock (@) {
+ my ($callback)=@_;
+ return (0,undef,"invalid lock callback") if(ref($callback) ne "CODE");
+ PGAutomation::ensure_store();
+ my $path=PGAutomation::base_dir()."/execution.lock";
+ return (0,undef,"unable to open execution lock") if(!open(my $fh,">>",$path));
+ return (0,undef,"unable to lock execution state") if(!flock($fh,LOCK_EX));
+ my ($ok,$value,$error)=(1,undef,"");
+ eval { $value=$callback->(); 1 } or do { $ok=0; $error=$@||"automation lock callback failed"; };
+ flock($fh,LOCK_UN);
+ close($fh);
+ return ($ok,$value,$error);
+}
+
+sub webui_automation_write_locked (@) {
+ my ($path,$value)=@_;
+ my ($ok,$written,$error)=PGAutomation::with_lock($path,sub { return $value; });
+ return ($ok,$error);
+}
+
+sub webui_automation_apply_all_support (@) {
+ my ($generation)=@_;
+ return -1 if(ref($generation) ne "HASH");
+ my $year=int($generation->{platform_year}||0);
+ return 1 if($year>=2021);
+ return 0 if($year>0 && $year<2021);
+ my $series=uc($generation->{series}||"");
+ return 1 if($series=~/^[A-Z][1-7]$/);
+ return 0 if($series=~/^[A-Z](?:8|9|X)$/);
+ my $webos=int($generation->{webos_major}||0);
+ return 1 if($webos>=6);
+ return 0 if($webos>0 && $webos<6);
+ return -1;
+}
+
+sub webui_automation_mode_signal_ok (@) {
+ my ($signal,$mode)=@_;
+ $signal=lc($signal||"");
+ $mode=lc($mode||"");
+ return 0 if($mode eq "");
+ return 0 if($signal eq "sdr" && ($mode=~/^(?:hdr|dolby)/ || $mode=~/dolbyvision/));
+ return 0 if(($signal eq "hdr10" || $signal eq "hlg") && ($mode=~/^dolby/ || $mode=~/dolbyvision/));
+ return 0 if($signal eq "dv" && $mode!~/^dolby/ && $mode!~/dolbyvision/);
+ return 0 if($signal ne "sdr" && $signal ne "hdr10" && $signal ne "hlg" && $signal ne "dv");
+ return 1;
+}
+
+sub webui_automation_generation_year (@) {
+ my ($generation)=@_;
+ return 0 if(ref($generation) ne "HASH");
+ my $year=int($generation->{platform_year}||0);
+ return $year if($year);
+ my $series=uc($generation->{series}||"");
+ if($series=~/^[A-Z](6|7|8|9|X|1|2|3|4|5)$/) {
+  my %year_for_suffix=(6=>2016,7=>2017,8=>2018,9=>2019,X=>2020,1=>2021,2=>2022,3=>2023,4=>2024,5=>2025);
+  return $year_for_suffix{$1}||0;
+ }
+ return 0;
+}
+
+sub webui_automation_modes_for_signal (@) {
+ my ($generation,$signal)=@_;
+ $signal=lc($signal||"sdr");
+ $signal="hdr10" if($signal eq "hlg");
+ my $year=&webui_automation_generation_year($generation);
+ my %current=(
+  sdr=>[qw(expert1 expert2 cinema filmMaker game normal eco sports vivid personalized)],
+  hdr10=>[qw(hdrCinema hdrCinemaBright hdrFilmMaker hdrGame hdrStandard hdrEco hdrVivid hdrPersonalized)],
+  dv=>[qw(dolbyVisionCinemaBright dolbyVisionFilmMaker dolbyVisionGame dolbyVisionVivid dolbyVisionStandard dolbyVisionPersonalized)],
+ );
+ my %pre2022=(
+  sdr=>[qw(expert1 expert2 cinema filmMaker game normal eco sports vivid)],
+  hdr10=>[qw(hdrCinema hdrCinemaBright hdrFilmMaker hdrGame hdrStandard hdrVivid)],
+  dv=>[qw(dolbyVisionFilmMaker dolbyVisionCinemaBright dolbyVisionGame dolbyVisionStandard dolbyVisionVivid)],
+ );
+ my %old=(
+  sdr=>[qw(expert1 expert2 cinema technicolor game normal eco sports vivid)],
+  hdr10=>[qw(hdrCinema hdrCinemaBright hdrTechnicolor hdrGame hdrStandard hdrVivid)],
+  dv=>[qw(dolbyVisionFilmMaker dolbyVisionCinemaBright dolbyVisionGame dolbyVisionStandard dolbyVisionVivid)],
+ );
+ return @{$year && $year <= 2019 ? ($old{$signal}||[]) : $year && $year <= 2021 ? ($pre2022{$signal}||[]) : ($current{$signal}||[])};
+}
+
+sub webui_automation_mode_available (@) {
+ my ($generation,$signal,$mode)=@_;
+ return 0 if(!&webui_automation_mode_signal_ok($signal,$mode));
+ my $token=lc($mode||""); $token=~s/[\s_-]+//g;
+ foreach my $candidate (&webui_automation_modes_for_signal($generation,$signal)) {
+  my $candidate_token=lc($candidate); $candidate_token=~s/[\s_-]+//g;
+  return 1 if($token eq $candidate_token);
+ }
+ return 0;
+}
+
+sub webui_automation_dv_supported (@) {
+ my ($generation)=@_;
+ return 0 if(ref($generation) ne "HASH");
+ my $year=&webui_automation_generation_year($generation);
+ return 0 if($year && $year < 2018);
+ return 0 if(($generation->{generation_id}||"")=~/^lg(?:2016|2017)_oled$/);
+ return 1 if($year >= 2018 || int($generation->{webos_major}||0) >= 4);
+ return -1;
+}
+
+sub webui_automation_calibration_mode_ok (@) {
+ my $mode=lc(shift||"");
+ $mode=~s/[\s_-]+//g;
+ return $mode=~/^(?:expert1|expert2|isfexpert1|isfexpert2|technicolor|technicolorexpert|filmmaker|filmmakermode|cinema|cinemahome|game|hdrcinema|hdrcinemabright|hdrfilmmaker|hdrgame|hdrtechnicolor|hdrtechnicolorexpert|dolbyvisioncinema|dolbyvisioncinemahome|dolbyvisioncinemabright|dolbyvisiongame|dolbyvisionvivid|dolbyvisionfilmmaker|dolbyvisionstandard|dolbyhdr[a-z]+)$/ ? 1 : 0;
+}
+
+sub webui_automation_normalize_item (@) {
+ my ($source)=@_;
+ my $item=ref($source) eq "HASH" ? PGAutomation::clone($source) : {};
+ $item={} if(ref($item) ne "HASH");
+ $item->{id}=PGAutomation::new_id() if(!defined($item->{id}) || !PGAutomation::safe_component($item->{id}));
+ $item->{name}=substr(($item->{name}||$item->{title}||"Automation item"),0,120);
+ $item->{signal_format}=lc($item->{signal_format}||$item->{signal_mode}||"sdr");
+ $item->{signal_format}="hdr10" if($item->{signal_format} eq "hdr");
+ $item->{signal_format}="sdr" if($item->{signal_format}!~/^(?:sdr|hdr10|hlg|dv)$/);
+ $item->{picture_mode}=$item->{picture_mode}||$item->{pictureMode}||($item->{signal_format} eq "dv" ? "dolbyVisionCinemaBright" : $item->{signal_format} eq "sdr" ? "cinema" : "hdrCinema");
+ $item->{settings}={} if(ref($item->{settings}) ne "HASH");
+ my $stages=ref($item->{stages}) eq "HASH" ? $item->{stages} : {};
+ $item->{stages}={
+  pre_readings => exists($stages->{pre_readings}) ? ($stages->{pre_readings}?1:0) : 1,
+  calibration => exists($stages->{calibration}) ? ($stages->{calibration}?1:0) : 1,
+  post_readings => exists($stages->{post_readings}) ? ($stages->{post_readings}?1:0) : 1,
+  apply_all => exists($stages->{apply_all}) ? ($stages->{apply_all}?1:0) : 1,
+ };
+ foreach my $phase (qw(pre_series post_series)) {
+  my $list=$item->{$phase};
+  $list=$item->{series} if(ref($list) ne "ARRAY");
+  $list=[qw(greyscale-21 colors-30 saturations-24)] if(ref($list) ne "ARRAY" || !@$list);
+  my %valid=map { $_=>1 } qw(greyscale-21 colors-30 saturations-24);
+  my @clean=grep { defined($_) && $valid{$_} } @$list;
+  $item->{$phase}=\@clean;
+ }
+ my $panel=ref($item->{panel_light}) eq "HASH" ? $item->{panel_light} : {};
+ $panel->{policy}=lc($panel->{policy}||$item->{panel_light_policy}||"fixed");
+ $panel->{policy}="fixed" if($panel->{policy} ne "fixed" && $panel->{policy} ne "target");
+ $panel->{key}=$item->{panel_light_key} if(!$panel->{key} && $item->{panel_light_key});
+ $panel->{fixed_value}=$panel->{fixed_value}//$panel->{value}//$item->{settings}{$panel->{key}} if($panel->{key});
+ $item->{settings}{$panel->{key}}=$panel->{fixed_value}
+  if($panel->{policy} eq "fixed" && $panel->{key} && defined($panel->{fixed_value}) && $panel->{fixed_value} ne "");
+ $panel->{target_luminance}=0+($panel->{target_luminance}||$item->{target_luminance}||100) if($panel->{policy} eq "target");
+ $item->{panel_light}=$panel;
+ my $quality=ref($item->{quality}) eq "HASH" ? $item->{quality} : {};
+ $quality->{enabled}=$quality->{enabled}?1:0;
+ $quality->{dE_formula}=$quality->{dE_formula}||$item->{delta_e_formula}||"deitp";
+ $quality->{limits}={} if(ref($quality->{limits}) ne "HASH");
+ $item->{quality}=$quality;
+ my $settle=0+($item->{settle_seconds}//8); $settle=0 if($settle<0); $settle=600 if($settle>600); $item->{settle_seconds}=$settle;
+ my $warm=0+($item->{warmup_minutes}//0); $warm=0 if($warm<0); $warm=240 if($warm>240); $item->{warmup_minutes}=$warm;
+ return $item;
+}
+
+sub webui_automation_normalize_queue (@) {
+ my ($source)=@_;
+ my $queue=ref($source) eq "HASH" ? PGAutomation::clone($source) : {};
+ $queue={} if(ref($queue) ne "HASH");
+ $queue->{id}=PGAutomation::new_id() if(!defined($queue->{id}) || !PGAutomation::safe_component($queue->{id}));
+ $queue->{name}=substr(($queue->{name}||"Automation queue"),0,120);
+ my $items=ref($queue->{items}) eq "ARRAY" ? $queue->{items} : [];
+ $queue->{items}=[map { &webui_automation_normalize_item($_) } @$items];
+ $queue->{updated_at}=PGAutomation::now();
+ return $queue;
+}
+
+sub webui_automation_probe_hazard (@) {
+ my ($item,$key,$category,$token)=@_;
+ my $body=&webui_automation_json({
+  keys => [$key],
+  picture_mode => $item->{picture_mode},
+  signal_mode => $item->{signal_format},
+  category => $category,
+  automation_token => $token||"",
+ });
+ my $response=eval { &webui_lg_picture_settings($body) };
+ my $decoded=PGAutomation::decode_json($response||"");
+ return undef if(ref($decoded) ne "HASH");
+ my $supported=ref($decoded->{supported_picture_keys}) eq "ARRAY" ? $decoded->{supported_picture_keys} : [];
+ my %supported=map { $_=>1 } @$supported;
+ return undef if(!$supported{$key});
+ my $settings=ref($decoded->{picture_settings}) eq "HASH" ? $decoded->{picture_settings} : (ref($decoded->{settings}) eq "HASH" ? $decoded->{settings} : {});
+ return {
+  key => $key,
+  category => $category,
+  value => exists($settings->{$key}) ? $settings->{$key} : undef,
+  disabled_value => ($key=~/^(?:energySaving|aiPicture)$/ ? "off" : "off"),
+  controllable => 1,
+  supported => 1,
+  generation => $decoded->{lg_generation},
+ };
+}
+
+sub webui_automation_readiness_data (@) {
+ my ($payload)=@_;
+ $payload={} if(ref($payload) ne "HASH");
+ my $items=$payload->{items};
+ $items=$payload->{queue}{items} if(ref($items) ne "ARRAY" && ref($payload->{queue}) eq "HASH");
+ $items=[] if(ref($items) ne "ARRAY");
+ my @checks;
+ my $ready=1;
+ my $check=sub {
+  my ($ok,$name,$message,$item_number,$level)=@_;
+  $ok=$ok?1:0; $ready=0 if(!$ok && ($level||"error") eq "error");
+  push @checks,{ name=>$name, ok=>$ok, level=>$level||($ok?"ok":"error"), message=>$message||"", item_number=>$item_number };
+ };
+ $check->(@$items ? (1,"queue-present","Queue contains items") : (0,"queue-present","Add at least one automation item"));
+ my $lg=PGAutomation::decode_json(eval { &webui_lg_status_json("Automation readiness") }||"")||{};
+ my $lg_connected=($lg->{paired} && !$lg->{disconnected}) || ($lg->{connected} && !$lg->{disconnected});
+ $check->($lg_connected,"lg-paired",$lg_connected ? "LG TV is paired" : "Pair and connect the LG TV before starting automation");
+ my $meter=PGAutomation::decode_json(eval { &webui_meter_status() }||"")||{};
+ my $meter_detected=$meter->{detected} ? 1 : 0;
+ my $meter_simulated=$meter->{simulated} ? 1 : 0;
+ $check->($meter_detected && !$meter_simulated,"meter-detected",$meter_simulated ? "The simulated meter cannot run calibration" : $meter_detected ? "Meter detected" : "Connect a physical meter before starting automation");
+ my $busy=(&webui_meter_series_alive() || &webui_meter_session_alive() || &webui_meter_lg_autocal_running() || &webui_meter_lg_3d_autocal_running() || &webui_meter_lg_dv_profile_running()) ? 1 : 0;
+ $check->(!$busy,"meter-idle",$busy ? "Stop the active meter operation before starting automation" : "Meter is idle");
+ my $free_mb;
+ if(open(my $df,"-|","df","-Pk",PGAutomation::base_dir())) {
+  my @lines=<$df>; close($df);
+  foreach my $line (@lines) {
+   if($line=~/^\S+\s+\d+\s+\d+\s+(\d+)\s+\d+%\s+/) {
+    $free_mb=int($1/1024);
+   }
+  }
+ }
+ my $disk_level=!defined($free_mb) ? "warning" : $free_mb>=256 ? "ok" : "error";
+ $check->(!defined($free_mb) || $free_mb>=256,"disk-space",defined($free_mb) ? "Automation storage has ${free_mb}MB free" : "Unable to measure automation storage; verify disk space manually",undef,$disk_level);
+ my @prepared;
+ for(my $index=0;$index<@$items;$index++) {
+  my $item=&webui_automation_normalize_item($items->[$index]);
+  my $signal=$item->{signal_format};
+  my $mode_ok=&webui_automation_mode_signal_ok($signal,$item->{picture_mode});
+  $check->($mode_ok,"item-$index-mode","Picture mode $item->{picture_mode} matches $signal",$index);
+  my $stage_count=grep { $item->{stages}{$_} } qw(pre_readings calibration post_readings);
+  $check->($stage_count>0,"item-$index-stages","At least one stage is enabled",$index);
+  my $settings=ref($item->{settings}) eq "HASH" ? $item->{settings} : {};
+  my @keys=sort keys %$settings;
+  push @keys,"pictureMode" if($item->{picture_mode} ne "");
+  my $panel_key=$item->{panel_light}{key}||"";
+  push @keys,$panel_key if($panel_key ne "" && !grep { $_ eq $panel_key } @keys);
+  my $read_response=PGAutomation::decode_json(eval { &webui_lg_picture_settings(&webui_automation_json({
+   keys=>\@keys,picture_mode=>$item->{picture_mode},signal_mode=>$signal,category=>"picture",
+   include_current_input=>JSON::PP::true,
+  })) }||"")||{};
+  my $read_ok=($read_response->{status}||"") eq "ok";
+  $check->($read_ok,"item-$index-tv-reachable",$read_ok ? "LG picture settings read succeeded" : ($read_response->{message}||"Unable to read LG picture settings"),$index);
+  my $generation=ref($read_response->{lg_generation}) eq "HASH" ? $read_response->{lg_generation} : {};
+  my $generation_known=ref($generation) eq "HASH" && ($generation->{model_name}||"") ne "" && ($generation->{generation_id}||"") ne "" && ($generation->{generation_id}||"") ne "lg_unknown";
+  my $firmware=$lg->{software_version}||$read_response->{software_version}||"unknown";
+  my $webos_release=$generation->{webos_release}||"unknown";
+  my $identity_message=$generation_known
+   ? "LG ".($generation->{model_name}||"unknown model").", firmware $firmware, generation ".($generation->{generation_id}||"unknown")." (webOS ".$webos_release.")"
+   : "LG model, firmware or generation could not be identified";
+  $check->($generation_known,"item-$index-generation",$identity_message,$index);
+  my $mode_list_ok=$generation_known && &webui_automation_mode_available($generation,$signal,$item->{picture_mode});
+  $check->($mode_list_ok,"item-$index-mode-list",$mode_list_ok ? "Picture mode is present in the generation's $signal mode list" : "Picture mode is not present in the generation's $signal mode list",$index);
+  if($signal eq "dv") {
+   my $dv_support=&webui_automation_dv_supported($generation);
+   $check->($dv_support==1,"item-$index-dv-support",$dv_support==1 ? "Dolby Vision is supported by this LG generation" : "Dolby Vision support could not be established for this LG generation",$index);
+  }
+  if($item->{stages}{calibration}) {
+   $check->(&webui_automation_calibration_mode_ok($item->{picture_mode}),"item-$index-calibration-mode","$item->{picture_mode} is a writable calibration picture mode",$index);
+  }
+  my $supported=ref($read_response->{supported_picture_keys}) eq "ARRAY" ? $read_response->{supported_picture_keys} : [];
+  my %supported=map { $_=>1 } @$supported;
+  $item->{supported_picture_keys}=$supported;
+  my $observed_settings=ref($read_response->{picture_settings}) eq "HASH" ? $read_response->{picture_settings} : (ref($read_response->{settings}) eq "HASH" ? $read_response->{settings} : {});
+  $item->{device_identity}={
+   model_name=>$generation->{model_name}||$lg->{model_name}||"",
+   firmware=>$firmware,
+   generation_id=>$generation->{generation_id}||"",
+   webos_release=>$webos_release,
+  };
+  foreach my $key (@keys) {
+   my $key_ok=$supported{$key} || exists($observed_settings->{$key});
+   $check->($key_ok,"item-$index-key-$key",$key_ok ? "$key is supported" : "$key is not supported by the LG TV",$index);
+  }
+  if($item->{panel_light}{policy} eq "target" && $panel_key eq "") {
+   $check->(0,"item-$index-panel-light-key","Target panel-light policy requires a panel-light key",$index);
+  }
+  my $apply_support=&webui_automation_apply_all_support($generation);
+  $item->{lg_generation}=$generation if(%$generation);
+  $item->{apply_all_supported}=$apply_support;
+  if($item->{stages}{apply_all} && $item->{stages}{calibration}) {
+   $check->($apply_support==1,"item-$index-apply-all",$apply_support==1 ? "Apply to all inputs is supported" : $apply_support==0 ? "Apply to all inputs is unavailable on this LG generation" : "LG apply-to-all capability is unknown",$index);
+  }
+  if($item->{panel_light}{policy} eq "target") {
+   $check->($signal eq "sdr","item-$index-panel-light-signal","target luminance not supported for this format",$index);
+  }
+  my @hazards;
+  my %hazard_categories=(
+   energySaving=>["picture"],
+   aiPicture=>["picture"],
+   autoPowerOff=>["power","system","general"],
+   noSignalPowerOff=>["power","system","general"],
+   screenSaverTimeout=>["screenSaver","screensaver","general"],
+   screenSaver=>["screenSaver","screensaver","general"],
+  );
+  foreach my $key (qw(energySaving aiPicture autoPowerOff noSignalPowerOff screenSaverTimeout screenSaver)) {
+   foreach my $category (@{$hazard_categories{$key}||[]}) {
+    my $hazard=&webui_automation_probe_hazard($item,$key,$category,$payload->{automation_token});
+    next if(ref($hazard) ne "HASH");
+    $hazard->{controllable}=1;
+    push @hazards,$hazard;
+    last;
+   }
+  }
+  foreach my $hazard (@hazards) {
+   my $key=$hazard->{key};
+   next if exists($settings->{$key});
+   if($key eq "energySaving" || $key eq "aiPicture") {
+    $settings->{$key}=$hazard->{disabled_value};
+   }
+  }
+  $item->{settings}=$settings;
+  $item->{hazards}=\@hazards;
+  $item->{hazard_capabilities}={ map { $_->{key} => { category=>$_->{category}, controllable=>$_->{controllable}, supported=>$_->{supported} } } @hazards };
+  my %hazard_found=map { $_->{key}=>1 } @hazards;
+  foreach my $hazard_key (qw(energySaving aiPicture autoPowerOff noSignalPowerOff screenSaverTimeout screenSaver)) {
+   next if $hazard_found{$hazard_key};
+   $check->(0,"item-$index-hazard-$hazard_key","LG did not expose $hazard_key through the control API; verify it is disabled manually before calibration","$index","warning");
+  }
+ push @prepared,$item;
+ }
+ my %hazard_restore;
+ foreach my $item (@prepared) {
+  foreach my $hazard (@{$item->{hazards}||[]}) {
+   next if(ref($hazard) ne "HASH" || !$hazard->{controllable} || !defined($hazard->{key}) || !defined($hazard->{value}));
+   $hazard_restore{$hazard->{key}}={value=>$hazard->{value},category=>$hazard->{category}||"picture"}
+    if(!exists($hazard_restore{$hazard->{key}}));
+  }
+ }
+ return {
+  status => "ok",
+  ready => $ready ? 1 : 0,
+  checks => \@checks,
+  items => \@prepared,
+  hazard_restore => \%hazard_restore,
+  message => $ready ? "Automation readiness passed" : "Automation readiness failed; fix the listed checks",
+ };
+}
+
+sub webui_automation_save_recipe (@) {
+ my ($payload)=@_;
+ my $recipe=$payload->{recipe}; $recipe=$payload if(ref($recipe) ne "HASH");
+ my $value=&webui_automation_normalize_item($recipe);
+ my $path=PGAutomation::recipes_dir()."/".$value->{id}.".json";
+ return &webui_automation_error("Unable to create the automation store","store-unavailable") if(!PGAutomation::ensure_store());
+ my ($written,$write_error)=&webui_automation_write_locked($path,$value);
+ return &webui_automation_error("Unable to save recipe".($write_error ? ": $write_error" : ""),"write-failed") if(!$written);
+ return &webui_automation_json({status=>"ok",recipe=>$value});
+}
+
+sub webui_automation_save_queue (@) {
+ my ($payload)=@_;
+ my $queue=$payload->{queue}; $queue=$payload if(ref($queue) ne "HASH");
+ my $value=&webui_automation_normalize_queue($queue);
+ my $path=PGAutomation::queues_dir()."/".$value->{id}.".json";
+ return &webui_automation_error("Unable to create the automation store","store-unavailable") if(!PGAutomation::ensure_store());
+ my ($written,$write_error)=&webui_automation_write_locked($path,$value);
+ return &webui_automation_error("Unable to save queue".($write_error ? ": $write_error" : ""),"write-failed") if(!$written);
+ return &webui_automation_json({status=>"ok",queue=>$value});
+}
+
+sub webui_automation_list_defs (@) {
+ my ($kind)=@_;
+ my $dir=$kind eq "recipe" ? PGAutomation::recipes_dir() : PGAutomation::queues_dir();
+ my @values;
+ foreach my $file (PGAutomation::list_json_files($dir)) {
+  my $value=PGAutomation::read_json_file($dir."/".$file);
+  push @values,$value if(ref($value) eq "HASH");
+ }
+ @values=sort { ($a->{updated_at}||0) <=> ($b->{updated_at}||0) } @values;
+ return \@values;
+}
+
+sub webui_automation_delete_def (@) {
+ my ($kind,$id)=@_;
+ $id=PGAutomation::safe_component($id);
+ return &webui_automation_error("Invalid automation definition id","invalid-id") if($id eq "");
+ my $dir=$kind eq "recipe" ? PGAutomation::recipes_dir() : PGAutomation::queues_dir();
+ my $path=$dir."/".$id.".json";
+ return &webui_automation_error("Automation definition not found","not-found") if(!-f $path);
+ my ($deleted,$deleted_value,$delete_error)=PGAutomation::with_lock($path,sub { return {__pg_automation_delete=>1}; });
+ return &webui_automation_error("Unable to delete automation definition".($delete_error ? ": $delete_error" : ""),"delete-failed") if(!$deleted);
+ return &webui_automation_json({status=>"ok",deleted=>$id});
+}
+
+sub webui_automation_write_item_files (@) {
+ my ($run_id,$items)=@_;
+ for(my $i=0;$i<@$items;$i++) {
+ my $dir=PGAutomation::item_dir($run_id,$i)."";
+  make_path($dir) if(!-d $dir);
+  my ($written)=&webui_automation_write_locked($dir."/item.json",$items->[$i]);
+  return 0 if(!$written);
+ }
+ return 1;
+}
+
+sub webui_automation_launch_runner (@) {
+ my ($run_id,$token)=@_;
+ my $dir=PGAutomation::run_dir($run_id);
+ my $cmd="setsid /usr/bin/perl /usr/bin/pgen_automation_runner.pl ".&webui_automation_shell_quote($run_id)." ".&webui_automation_shell_quote($token)." </dev/null >>".&webui_automation_shell_quote($dir."/runner.log")." 2>&1 &";
+ return system($cmd)==0 ? 1 : 0;
+}
+
+sub webui_automation_start (@) {
+ my ($payload)=@_;
+ my $existing=&webui_automation_read_execution();
+ if(ref($existing) eq "HASH" && &webui_automation_active_status($existing->{status})) {
+  return &webui_automation_error("Automation queue is already active (".($existing->{run_id}||"unknown run").")","automation-active");
+ }
+ my $queue=$payload->{queue};
+ if(ref($queue) ne "HASH" && ($payload->{queue_id}||"") ne "") {
+  my $id=PGAutomation::safe_component($payload->{queue_id});
+  $queue=PGAutomation::read_json_file(PGAutomation::queues_dir()."/$id.json") if($id ne "");
+ }
+ $queue=&webui_automation_normalize_queue($queue||{name=>$payload->{name}||"Automation queue",items=>$payload->{items}});
+ return &webui_automation_error("Unable to create the automation store","store-unavailable") if(!PGAutomation::ensure_store());
+ my $readiness=&webui_automation_readiness_data({items=>$queue->{items},automation_token=>""});
+ return &webui_automation_json($readiness) if(!$readiness->{ready});
+ my $items=$readiness->{items};
+ return &webui_automation_error("Queue has no automation items","empty-queue") if(ref($items) ne "ARRAY" || !@$items);
+ my $run_id=PGAutomation::new_id();
+ my $token=PGAutomation::new_id()."-".PGAutomation::new_id();
+ my $run_dir=PGAutomation::run_dir($run_id);
+ my $run={
+  schema_version=>1,id=>$run_id,token=>$token,status=>"starting",
+  queue_id=>$queue->{id},queue_name=>$queue->{name},queue_snapshot=>$queue,
+  items=>$items,hazard_restore=>$readiness->{hazard_restore}||{},created_at=>PGAutomation::now(),created_at_iso=>&webui_automation_iso(),
+  runner_pid=>0,active_item=>undef,active_stage=>"",checkpoints=>[],readiness=>$readiness,
+ };
+ my ($locked,$start_result,$lock_error)=&webui_automation_lock(sub {
+  my $current=&webui_automation_read_execution();
+  return {error=>"Automation queue is already active (".($current->{run_id}||"unknown run").")"}
+   if(ref($current) eq "HASH" && &webui_automation_active_status($current->{status}));
+  make_path($run_dir."/items");
+  return {error=>"Unable to create run directory"} if(!-d $run_dir."/items");
+  return {error=>"Unable to write run manifest"} if(!PGAutomation::write_json_atomic($run_dir."/run.json",$run,0664));
+  return {error=>"Unable to write item manifests"} if(!&webui_automation_write_item_files($run_id,$items));
+  return {error=>"Unable to write run control"} if(!PGAutomation::write_json_atomic($run_dir."/control.json",{request=>"none",updated_at=>PGAutomation::now()},0664));
+  return {error=>"Unable to claim automation execution"} if(!PGAutomation::write_json_atomic(PGAutomation::base_dir()."/execution.json",{owner=>"automation",run_id=>$run_id,token=>$token,pid=>0,status=>"starting",updated_at=>PGAutomation::now()},0664));
+  return {started=>1};
+ });
+ if(!$locked || ref($start_result) ne "HASH" || !$start_result->{started}) {
+  return &webui_automation_error(($start_result||{})->{error}||$lock_error||"Unable to start automation","start-failed");
+ }
+ if(!&webui_automation_launch_runner($run_id,$token)) {
+  $run->{status}="failed"; $run->{failure}={stage=>"runner-start",message=>"Unable to launch automation runner",at=>PGAutomation::now()};
+  &webui_automation_write_locked($run_dir."/run.json",$run);
+  PGAutomation::with_lock(PGAutomation::base_dir()."/execution.json",sub { return {__pg_automation_delete=>1}; });
+  return &webui_automation_error("Unable to launch automation runner","runner-start-failed");
+ }
+ return &webui_automation_json({status=>"started",run_id=>$run_id,run=>&webui_automation_public_run($run)});
+}
+
+sub webui_automation_control (@) {
+ my ($run_id,$action)=@_;
+ $run_id=PGAutomation::safe_component($run_id);
+ return &webui_automation_error("Invalid run id","invalid-id") if($run_id eq "");
+ $action=lc($action||"");
+ my $run=&webui_automation_run($run_id);
+ return &webui_automation_error("Automation run not found","not-found") if(ref($run) ne "HASH");
+ if($action eq "pause") {
+  return &webui_automation_error("Run is not active","not-active") if(($run->{status}||"") ne "running");
+  return &webui_automation_error("Unable to write automation control" ,"write-failed")
+   if(!PGAutomation::write_json_atomic(PGAutomation::run_dir($run_id)."/control.json",{request=>"pause",updated_at=>PGAutomation::now()},0664));
+  return &webui_automation_json({status=>"ok",message=>"Pause requested at the next checkpoint",run=>&webui_automation_public_run($run)});
+ }
+ if($action eq "resume") {
+  return &webui_automation_error("Run is already active","already-active") if(($run->{status}||"") eq "running");
+  return &webui_automation_error("Run cannot be resumed","not-resumable") if(($run->{status}||"") !~ /^(?:paused|interrupted)$/);
+  my $readiness=&webui_automation_readiness_data({items=>$run->{items},automation_token=>$run->{token}||""});
+  return &webui_automation_json($readiness) if(!$readiness->{ready});
+  return &webui_automation_error("Unable to write automation control","write-failed")
+   if(!PGAutomation::write_json_atomic(PGAutomation::run_dir($run_id)."/control.json",{request=>"none",updated_at=>PGAutomation::now()},0664));
+  $run->{status}="running"; delete($run->{failure}); $run->{resumed_at}=PGAutomation::now(); $run->{runner_pid}=0;
+  my ($updated,$update_error)=&webui_automation_write_locked(PGAutomation::run_dir($run_id)."/run.json",$run);
+  return &webui_automation_error("Unable to update automation run".($update_error ? ": $update_error" : ""),"write-failed") if(!$updated);
+  my ($execution_updated,$execution_error)=&webui_automation_write_locked(PGAutomation::base_dir()."/execution.json",{owner=>"automation",run_id=>$run_id,token=>$run->{token},pid=>0,status=>"starting",updated_at=>PGAutomation::now()});
+  if(!$execution_updated) {
+   $run->{status}="paused"; $run->{runner_pid}=0;
+   &webui_automation_write_locked(PGAutomation::run_dir($run_id)."/run.json",$run);
+   return &webui_automation_error("Unable to claim automation execution".($execution_error ? ": $execution_error" : ""),"write-failed");
+  }
+  if(!&webui_automation_launch_runner($run_id,$run->{token})) {
+   $run->{status}="interrupted"; $run->{runner_pid}=0;
+   $run->{failure}={stage=>"runner-start",error_code=>"runner-start-failed",message=>"Unable to launch automation runner",at=>PGAutomation::now()};
+   &webui_automation_write_locked(PGAutomation::run_dir($run_id)."/run.json",$run);
+   &webui_automation_write_locked(PGAutomation::base_dir()."/execution.json",{owner=>"automation",run_id=>$run_id,token=>$run->{token},pid=>0,status=>"interrupted",updated_at=>PGAutomation::now()});
+   return &webui_automation_error("Unable to launch resumed runner","runner-start-failed");
+  }
+  return &webui_automation_json({status=>"ok",message=>"Automation resumed",run=>&webui_automation_public_run($run)});
+ }
+ if($action eq "stop") {
+  return &webui_automation_error("Run is already finished","not-active") if(($run->{status}||"") =~ /^(?:complete|failed|stopped)$/);
+  return &webui_automation_error("Unable to write automation control","write-failed")
+   if(!PGAutomation::write_json_atomic(PGAutomation::run_dir($run_id)."/control.json",{request=>"stop",updated_at=>PGAutomation::now()},0664));
+  if(($run->{status}||"") eq "paused" || ($run->{status}||"") eq "interrupted") {
+   $run->{status}="running"; $run->{runner_pid}=0;
+   my ($updated,$update_error)=&webui_automation_write_locked(PGAutomation::run_dir($run_id)."/run.json",$run);
+   return &webui_automation_error("Unable to update automation run".($update_error ? ": $update_error" : ""),"write-failed") if(!$updated);
+   my ($execution_updated,$execution_error)=&webui_automation_write_locked(PGAutomation::base_dir()."/execution.json",{owner=>"automation",run_id=>$run_id,token=>$run->{token},pid=>0,status=>"stopping",updated_at=>PGAutomation::now()});
+   if(!$execution_updated) {
+    $run->{status}="interrupted"; $run->{runner_pid}=0;
+    &webui_automation_write_locked(PGAutomation::run_dir($run_id)."/run.json",$run);
+    return &webui_automation_error("Unable to update automation execution".($execution_error ? ": $execution_error" : ""),"write-failed");
+   }
+   if(!&webui_automation_launch_runner($run_id,$run->{token})) {
+    $run->{status}="stopped"; $run->{runner_pid}=0;
+    $run->{completed_at}=PGAutomation::now();
+    $run->{failure}={stage=>"runner-start",error_code=>"runner-start-failed",message=>"Unable to launch automation runner for stop cleanup",at=>PGAutomation::now()};
+    &webui_automation_write_locked(PGAutomation::run_dir($run_id)."/run.json",$run);
+    PGAutomation::with_lock(PGAutomation::base_dir()."/execution.json",sub { return {__pg_automation_delete=>1}; });
+   }
+  }
+  return &webui_automation_json({status=>"ok",message=>"Automation stop requested",run=>&webui_automation_public_run($run)});
+ }
+ return &webui_automation_error("Unknown automation control action","invalid-action");
+}
+
+sub webui_automation_edit_run (@) {
+ my ($run_id,$payload)=@_;
+ my $run=&webui_automation_run($run_id);
+ return &webui_automation_error("Automation run not found","not-found") if(ref($run) ne "HASH");
+ return &webui_automation_error("Run is already finished","not-editable") if(($run->{status}||"") =~ /^(?:complete|failed|stopped)$/);
+ return &webui_automation_error("A replacement item list is required","invalid-items") if(ref($payload->{items}) ne "ARRAY");
+ my $active=defined($run->{active_item}) ? int($run->{active_item}) : scalar(@{$run->{items}||[]});
+ my $old=$run->{items}||[];
+ my $new=[map { &webui_automation_normalize_item($_) } @{$payload->{items}}];
+ for(my $i=0;$i<@$new;$i++) {
+ if($i<=$active && ref($old->[$i]) eq "HASH") {
+   my $old_id=$old->[$i]{id}||""; my $new_id=$new->[$i]{id}||"";
+   return &webui_automation_error("Completed or active queue items cannot be edited","item-locked") if($old_id ne $new_id || PGAutomation::encode_json($old->[$i]) ne PGAutomation::encode_json($new->[$i]));
+  } elsif($i>$active) {
+   $new->[$i]{recheck}=1;
+  }
+ }
+ my ($updated,$updated_run,$update_error)=PGAutomation::with_lock(PGAutomation::run_dir($run_id)."/run.json",sub {
+  my ($current)=@_;
+  return undef if(ref($current) ne "HASH");
+  $current->{items}=$new;
+  $current->{queue_snapshot}{items}=$new if(ref($current->{queue_snapshot}) eq "HASH");
+  $current->{edited_at}=PGAutomation::now();
+  return $current;
+ });
+ return &webui_automation_error("Unable to update automation run".($update_error ? ": $update_error" : ""),"write-failed") if(!$updated || ref($updated_run) ne "HASH");
+ $run=$updated_run;
+ return &webui_automation_error("Unable to write queued item manifests","write-failed") if(!&webui_automation_write_item_files($run_id,$new));
+ return &webui_automation_json({status=>"ok",run=>&webui_automation_public_run($run)});
+}
+
+sub webui_automation_delete_run (@) {
+ my ($run_id)=@_;
+ my $run=&webui_automation_run($run_id);
+ return &webui_automation_error("Automation run not found","not-found") if(ref($run) ne "HASH");
+ my ($locked,$delete_result,$lock_error)=&webui_automation_lock(sub {
+  my $execution=&webui_automation_read_execution();
+  return {error_code=>"automation-active",error=>"Active automation runs cannot be deleted"}
+   if(ref($execution) eq "HASH" && ($execution->{run_id}||"") eq $run_id && &webui_automation_active_status($execution->{status}));
+  return {error_code=>"delete-failed",error=>"Unable to delete automation history"}
+   if(!PGAutomation::remove_run($run_id));
+  return {deleted=>1};
+ });
+ return &webui_automation_error(($delete_result||{})->{error}||$lock_error||"Unable to delete automation history",($delete_result||{})->{error_code}||"delete-failed") if(!$locked || ref($delete_result) ne "HASH" || !$delete_result->{deleted});
+ return &webui_automation_json({status=>"ok",deleted=>$run_id});
+}
+
+sub webui_automation_artifact (@) {
+ my ($run_id,$relative)=@_;
+ $run_id=PGAutomation::safe_component($run_id);
+ return undef if($run_id eq "" || !defined($relative) || $relative eq "");
+ my @parts=split(m{/},$relative,-1);
+ return undef if(!@parts || grep { $_ eq "" || !PGAutomation::safe_component($_) || $_ eq "." || $_ eq ".." } @parts);
+ my $path=PGAutomation::run_dir($run_id)."/".join("/",@parts);
+ return undef if(!-f $path || -l $path);
+ my $data=PGAutomation::read_raw($path);
+ return undef if(!defined($data));
+ my $type=$path=~/\.json\z/ ? "application/json" : "text/plain";
+ return {data=>$data,type=>$type};
+}
+
+sub webui_automation_boot_recover (@) {
+ return 0 if(!PGAutomation::ensure_store());
+ foreach my $run_id (PGAutomation::list_run_ids()) {
+  my $run_path=PGAutomation::run_dir($run_id)."/run.json";
+  my ($recovery_ok,$recovered,$recovery_error)=PGAutomation::with_lock($run_path,sub {
+   my ($run)=@_;
+   return undef if(ref($run) ne "HASH" || ($run->{status}||"") ne "running" && ($run->{status}||"") ne "starting");
+   my $pid=$run->{runner_pid}||0;
+   return undef if PGAutomation::pid_is_live($pid,"pgen_automation_runner.pl");
+   my $now=PGAutomation::now();
+   $run->{status}="interrupted"; $run->{interrupted_at}=$now; $run->{runner_pid}=0;
+   $run->{failure}={stage=>$run->{active_stage}||"daemon-restarted",error_code=>"daemon-restarted",message=>"The daemon restarted while this automation run was active",at=>$now};
+   if(defined($run->{active_item}) && ref($run->{items}[$run->{active_item}]) eq "HASH") {
+    my $number=int($run->{active_item});
+    my $item=$run->{items}[$number];
+    $item->{status}="interrupted"; $item->{failure}=$run->{failure};
+    $item->{active_stage}=$run->{active_stage}||$item->{active_stage}||"daemon-restarted";
+    $item->{checkpoints}||=[];
+    push @{$item->{checkpoints}},{name=>$item->{active_stage},status=>"interrupted",verified=>0,evidence=>{daemon_restarted=>1},completed_at=>$now};
+    my ($item_ok,undef,$item_error)=PGAutomation::with_lock(PGAutomation::item_dir($run_id,$number)."/item.json",sub { return $item; });
+    die($item_error||"Unable to write recovered item") if(!$item_ok);
+   }
+   $recovered=1;
+   return $run;
+  });
+  # A failed recovery leaves the run untouched so the next daemon start can
+  # retry it; the live runner check above prevents interrupting a real runner.
+ }
+ PGAutomation::with_lock(PGAutomation::base_dir()."/execution.json",sub {
+  my ($execution)=@_;
+  return undef if(ref($execution) ne "HASH" || !&webui_automation_active_status($execution->{status}));
+  my $run=&webui_automation_run($execution->{run_id});
+  if(ref($run) eq "HASH" && ($run->{status}||"") =~ /^(?:running|starting)$/) {
+   my $pid=$run->{runner_pid}||$execution->{pid}||0;
+   return undef if PGAutomation::pid_is_live($pid,"pgen_automation_runner.pl");
+  }
+  return undef if(ref($run) eq "HASH" && ($run->{status}||"") eq "paused");
+  if(ref($run) ne "HASH" || ($run->{status}||"") =~ /^(?:running|starting|stopping|interrupted)$/) {
+   $execution->{status}="interrupted"; $execution->{pid}=0; $execution->{updated_at}=PGAutomation::now();
+   return $execution;
+  }
+  return {__pg_automation_delete=>1} if(($run->{status}||"") =~ /^(?:complete|failed|stopped)$/);
+  return undef;
+ });
+ return 1;
+}
+
+sub webui_automation_api (@) {
+ my ($path,$method,$body)=@_;
+ my $payload=&webui_automation_body($body);
+ if($path eq "/api/automation/recipes" && $method eq "GET") { return &webui_automation_json({status=>"ok",recipes=>&webui_automation_list_defs("recipe")}); }
+ if($path eq "/api/automation/recipes" && $method eq "POST") { return &webui_automation_save_recipe($payload); }
+ if($path eq "/api/automation/recipes/delete" && $method eq "POST") { return &webui_automation_delete_def("recipe",$payload->{id}||$payload->{recipe_id}); }
+ if($path=~m{^/api/automation/recipes/([^/]+)/delete$} && $method eq "POST") { return &webui_automation_delete_def("recipe",$1); }
+ if($path eq "/api/automation/queues" && $method eq "GET") { return &webui_automation_json({status=>"ok",queues=>&webui_automation_list_defs("queue")}); }
+ if($path eq "/api/automation/queues" && $method eq "POST") { return &webui_automation_save_queue($payload); }
+ if($path eq "/api/automation/queues/delete" && $method eq "POST") { return &webui_automation_delete_def("queue",$payload->{id}||$payload->{queue_id}); }
+ if($path=~m{^/api/automation/queues/([^/]+)/delete$} && $method eq "POST") { return &webui_automation_delete_def("queue",$1); }
+ if($path eq "/api/automation/readiness" && $method eq "POST") { return &webui_automation_json(&webui_automation_readiness_data($payload)); }
+ if(($path eq "/api/automation/start" || $path eq "/api/automation/runs/start") && $method eq "POST") { return &webui_automation_start($payload); }
+ if($path eq "/api/automation/runs" && $method eq "GET") { return &webui_automation_json({status=>"ok",runs=>&webui_automation_list_runs()}); }
+ if($path eq "/api/automation/runs/current" && $method eq "GET") {
+  my $execution=&webui_automation_read_execution();
+  my $run=ref($execution) eq "HASH" ? &webui_automation_run($execution->{run_id}) : undef;
+  my $public_execution=ref($execution) eq "HASH" ? PGAutomation::clone($execution) : undef;
+  delete($public_execution->{token}) if(ref($public_execution) eq "HASH");
+  return &webui_automation_json({status=>"ok",execution=>$public_execution,run=>ref($run) eq "HASH" ? &webui_automation_public_run($run) : undef});
+ }
+ if($path=~m{^/api/automation/runs/([^/]+)/edit$} && $method eq "POST") { return &webui_automation_edit_run($1,$payload); }
+ if($path=~m{^/api/automation/runs/([^/]+)/delete$} && $method eq "POST") { return &webui_automation_delete_run($1); }
+ if($path=~m{^/api/automation/runs/([^/]+)/control/(pause|resume|stop)$} && $method eq "POST") { return &webui_automation_control($1,$2); }
+ if($path=~m{^/api/automation/runs/(pause|resume|stop)$} && $method eq "POST") { return &webui_automation_control($payload->{run_id},$1); }
+ if($path eq "/api/automation/runs/delete" && $method eq "POST") { return &webui_automation_delete_run($payload->{run_id}||$payload->{id}); }
+ if($path=~m{^/api/automation/runs/([^/]+)/items/(\d+)/(.*)$} && $method eq "GET") {
+  my $artifact=&webui_automation_artifact($1,"items/".int($2)."/".$3);
+  return &webui_automation_error("Automation artifact not found","not-found") if(ref($artifact) ne "HASH");
+  return &webui_automation_json({status=>"ok",artifact=>"/api/automation/runs/$1/artifact/items/".int($2)."/$3",content=>$artifact->{data}});
+ }
+ if($path eq "/api/automation/control" && $method eq "POST") { return &webui_automation_control($payload->{run_id},$payload->{action}); }
+ if($path=~m{^/api/automation/runs/([^/]+)$} && $method eq "GET") {
+  my $run=&webui_automation_run($1);
+  return &webui_automation_error("Automation run not found","not-found") if(ref($run) ne "HASH");
+  return &webui_automation_json({status=>"ok",run=>&webui_automation_public_run($run)});
+ }
+ return &webui_automation_error("Unknown automation route","not-found");
+}
+
+
+###############################################
 #              HTML Page                      #
 ###############################################
 my %_webui_asset_allowed = map { $_ => 1 } qw(
@@ -12780,6 +13695,8 @@ my %_webui_asset_allowed = map { $_ => 1 } qw(
  webui-workspace.js
  webui-lg-card.html
  webui-lg.js
+ webui-automation.html
+ webui-automation.js
 );
 my %_webui_asset_cache;
 my $_webui_asset_missing="";
@@ -12939,10 +13856,12 @@ sub webui_html (@) {
  foreach my $asset (["__PG_CSS_THEME__","webui-theme.css"],
                     ["__PG_CSS_LAYOUT__","webui-layout.css"],
                     ["__PG_BODY__","webui-body.html"],
+                    ["__PG_AUTOMATION_CARD__","webui-automation.html"],
                     ["__PG_LOGO_DARK__","webui-logo-dark.html"],
                     ["__PG_JS_COLOUR_MATH__","webui-colour-math.js"],
                     ["__PG_JS_APP__","webui-app.js"],
-                    ["__PG_JS_WORKSPACE__","webui-workspace.js"]) {
+                    ["__PG_JS_WORKSPACE__","webui-workspace.js"],
+                    ["__PG_AUTOMATION_JS__","webui-automation.js"]) {
   my ($marker,$name)=@{$asset};
   my $content=&webui_asset($name);
   return &webui_recovery_html($_webui_asset_missing || $name) if($content eq "");

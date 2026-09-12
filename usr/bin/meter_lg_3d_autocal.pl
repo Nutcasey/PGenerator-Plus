@@ -30,6 +30,7 @@ use PGSignalCode qw(signal_code_policy signal_percent_to_code);
 
 our $PGAC_LOADED = 0;
 eval { require '/usr/share/PGenerator/PGAutoCalRun.pm'; $PGAC_LOADED = 1; 1 };
+our $LG_3D_AUTOMATION_TOKEN = "";
 
 my $config_file = shift || "/tmp/meter_lg_3d_autocal_config.json";
 my $state_file = shift || "/tmp/meter_lg_3d_autocal.json";
@@ -179,7 +180,12 @@ sub api_json {
  $method ||= "GET";
  $timeout ||= 30;
  $timeout=1 if($timeout < 1);
- my $body=defined($payload) ? $json->encode($payload) : "";
+ my $request_payload=$payload;
+ if($method ne "GET" && ref($payload) eq "HASH"
+    && $LG_3D_AUTOMATION_TOKEN=~/^[A-Za-z0-9_.:-]{8,200}$/) {
+  $request_payload={%{$payload},automation_token=>$LG_3D_AUTOMATION_TOKEN};
+ }
+ my $body=defined($request_payload) ? $json->encode($request_payload) : "";
  my $deadline=time()+$timeout;
  my $socket=IO::Socket::INET->new(PeerHost=>$api_host,PeerPort=>$api_port,Proto=>"tcp",Timeout=>$timeout);
  return { status=>"error", message=>"Web UI API is unavailable" } if(!$socket);
@@ -5068,6 +5074,9 @@ sub run_hdr20_postcal_shadow_correction {
 
 unless(caller()) {
 my $config=decode_json_safe(read_file($config_file),{});
+$LG_3D_AUTOMATION_TOKEN=$config->{automation_token}
+ if(ref($config) eq "HASH" && defined($config->{automation_token})
+    && $config->{automation_token}=~/^[A-Za-z0-9_.:-]{8,200}$/);
 # Calibration-card Target White / Target Black overrides flow into the
 # fixture-mode synthetic readings and the profile target curve.
 if(ref($config) eq "HASH") {

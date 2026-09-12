@@ -1,0 +1,86 @@
+<section class="card span2" id="automationCard" data-widget="automation" data-desktop-workspace="automation" data-desktop-order="10" draggable="true">
+ <h2><span class="drag-handle">&#9776;</span>Full Automation <span id="pgAutomationState" style="float:right;font-size:.7rem;color:var(--text2)">Idle</span></h2>
+ <div id="pgAutomationNotice" role="status" style="display:none;margin:0 0 10px;padding:8px;border:1px solid var(--border);border-radius:6px;color:var(--text2);white-space:pre-wrap"></div>
+ <div class="btn-row" style="margin-bottom:10px">
+  <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationTab('recipes')">Recipes</button>
+  <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationTab('queue')">Queue</button>
+  <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationTab('live')">Live</button>
+  <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationTab('history')">History</button>
+  <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationRefresh()">Refresh</button>
+ </div>
+
+ <div id="pgAutomationTabRecipes" class="pg-automation-tab">
+  <div class="grid">
+   <div class="field"><label for="pgAutomationRecipeName">Recipe name</label><input id="pgAutomationRecipeName" type="text" maxlength="120" value="SDR calibration"></div>
+   <div class="field"><label for="pgAutomationSignal">Signal</label><select id="pgAutomationSignal" onchange="pgAutomationModesChanged()"><option value="sdr">SDR</option><option value="hdr10">HDR10</option><option value="hlg">HLG</option><option value="dv">Dolby Vision</option></select></div>
+   <div class="field"><label for="pgAutomationPictureMode">LG picture mode</label><select id="pgAutomationPictureMode"></select></div>
+   <div class="field"><label for="pgAutomationSettle">Settle seconds</label><input id="pgAutomationSettle" type="number" min="0" max="600" value="8"></div>
+  </div>
+  <div class="field" style="margin-top:8px">
+   <label>Picture settings reported by the connected TV</label>
+   <div class="btn-row" style="margin:4px 0 8px;gap:8px;align-items:center">
+    <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationLoadSupportedKeys()">Refresh TV-supported keys</button>
+    <span id="pgAutomationSettingsStatus" style="color:var(--text2)">Connect the TV, then refresh the supported keys.</span>
+   </div>
+   <div id="pgAutomationSettingsEditor" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px"></div>
+   <textarea id="pgAutomationSettings" rows="2" spellcheck="false" style="display:none">{}</textarea>
+  </div>
+  <div class="btn-row" style="margin-top:8px;gap:12px;flex-wrap:wrap">
+   <label><input id="pgAutomationPre" type="checkbox" checked> Pre readings</label>
+   <label><input id="pgAutomationCal" type="checkbox" checked> Calibration</label>
+   <label><input id="pgAutomationPost" type="checkbox" checked> Post readings</label>
+   <label><input id="pgAutomationApplyAll" type="checkbox" checked> Apply to all inputs</label>
+  </div>
+  <div class="btn-row" style="margin-top:8px;gap:12px;flex-wrap:wrap">
+   <span style="color:var(--text2)">Series</span>
+   <label><input id="pgAutomationSeriesGrey" type="checkbox" checked> Greyscale 21</label>
+   <label><input id="pgAutomationSeriesColors" type="checkbox" checked> Colors 30</label>
+   <label><input id="pgAutomationSeriesSats" type="checkbox" checked> Saturations 24</label>
+  </div>
+  <div class="btn-row" style="margin-top:8px;gap:12px;align-items:center;flex-wrap:wrap">
+   <label><input id="pgAutomationQuality" type="checkbox"> Check post-reading dE limits</label>
+   <label>Average <input id="pgAutomationQualityAvg" type="number" min="0" step=".01" value="2" style="width:80px"></label>
+   <label>Maximum <input id="pgAutomationQualityMax" type="number" min="0" step=".01" value="5" style="width:80px"></label>
+  </div>
+  <div class="grid" style="margin-top:8px">
+   <div class="field"><label for="pgAutomationPanelPolicy">Panel-light policy</label><select id="pgAutomationPanelPolicy"><option value="fixed">Fixed</option><option value="target">Target luminance (SDR)</option></select></div>
+   <div class="field"><label for="pgAutomationPanelKey">Panel-light key reported by TV</label><select id="pgAutomationPanelKey"><option value="">Load TV-supported keys first</option></select></div>
+   <div class="field"><label for="pgAutomationPanelValue">Fixed value</label><input id="pgAutomationPanelValue" type="text" value="80"></div>
+   <div class="field"><label for="pgAutomationPanelTarget">Target luminance</label><input id="pgAutomationPanelTarget" type="number" min="1" value="100"></div>
+  </div>
+  <div class="btn-row" style="margin-top:10px">
+   <button class="btn btn-sm btn-primary" type="button" onclick="pgAutomationSaveRecipe()">Save recipe</button>
+   <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationNewRecipe()">New recipe</button>
+  </div>
+  <div id="pgAutomationRecipeList" style="margin-top:10px"></div>
+ </div>
+
+ <div id="pgAutomationTabQueue" class="pg-automation-tab" style="display:none">
+  <div class="grid">
+   <div class="field"><label for="pgAutomationQueueName">Queue name</label><input id="pgAutomationQueueName" type="text" maxlength="120" value="TV calibration queue"></div>
+   <div class="field"><label for="pgAutomationRecipeSelect">Add recipe</label><select id="pgAutomationRecipeSelect"></select></div>
+  </div>
+  <div class="btn-row" style="margin-top:8px">
+   <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationQueueAdd()">Add to queue</button>
+   <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationQueueSave()">Save queue</button>
+   <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationReadiness()">Run readiness</button>
+   <button class="btn btn-sm btn-primary" type="button" onclick="pgAutomationStart()">Start queue</button>
+  </div>
+  <div id="pgAutomationQueueItems" style="margin-top:10px"></div>
+  <div id="pgAutomationReadiness" style="margin-top:10px"></div>
+ </div>
+
+ <div id="pgAutomationTabLive" class="pg-automation-tab" style="display:none">
+  <div id="pgAutomationLive" style="color:var(--text2)">No active run.</div>
+  <div class="btn-row" style="margin-top:10px">
+   <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationControl('pause')">Pause at checkpoint</button>
+   <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationControl('resume')">Resume</button>
+   <button class="btn btn-sm btn-danger" type="button" onclick="pgAutomationControl('stop')">Stop</button>
+  </div>
+ </div>
+
+ <div id="pgAutomationTabHistory" class="pg-automation-tab" style="display:none">
+  <div id="pgAutomationHistoryList" style="color:var(--text2)">No automation history.</div>
+  <div id="pgAutomationHistoryDetail" style="margin-top:12px"></div>
+ </div>
+</section>

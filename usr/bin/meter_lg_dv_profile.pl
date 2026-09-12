@@ -24,6 +24,7 @@ die "Usage: $0 <config.json> <state.json> <stop-file>\n" if(!defined($config_fil
 my $json=JSON::PP->new->canonical->allow_nonref;
 my $api_host="127.0.0.1";
 my $api_port=80;
+my $automation_token="";
 
 sub read_file {
  my ($path)=@_;
@@ -47,7 +48,12 @@ sub api_json {
  $method||="GET";
  $timeout||=30;
  $timeout=1 if($timeout < 1);
- my $body=defined($payload) ? $json->encode($payload) : "";
+ my $request_payload=$payload;
+ if($method ne "GET" && ref($payload) eq "HASH"
+    && $automation_token=~/^[A-Za-z0-9_.:-]{8,200}$/) {
+  $request_payload={%{$payload},automation_token=>$automation_token};
+ }
+ my $body=defined($request_payload) ? $json->encode($request_payload) : "";
  my $deadline=time()+$timeout;
  my $socket=IO::Socket::INET->new(
   PeerHost=>$api_host,
@@ -98,6 +104,9 @@ sub api_json {
 
 my $config=eval { $json->decode(read_file($config_file)) } || {};
 die "Empty/invalid config\n" if(ref($config) ne "HASH");
+$automation_token=$config->{automation_token}
+ if(defined($config->{automation_token})
+    && $config->{automation_token}=~/^[A-Za-z0-9_.:-]{8,200}$/);
 
 write_state(status=>"running",message=>"Starting Dolby Vision profile measurement",steps=>[]);
 

@@ -245,7 +245,14 @@ sub api_json {
  $method ||= "GET";
  $timeout ||= 30;
  $timeout=1 if($timeout < 1);
- my $body = defined($payload) ? $json->encode($payload) : "";
+ my $request_payload=$payload;
+ if($method ne "GET" && ref($payload) eq "HASH"
+    && ref($LG_AUTOCAL_CONFIG) eq "HASH"
+    && defined($LG_AUTOCAL_CONFIG->{automation_token})
+    && $LG_AUTOCAL_CONFIG->{automation_token}=~/^[A-Za-z0-9_.:-]{8,200}$/) {
+  $request_payload={%{$payload},automation_token=>$LG_AUTOCAL_CONFIG->{automation_token}};
+ }
+ my $body = defined($request_payload) ? $json->encode($request_payload) : "";
  my $deadline=time()+$timeout;
  my $socket = IO::Socket::INET->new(
   PeerHost => $api_host,
