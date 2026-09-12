@@ -2,6 +2,8 @@
 
 Status: preparation review and fixes are deployed on `feature/full-automation`. The owner has switched the TV off and explicitly limited further work to preparation. No full-length proof has been run, and no pull request has been opened.
 
+Publishing is blocked: pushing the preparation commit `a414fab3` to `origin` returned HTTP 403 because the signed-in GitHub account `Nutcasey` lacks write access to `oldgithubman/PGenerator-Plus`. The commit is local and deployed on the Pi; no remote CI run was started. Restore repository write access before pushing the branch. Do not change the remote or create another fork implicitly.
+
 The live target is the owner's LG `OLED55G36LA` G3, webOS 23, software/firmware `23.25.55`, webOS release `9.2.2`, with a physical Calibrite/X-Rite i1Display Pro Plus. The G3 exposes `backlight`, `energySaving`, and `pictureMode` through the current control API. It does not expose the original G5 `oledPixelBrightness` key.
 
 ## Proved examples
