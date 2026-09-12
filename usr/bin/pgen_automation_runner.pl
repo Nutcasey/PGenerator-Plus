@@ -1821,6 +1821,8 @@ sub _stop_active {
             _log("stop cleanup $ACTIVE_WORKER process_alive=" . (_worker_process_alive($ACTIVE_WORKER) ? 1 : 0));
         }
     }
+    my $meter_session = _api('POST', '/api/meter/session/stop', {}, 1, 0);
+    _log('stop cleanup meter session=' . (($meter_session && ref($meter_session) eq 'HASH' && ($meter_session->{status} || '') eq 'ok') ? 'ok' : 'failed'));
     if ($ACTIVE_ITEM && ref($ACTIVE_ITEM) eq 'HASH') {
         my $item = $ACTIVE_ITEM;
         my $number = $item->{item_number} || 0;
@@ -1855,6 +1857,8 @@ sub _stop_active {
 
 sub _finish {
     my ($status, $failure) = @_;
+    my $meter_session = _api('POST', '/api/meter/session/stop', {}, 1, 0);
+    _log('finish cleanup meter session=' . (($meter_session && ref($meter_session) eq 'HASH' && ($meter_session->{status} || '') eq 'ok') ? 'ok' : 'failed'));
     _update_run(sub {
         my ($run) = @_;
         $run->{status} = $status;

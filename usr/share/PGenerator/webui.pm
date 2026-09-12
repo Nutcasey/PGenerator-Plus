@@ -13225,8 +13225,14 @@ sub webui_automation_readiness_data (@) {
  my $meter_detected=$meter->{detected} ? 1 : 0;
  my $meter_simulated=$meter->{simulated} ? 1 : 0;
  $check->($meter_detected && !$meter_simulated,"meter-detected",$meter_simulated ? "The simulated meter cannot run calibration" : $meter_detected ? "Meter detected" : "Connect a physical meter before starting automation");
- my $busy=(&webui_meter_series_alive() || &webui_meter_session_alive() || &webui_meter_lg_autocal_running() || &webui_meter_lg_3d_autocal_running() || &webui_meter_lg_dv_profile_running()) ? 1 : 0;
- $check->(!$busy,"meter-idle",$busy ? "Stop the active meter operation before starting automation" : "Meter is idle");
+ # meter_session.sh is a persistent, reusable session. A live session by
+ # itself is not an active operation; guided workers and meter series are
+ # the operation locks that must prevent a new automation run.
+ my $guided_busy=(&webui_meter_series_alive() || &webui_meter_lg_autocal_running() || &webui_meter_lg_3d_autocal_running() || &webui_meter_lg_dv_profile_running()) ? 1 : 0;
+ my $session_alive=&webui_meter_session_alive() ? 1 : 0;
+ my $busy=$guided_busy ? 1 : 0;
+ my $meter_message=$busy ? "Stop the active meter operation before starting automation" : ($session_alive ? "Meter session is reusable" : "Meter is idle");
+ $check->(!$busy,"meter-idle",$meter_message);
  my $free_mb;
  if(open(my $df,"-|","df","-Pk",PGAutomation::base_dir())) {
   my @lines=<$df>; close($df);
