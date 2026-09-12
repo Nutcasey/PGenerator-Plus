@@ -394,12 +394,12 @@ function pgAutomationRenderLiveRun(run,execution){
  const items=Array.isArray(run.items)?run.items:[];
  const activeItem=active>=0&&items[active]?items[active]:null;
  const heartbeat=Number(run.heartbeat||0);
- const heartbeatAge=heartbeat?Math.max(0,Math.round(Date.now()/1000-heartbeat))+'s ago':'unknown';
- const checkpoint=(activeItem&&activeItem.checkpoint)||run.checkpoint||'none';
+ const heartbeatAge=run.heartbeat_age!=null?Math.max(0,Number(run.heartbeat_age)||0)+'s ago':heartbeat?Math.max(0,Math.round(Date.now()/1000-heartbeat))+'s ago':'unknown';
+ const checkpoint=run.last_checkpoint||run.checkpoint||'none';
  live.innerHTML='<div style="margin-bottom:8px"><strong>'+pgAutomationEscape(run.queue_name||'Automation queue')+'</strong> · '+pgAutomationEscape(status)+' · '+pgAutomationEscape(run.id||'')+'</div>'
   +'<div style="margin-bottom:8px;color:var(--text2)">'+(active>=0?'Current item '+(active+1)+' of '+items.length+' · '+pgAutomationEscape(run.active_stage||'working'):'No active item')+(execution&&execution.pid?' · runner '+pgAutomationEscape(execution.pid):'')+'</div>'
   +'<div style="margin-bottom:8px;color:var(--text2)">Checkpoint: '+pgAutomationEscape(checkpoint)+' · Heartbeat: '+pgAutomationEscape(heartbeatAge)+'</div>'
-  +'<div>'+items.map((item,i)=>'<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-top:1px solid var(--border)"><span>'+(i+1)+'. '+pgAutomationEscape(item.name||item.picture_mode||'Item')+'</span><span style="color:'+(item.status==='complete'||item.status==='complete-with-warnings'?'var(--green)':item.status==='failed'?'var(--red)':'var(--text2)')+'">'+pgAutomationEscape(item.status||'queued')+(i===active?' · '+pgAutomationEscape(item.active_stage||'working'):'')+'</span></div>').join('')+'</div>'
+  +'<div>'+items.map((item,i)=>'<div style="display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-top:1px solid var(--border)"><span>'+(i+1)+'. '+pgAutomationEscape(item.name||item.picture_mode||'Item')+'</span><span style="color:'+(item.status==='complete'||item.status==='complete-with-warnings'?'var(--green)':item.status==='failed'?'var(--red)':'var(--text2)')+'">'+pgAutomationEscape(item.status||'queued')+(i===active?' · '+pgAutomationEscape(run.active_stage||'working'):'')+'</span></div>').join('')+'</div>'
   +'<div class="btn-row" style="margin-top:8px"><button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationEditActiveQueue()">Save pending queue edits</button></div>';
 }
 
@@ -424,7 +424,7 @@ function pgAutomationRenderHistoryList(){
 async function pgAutomationOpenHistory(index){
  const summary=pgAutomation.history[index];
  if(!summary)return;
- const result=await fetchJSON('/api/automation/runs/'+encodeURIComponent(summary.id),{_quiet:true,_timeoutMs:10000});
+ const result=await fetchJSON('/api/automation/runs/'+encodeURIComponent(summary.id),{_quiet:true,_timeoutMs:30000});
  const run=result&&result.run;
  if(!run){pgAutomationNotice((result&&result.message)||'Unable to load automation history',true);return;}
  pgAutomation.currentHistoryRunId=run.id||summary.id||'';
@@ -448,7 +448,7 @@ function pgAutomationHistoryItemHtml(item,index){
  if(quality&&quality.warnings&&quality.warnings.length)details.push('Quality limits: '+quality.warnings.length+' miss'+(quality.warnings.length===1?'':'es'));
  if(panel&&panel.warning)details.push(pgAutomationEscape(panel.warning));
  const base=item&&item.item_number!=null?item.item_number:index;
- return '<div style="padding:8px 0;border-top:1px solid var(--border)"><strong>Item '+(index+1)+': '+pgAutomationEscape(item&&item.name||item&&item.picture_mode||'')+'</strong><br><span style="color:var(--text2)">'+details.join(' · ')+'</span><br><a href="/api/automation/runs/'+encodeURIComponent(pgAutomation.currentHistoryRunId||'')+'/items/'+base+'/settings-checks.ndjson" target="_blank" style="color:var(--link)">Settings checks</a></div>';
+ return '<div style="padding:8px 0;border-top:1px solid var(--border)"><strong>Item '+(index+1)+': '+pgAutomationEscape(item&&item.name||item&&item.picture_mode||'')+'</strong><br><span style="color:var(--text2)">'+details.join(' · ')+'</span><br><a href="/api/automation/runs/'+encodeURIComponent(pgAutomation.currentHistoryRunId||'')+'/artifact/items/'+base+'/settings-checks.ndjson" target="_blank" style="color:var(--link)">Settings checks</a></div>';
 }
 
 async function pgAutomationBuildHistoryReport(run){
@@ -457,18 +457,24 @@ async function pgAutomationBuildHistoryReport(run){
  if(pgAutomation.reportBusy)return;
  pgAutomation.reportBusy=true;
  const entries=[];
+ const runId=String(run&&run.id||pgAutomation.currentHistoryRunId||'');
+ const seriesRequests=[];
  (run.items||[]).forEach((item,index)=>{
-  const calibration=item.calibration||{};
+  const calibration=item&&item.calibration||{};
   const grey=calibration['grey-state'];
   if(grey&&Array.isArray(grey.readings)&&grey.readings.length)entries.push({title:'Item '+(index+1)+' Calibration Greyscale',snapshot:grey});
   ['pre','post'].forEach(stage=>{
-   const series=item.series&&item.series[stage]||{};
    ['greyscale-21','colors-30','saturations-24'].forEach(key=>{
-    entries.push({title:'Item '+(index+1)+' '+(stage==='pre'?'Pre-Cal ':'Post-Cal ')+key,snapshot:series[key]||null});
+    seriesRequests.push({
+     title:'Item '+(index+1)+' '+(stage==='pre'?'Pre-Cal ':'Post-Cal ')+key,
+     path:'/api/automation/runs/'+encodeURIComponent(runId)+'/artifact/items/'+index+'/'+stage+'/'+key+'.json'
+    });
    });
   });
  });
  try{
+  const snapshots=await Promise.all(seriesRequests.map(request=>fetchJSON(request.path,{_quiet:true,_timeoutMs:30000})));
+  seriesRequests.forEach((request,index)=>entries.push({title:request.title,snapshot:snapshots[index]||null}));
   const html=await meterFullAutoCalBuildSnapshotReportSections(entries);
   target.innerHTML=html||'<div style="color:var(--text2)">No graph data was saved for this run.</div>';
  }catch(e){target.innerHTML='<div style="color:var(--red)">Unable to render saved graphs: '+pgAutomationEscape(e.message||e)+'</div>';}

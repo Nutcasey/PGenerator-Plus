@@ -62,6 +62,22 @@ sub _run {
     return PGAutomation::read_json_file($RUN_FILE) || {};
 }
 
+sub _active_item_number {
+    return undef if ref($ACTIVE_ITEM) ne 'HASH';
+    return undef if !defined($ACTIVE_ITEM->{item_number}) || $ACTIVE_ITEM->{item_number} !~ /^\d+$/;
+    return int($ACTIVE_ITEM->{item_number});
+}
+
+sub _worker_summary {
+    my ($status) = @_;
+    return {} if ref($status) ne 'HASH';
+    my %summary;
+    foreach my $key (qw(status current_name current_step total_steps current_delta_e message)) {
+        $summary{$key} = $status->{$key} if exists($status->{$key});
+    }
+    return \%summary;
+}
+
 sub _write_run {
     my ($run) = @_;
     return PGAutomation::write_json_atomic($RUN_FILE, $run, 0664);
@@ -139,7 +155,9 @@ sub _heartbeat {
         $run->{heartbeat} = $now;
         $run->{heartbeat_at} = strftime('%Y-%m-%dT%H:%M:%SZ', gmtime($now));
         $run->{runner_pid} = $$;
-        $run->{active_item} = $ACTIVE_ITEM if defined($ACTIVE_ITEM);
+        my $active_item = _active_item_number();
+        $run->{active_item} = $active_item if defined($active_item);
+        delete($run->{active_grey_state});
         $run->{active_stage} = $ACTIVE_STAGE if $ACTIVE_STAGE ne '';
     });
     die 'Unable to write automation execution heartbeat' if !_write_execution();
@@ -534,13 +552,25 @@ sub _lattice_patches {
 }
 
 sub _three_d_payload {
-    my ($item, $run) = @_;
+    my ($item, $run, $item_number) = @_;
     my $signal = _signal($item);
     my $cal = ref($item->{calibration}) eq 'HASH' ? $item->{calibration} : {};
     my $method = lc($cal->{method} || $item->{method} || ($signal eq 'hdr10' ? 'matrix' : 'hybrid'));
     $method = 'matrix' if $signal eq 'hdr10' && $method ne 'imported';
     $method = 'hybrid' if $method !~ /^(?:matrix|ramp|lattice|skeleton|hybrid|imported)$/;
-    my $grey = ref($run->{active_grey_state}) eq 'HASH' ? $run->{active_grey_state} : {};
+    my $grey = {};
+    if (defined($item_number)) {
+        my $saved = PGAutomation::read_json_file(
+            PGAutomation::item_dir($RUN_ID, $item_number) . '/calibration/grey-state.json'
+        );
+        $grey = $saved if ref($saved) eq 'HASH';
+    }
+    # Runs written before the compact heartbeat format may still have the
+    # full state at the top level. Keep that as a resume fallback, but never
+    # write it back into a new run record.
+    $grey = $run->{active_grey_state}
+        if ref($grey) ne 'HASH' || !%$grey;
+    $grey = {} if ref($grey) ne 'HASH';
     my $body = {
         method => $method,
         type => 'lg-3d-lut',
@@ -644,9 +674,10 @@ sub _wait_worker {
         my $state = $status->{status} || '';
         _update_run(sub {
             my ($run) = @_;
-            $run->{worker_status} = $status;
+            $run->{worker_status} = _worker_summary($status);
             $run->{active_stage} = $ACTIVE_STAGE;
-            $run->{active_item} = $ACTIVE_ITEM if defined($ACTIVE_ITEM);
+            my $active_item = _active_item_number();
+            $run->{active_item} = $active_item if defined($active_item);
         });
         return $status if _status_terminal($state);
         return { status => 'error', error_code => 'worker-timeout', message => "$kind exceeded six hours" }
@@ -1389,7 +1420,6 @@ sub _calibration_greyscale_stage {
     $ACTIVE_WORKER = '';
     return 0 if !$copied;
     return 0 if !ref($grey) || ($grey->{status} || '') ne 'complete';
-    _update_run(sub { $_[0]{active_grey_state} = $grey; });
     return 1;
 }
 
@@ -1437,7 +1467,7 @@ sub _calibration_volume_stage {
     }
     _log('launching LG 3D LUT AutoCal worker');
     $ACTIVE_WORKER = '3d';
-    my $start = _api('POST', '/api/meter/lg-3d-autocal/start', _three_d_payload($item, _run()));
+    my $start = _api('POST', '/api/meter/lg-3d-autocal/start', _three_d_payload($item, _run(), $item_number));
     if (!$start || ($start->{status} || '') ne 'started') {
         $ACTIVE_WORKER = '';
         $::LAST_ERROR = $start->{message} || 'Unable to start LG 3D LUT AutoCal';

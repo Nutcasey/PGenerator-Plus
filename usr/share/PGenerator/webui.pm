@@ -940,6 +940,14 @@ sub webui_route_device_lane (@) {
  $method="" if(!defined($method));
  $path="" if(!defined($path));
  return "renderer" if($path eq "/api/pattern" && $method eq "POST");
+ # Automation history and live-state reads only touch the filesystem. Keep
+ # them on the general lane so a slow LG command cannot make the live card
+ # report the TV lane as unavailable. Writes and readiness stay on the TV lane
+ # because they coordinate the LG automation lock.
+ if($method eq "GET" && ($path eq "/api/automation/runs" || $path eq "/api/automation/runs/current"
+  || $path=~m{^/api/automation/runs/[A-Za-z0-9][A-Za-z0-9_.-]*(?:/artifact(?:/.*)?|/items/\d+/.*)?$})) {
+  return "";
+ }
  return "tv" if($path=~m{^/api/automation(?:/|$)});
  return "tv" if($path=~m{^/api/lg(?:/|$)} || $path=~m{^/api/cec(?:/|$)});
  return "meter" if($path=~m{^/api/meter(?:/|$)});
@@ -12931,7 +12939,73 @@ sub webui_automation_read_execution (@) {
  return ref($execution) eq "HASH" ? $execution : undef;
 }
 
+sub webui_automation_worker_summary (@) {
+ my ($worker)=@_;
+ return {} if(ref($worker) ne "HASH");
+ my %summary;
+ foreach my $key (qw(status current_name current_step total_steps current_delta_e message)) {
+  $summary{$key}=$worker->{$key} if(exists($worker->{$key}));
+ }
+ return \%summary;
+}
+
+sub webui_automation_item_summary (@) {
+ my ($item)=@_;
+ $item={} if(ref($item) ne "HASH");
+ return {
+  name=>defined($item->{name}) && $item->{name} ne "" ? $item->{name} : ($item->{picture_mode}||"Item"),
+  status=>$item->{status}||"queued",
+ };
+}
+
 sub webui_automation_public_run (@) {
+ my ($run,$execution)=@_;
+ return {} if(ref($run) ne "HASH");
+ my $raw_items=ref($run->{items}) eq "ARRAY" ? $run->{items} : [];
+ $raw_items=$run->{queue_snapshot}{items} if(!@$raw_items && ref($run->{queue_snapshot}) eq "HASH" && ref($run->{queue_snapshot}{items}) eq "ARRAY");
+ my @items=map { &webui_automation_item_summary($_) } @$raw_items;
+ my $active_item=$run->{active_item};
+ if(ref($active_item) eq "HASH") {
+  $active_item=$active_item->{item_number};
+ }
+ $active_item=int($active_item) if(defined($active_item) && $active_item=~/^\d+$/);
+ $active_item=undef if(defined($active_item) && $active_item!~/^\d+$/);
+ my $active_record=defined($active_item) && $active_item>=0 && $active_item<@{$raw_items}
+  ? $raw_items->[$active_item] : undef;
+ my $checkpoint=$run->{checkpoint};
+ $checkpoint=$active_record->{checkpoint} if((!defined($checkpoint) || $checkpoint eq "") && ref($active_record) eq "HASH");
+ $checkpoint=$run->{last_checkpoint}{name} if(ref($run->{last_checkpoint}) eq "HASH" && (!defined($checkpoint) || $checkpoint eq ""));
+ $checkpoint="" if(!defined($checkpoint) || ref($checkpoint));
+ my $heartbeat=$run->{heartbeat};
+ $heartbeat=0+$heartbeat if(defined($heartbeat) && $heartbeat=~/^\d+(?:\.\d+)?$/);
+ $heartbeat=undef if(defined($heartbeat) && (ref($heartbeat) || $heartbeat!~/^\d+(?:\.\d+)?$/));
+ my $queue_snapshot=ref($run->{queue_snapshot}) eq "HASH" ? $run->{queue_snapshot} : {};
+ my $public={
+  id=>$run->{id}||"",
+  status=>$run->{status}||"idle",
+  queue_name=>$run->{queue_name}||$queue_snapshot->{name}||"Automation queue",
+  active_item=>$active_item,
+  items=>\@items,
+  active_stage=>$run->{active_stage}||((ref($active_record) eq "HASH" && $active_record->{active_stage})||""),
+  checkpoint=>$checkpoint,
+  last_checkpoint=>$checkpoint,
+  checkpoint_status=>$run->{checkpoint_status}||((ref($active_record) eq "HASH" && $active_record->{checkpoint_status})||""),
+  heartbeat=>$heartbeat,
+  heartbeat_age=>defined($heartbeat) ? (time()-$heartbeat<0 ? 0 : int(time()-$heartbeat)) : undef,
+  lock_owner=>ref($execution) eq "HASH" ? ($execution->{owner}||"") : ($run->{lock_owner}||""),
+  worker_status=>&webui_automation_worker_summary($run->{worker_status}),
+ };
+ foreach my $key (qw(queue_id created_at created_at_iso completed_at)) {
+  $public->{$key}=$run->{$key} if(exists($run->{$key}));
+ }
+ if(ref($run->{failure}) eq "HASH") {
+  $public->{failure}={stage=>$run->{failure}{stage}||"",message=>$run->{failure}{message}||""};
+  $public->{failure}{error_code}=$run->{failure}{error_code} if($run->{failure}{error_code});
+ }
+ return $public;
+}
+
+sub webui_automation_public_detail_run (@) {
  my ($run)=@_;
  return {} if(ref($run) ne "HASH");
  my $copy=PGAutomation::clone($run)||{};
@@ -12946,12 +13020,14 @@ sub webui_automation_read_run (@) {
  $run_id=PGAutomation::safe_component($run_id);
  return undef if($run_id eq "");
  my $run=PGAutomation::read_json_file(PGAutomation::run_dir($run_id)."/run.json");
+ $run->{id}=$run_id if(ref($run) eq "HASH" && (!defined($run->{id}) || $run->{id} eq ""));
  return $run if(ref($run) eq "HASH");
  return undef;
 }
 
 sub webui_automation_run (@) {
  my ($run_id)=@_;
+ my $include_series=shift ? 1 : 0;
  $run_id=PGAutomation::safe_component($run_id);
  return undef if($run_id eq "");
  my $dir=PGAutomation::run_dir($run_id);
@@ -12968,11 +13044,13 @@ sub webui_automation_run (@) {
   $item=$raw_items->[$i] if(ref($item) ne "HASH" && ref($raw_items->[$i]) eq "HASH");
   $item={} if(ref($item) ne "HASH");
   $item->{item_number}=$i;
-  foreach my $stage (qw(pre post)) {
-   foreach my $key (qw(greyscale-21 colors-30 saturations-24)) {
-    my $path=$dir."/items/$i/$stage/$key.json";
-    my $snapshot=PGAutomation::read_json_file($path);
-    $item->{series}{$stage}{$key}=$snapshot if(ref($snapshot) eq "HASH");
+  if($include_series) {
+   foreach my $stage (qw(pre post)) {
+    foreach my $key (qw(greyscale-21 colors-30 saturations-24)) {
+     my $path=$dir."/items/$i/$stage/$key.json";
+     my $snapshot=PGAutomation::read_json_file($path);
+     $item->{series}{$stage}{$key}=$snapshot if(ref($snapshot) eq "HASH");
+    }
    }
   }
   foreach my $artifact (qw(calibration/reset.json calibration/grey-state.json calibration/3d-state.json calibration/dv-profile-state.json calibration/dv-profile-measurements.json calibration/dv-profile-upload.json panel-light.json apply-all.json quality.json)) {
@@ -12991,14 +13069,28 @@ sub webui_automation_run (@) {
  return $run;
 }
 
+sub webui_automation_listing_run (@) {
+ my ($run)=@_;
+ return undef if(ref($run) ne "HASH");
+ my $summary=&webui_automation_public_run($run);
+ return {
+  id=>$summary->{id},
+  queue_name=>$summary->{queue_name},
+  status=>$summary->{status},
+  created_at=>$summary->{created_at},
+  created_at_iso=>$summary->{created_at_iso},
+  completed_at=>$summary->{completed_at},
+  items=>$summary->{items},
+ };
+}
+
 sub webui_automation_list_runs (@) {
  my @runs;
  foreach my $id (PGAutomation::list_run_ids()) {
-  my $run=&webui_automation_run($id);
+  my $run=&webui_automation_read_run($id);
   next if(ref($run) ne "HASH");
-  my $summary=PGAutomation::clone($run)||{};
-  delete($summary->{items});
-  push @runs,&webui_automation_public_run($summary);
+  my $summary=&webui_automation_listing_run($run);
+  push @runs,$summary if(ref($summary) eq "HASH");
  }
  @runs=sort { ($b->{created_at}||0) <=> ($a->{created_at}||0) } @runs;
  return \@runs;
@@ -13662,7 +13754,7 @@ sub webui_automation_api (@) {
  if($path eq "/api/automation/runs" && $method eq "GET") { return &webui_automation_json({status=>"ok",runs=>&webui_automation_list_runs()}); }
  if($path eq "/api/automation/runs/current" && $method eq "GET") {
   my $execution=&webui_automation_read_execution();
-  my $run=ref($execution) eq "HASH" ? &webui_automation_run($execution->{run_id}) : undef;
+  my $run=ref($execution) eq "HASH" ? &webui_automation_read_run($execution->{run_id}) : undef;
   my $public_execution=ref($execution) eq "HASH" ? PGAutomation::clone($execution) : undef;
   delete($public_execution->{token}) if(ref($public_execution) eq "HASH");
   return &webui_automation_json({status=>"ok",execution=>$public_execution,run=>ref($run) eq "HASH" ? &webui_automation_public_run($run) : undef});
@@ -13679,9 +13771,9 @@ sub webui_automation_api (@) {
  }
  if($path eq "/api/automation/control" && $method eq "POST") { return &webui_automation_control($payload->{run_id},$payload->{action}); }
  if($path=~m{^/api/automation/runs/([^/]+)$} && $method eq "GET") {
-  my $run=&webui_automation_run($1);
+  my $run=&webui_automation_run($1,0);
   return &webui_automation_error("Automation run not found","not-found") if(ref($run) ne "HASH");
-  return &webui_automation_json({status=>"ok",run=>&webui_automation_public_run($run)});
+  return &webui_automation_json({status=>"ok",run=>&webui_automation_public_detail_run($run)});
  }
  return &webui_automation_error("Unknown automation route","not-found");
 }
