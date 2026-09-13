@@ -18397,10 +18397,11 @@ function chartHandleHover(e,canvasId){
  html+='<br>R: '+bal.R.toFixed(3)+' &nbsp;G: '+bal.G.toFixed(3)+' &nbsp;B: '+bal.B.toFixed(3);
  if(meterRgbBalanceFormula()==='perceptual'){
   const perceptualGain=meterPerceptualRgbBalanceGain(rd);
-  if(perceptualGain>1.0005){
-   html+='<br>Perceptual gain: '+perceptualGain.toFixed(2)+'x';
-   // The gain magnifies meter noise as much as signal: mark channels whose
-   // pre-gain L* deviation is inside the meter repeatability floor.
+  if(perceptualGain>1.0005) html+='<br>Perceptual gain: '+perceptualGain.toFixed(2)+'x';
+  // Noise annotation applies at EVERY gain, including 1x at 100% IRE: an
+  // operator who selected a floor wants small deviations contextualized on
+  // all points, not just the shadow-magnified ones.
+  if(meterRgbBalanceNoiseFloor()>0){
    const within=[bal.R,bal.G,bal.B].map(v=>meterRgbBalanceWithinNoise(v,perceptualGain));
    if(within.some(Boolean)) html+='<br><span style="opacity:.75">'+['R','G','B'].filter((c,i)=>within[i]).join('/')+' within meter noise</span>';
   }
