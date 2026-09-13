@@ -15046,8 +15046,10 @@ function drawRGBChart(gs,allSteps,readingMap){
  const blackLevel=meterChartBlackLevel(gs);
  gs.forEach(rd=>{balMap[rd.ire]=rgbBalance(rd,effectiveWhiteRGB,greyMode,blackLevel);});
  // Keep the exact plotted values on the canvas. Hover registration consumes
- // this same map instead of independently recalculating RGB balance.
- ctx.canvas._meterRgbBalancePlot={formula:meterRgbBalanceFormula(),balanceByIre:balMap};
+ // this same map instead of independently recalculating RGB balance. The key
+ // is the full input tuple (formula, grey-ref mode, black level, gamut,
+ // readings generation), not the formula alone — see meterRgbBalancePlotKey.
+ ctx.canvas._meterRgbBalancePlot={key:meterRgbBalancePlotKey(greyMode,blackLevel,meterReadingsGenerationValue()),balanceByIre:balMap};
  // Auto-scale Y axis based on actual data, but keep the chart centered on 100
  // with the conventional +/-5% minimum span in every RGB balance mode.
  const allVals=Object.values(balMap).filter(b=>b&&!b.noChroma).flatMap(b=>[b.R,b.G,b.B]);
@@ -15074,6 +15076,10 @@ function drawRGBChart(gs,allSteps,readingMap){
  const refY=(100-yMin)/(yMax-yMin);
  drawDashedLine(ctx,chart,[[0,refY],[1,refY]],'#555');
  const rPts=[],gPts=[],bPts=[];
+ // Off-scale tracking: a clamped point must never read as "error == axis
+ // limit". The marker shows DIRECTION of the overflow; hover keeps the exact
+ // value (balMap carries it un-clamped).
+ const offScale=[];
  xSteps.forEach((step,idx)=>{
   const x=meterGreyCategoryChartX(xSteps,idx);
   const bal=balMap[step.ire];
@@ -15081,12 +15087,38 @@ function drawRGBChart(gs,allSteps,readingMap){
   // Skipping the point keeps the trace honest; the luminance/EOTF and Delta E
   // charts still carry the node and show the size of the error.
   if(bal&&!bal.noChroma){
-   rPts.push([x,Math.max(0,Math.min(1,(bal.R-yMin)/(yMax-yMin)))]);
-   gPts.push([x,Math.max(0,Math.min(1,(bal.G-yMin)/(yMax-yMin)))]);
-   bPts.push([x,Math.max(0,Math.min(1,(bal.B-yMin)/(yMax-yMin)))]);
+   const norm=[bal.R,bal.G,bal.B].map(v=>(v-yMin)/(yMax-yMin));
+   rPts.push([x,Math.max(0,Math.min(1,norm[0]))]);
+   gPts.push([x,Math.max(0,Math.min(1,norm[1]))]);
+   bPts.push([x,Math.max(0,Math.min(1,norm[2]))]);
+   const flags=norm.map(n=>n<0?-1:(n>1?1:0));
+   // idx is the position inside rPts/gPts/bPts (they skip noChroma steps), NOT
+   // the xSteps index.
+   if(flags.some(f=>f!==0)) offScale.push({x:x,idx:rPts.length-1,flags:flags,bal:bal});
   }
  });
  if(rPts.length>1){drawLine(ctx,chart,rPts,'#f44',2);drawLine(ctx,chart,gPts,'#4caf50',2);drawLine(ctx,chart,bPts,'#42a5f5',2);}
+ if(offScale.length>0){
+  // Triangle at the clamped edge pointing outward from the view, one per
+  // overflowing channel. True value stays available on hover.
+  const colors=['#f44','#4caf50','#42a5f5'];
+  ctx.save();
+  ctx.globalAlpha=0.9;
+  offScale.forEach(pt=>{
+   pt.flags.forEach((f,ch)=>{
+    if(f===0) return;
+    const pts=(ch===0?rPts:(ch===1?gPts:bPts));
+    const px=chart.toX(pts[pt.idx][0]), py=chart.toY(pts[pt.idx][1]);
+    const s=4;
+    ctx.fillStyle=colors[ch];
+    ctx.beginPath();
+    if(f>0){ctx.moveTo(px,py-s-1);ctx.lineTo(px-s,py+2);ctx.lineTo(px+s,py+2);}
+    else   {ctx.moveTo(px,py+s+1);ctx.lineTo(px-s,py-2);ctx.lineTo(px+s,py-2);}
+    ctx.closePath();ctx.fill();
+   });
+  });
+  ctx.restore();
+ }
  // R/G/B label at right
  if(rPts.length>0){
   const last=rPts.length-1;
@@ -18308,7 +18340,7 @@ function chartRegisterInteraction(){
    if(visibleX<0||visibleX>1) return;
    const cx=pad.l+xInset+visibleX*dw;
    const plotted=(cid==='chartRGB'&&canvas._meterRgbBalancePlot
-    &&canvas._meterRgbBalancePlot.formula===meterRgbBalanceFormula())
+    &&canvas._meterRgbBalancePlot.key===meterRgbBalancePlotKey(greyMode,rgbBlackLevel,meterReadingsGenerationValue()))
     ? canvas._meterRgbBalancePlot.balanceByIre[rd.ire]
     : null;
    const bal=plotted||(effectiveWhiteRGB?rgbBalance(rd,effectiveWhiteRGB,greyMode,rgbBlackLevel):{R:100,G:100,B:100});
@@ -18365,7 +18397,13 @@ function chartHandleHover(e,canvasId){
  html+='<br>R: '+bal.R.toFixed(3)+' &nbsp;G: '+bal.G.toFixed(3)+' &nbsp;B: '+bal.B.toFixed(3);
  if(meterRgbBalanceFormula()==='perceptual'){
   const perceptualGain=meterPerceptualRgbBalanceGain(rd);
-  if(perceptualGain>1.0005) html+='<br>Perceptual gain: '+perceptualGain.toFixed(2)+'x';
+  if(perceptualGain>1.0005){
+   html+='<br>Perceptual gain: '+perceptualGain.toFixed(2)+'x';
+   // The gain magnifies meter noise as much as signal: mark channels whose
+   // pre-gain L* deviation is inside the meter repeatability floor.
+   const within=[bal.R,bal.G,bal.B].map(v=>meterRgbBalanceWithinNoise(v,perceptualGain));
+   if(within.some(Boolean)) html+='<br><span style="opacity:.75">'+['R','G','B'].filter((c,i)=>within[i]).join('/')+' within meter noise</span>';
+  }
  }
  if(gamma!=null) html+='<br>Gamma: '+gamma.toFixed(2);
  if(hit.deChroma!=null&&hit.deSelected!=null){

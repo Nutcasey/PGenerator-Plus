@@ -3855,6 +3855,10 @@ let meterCcssCreateMethod='measure';
 let meterCcssCreateTargetPort='';
 let meterCcssCreateJsonLoaded=false;
 let meterReadings=[];
+// Bumped on every reading-set mutation (replace/upsert/overwrite). The RGB
+// balance plot cache keys on this so hover values can't survive a re-read.
+let meterReadingsGeneration=0;
+function meterReadingsGenerationValue(){ return meterReadingsGeneration; }
 let meterReadingsIndex=new Map();
 let meterReadingsIndexSource=meterReadings;
 let meterReadingsIndexLength=0;
@@ -9621,6 +9625,10 @@ function ynToLstar(yn){
 function meterRgbBalanceFormula(){
  const sel=document.getElementById('meterRgbBalanceFormula');
  if(sel && sel.value) return sel.value;
+ // Fallback default. The same 'absolute' default is declared at three sibling
+ // sites and must be changed together: webui-body.html (select 'selected'
+ // option), meterRgbBalanceFormula (here), and webui.pm saved-config injection
+ // ("rgb_formula":"absolute" in webui_meter_custom_series_json).
  return 'absolute';
 }
 
@@ -9628,6 +9636,10 @@ function meterRgbBalanceFormula(){
 // the added separation below 30% IRE, where small channel errors are easiest
 // to lose in a normal base-100 chart. The gain is bounded at 20x near black
 // and is exactly 1x at 100% IRE and above.
+// The gain is derived from the TARGET slot IRE (meterGreyscaleTargetSlotIre),
+// not the measured light level: the axis position and the magnification must
+// agree, so a failed patch at a bright slot keeps the bright-slot gain instead
+// of being graded as a shadow. Deliberate — monotonic gain along the axis.
 function meterPerceptualRgbBalanceGain(reading){
  const slot=(typeof meterGreyscaleTargetSlotIre==='function')?meterGreyscaleTargetSlotIre(reading):null;
  const measuredIre=Number(slot!=null?slot:(reading&&reading.ire));
@@ -9660,11 +9672,11 @@ function meterBalanceTargetRow(reading,ire){
  return row;
 }
 
-// L* RGB balance shared by the weighted Perceptual mode and the unweighted
-// Absolute mode. The ire>0 branch builds a luminance-compensated target
-// (chroma-only) in 'absolute'/'relative' grey-reference modes, or an absolute
-// target in 'eotf' grey-reference mode.
-function rgbBalancePerceptual(reading,whiteRef,modeOrIncl,blackLevel,shadowWeighted){
+// Core L* RGB balance shared by the shadow-weighted Perceptual wrapper and the
+// unweighted Absolute wrapper. The ire>0 branch builds a luminance-compensated
+// target (chroma-only) in 'absolute'/'relative' grey-reference modes, or an
+// absolute target in 'eotf' grey-reference mode.
+function rgbBalanceLstar(reading,whiteRef,modeOrIncl,blackLevel,shadowWeighted){
  const readingXYZ=meterReadingXYZ(reading);
  const whiteXYZ=meterReadingXYZ(whiteRef);
  if(!readingXYZ||!whiteXYZ||whiteXYZ.Y<=0) return {R:100,G:100,B:100,noChroma:true};
@@ -9745,9 +9757,14 @@ function rgbBalancePerceptual(reading,whiteRef,modeOrIncl,blackLevel,shadowWeigh
  };
 }
 
+// Shadow-weighted wrapper: identical to the core with the near-black gain on.
+function rgbBalancePerceptual(reading,whiteRef,modeOrIncl,blackLevel){
+ return rgbBalanceLstar(reading,whiteRef,modeOrIncl,blackLevel,true);
+}
+
 // Original unweighted L* balance retained as an explicit comparison view.
 function rgbBalanceAbsolute(reading,whiteRef,modeOrIncl,blackLevel){
- return rgbBalancePerceptual(reading,whiteRef,modeOrIncl,blackLevel,false);
+ return rgbBalanceLstar(reading,whiteRef,modeOrIncl,blackLevel,false);
 }
 
 // HCFR-style RGB balance for the luma-mode-OFF branch.
@@ -9772,7 +9789,7 @@ function rgbBalanceHCFR(reading,whiteRef,modeOrIncl,blackLevel){
   const Lb=Number.isFinite(explicitBlack)&&explicitBlack>=0?explicitBlack:meterBlackReadingY();
   const targetPeak = meterGreyTargetPeak(whiteXYZ.Y);
   const targetIre=((typeof meterGreyscaleTargetSlotIre==='function')?meterGreyscaleTargetSlotIre(reading):null)||reading.ire;
-  // Same stimulus-based target as the gamma chart (see rgbBalancePerceptual):
+  // Same stimulus-based target as the gamma chart (see rgbBalanceLstar):
   // avoids the limited-only meterGreyCodeRange skewing full-range gamma error.
   const tgtY = (typeof meterGreyTargetLuminanceForChartPoint==='function')
    ? meterGreyTargetLuminanceForChartPoint(targetIre/100, targetPeak, Lb, meterBalanceTargetRow(reading,targetIre))
@@ -9785,8 +9802,48 @@ function rgbBalanceHCFR(reading,whiteRef,modeOrIncl,blackLevel){
  return { R:r*100, G:g*100, B:b*100 };
 }
 
+// Identity of the full RGB-balance input tuple. The plotted-value cache and
+// the hover hit zones both key on this instead of the formula alone: the
+// plotted values also depend on the grey-reference mode, the analysis gamut
+// matrix, the black level, and the measurement generation. Reuse that checks
+// only the formula can serve hover values computed under a stale grey-ref
+// mode, gamut, black level, or reading set — the exact desync the cache exists
+// to prevent. Callers must pass the same greyMode/blackLevel tuple members
+// they passed to rgbBalance, and bump generation on any re-read/series reset.
+function meterRgbBalancePlotKey(greyMode,blackLevel,generation){
+ const gamut=(typeof meterActiveGamutKey==='function')?meterActiveGamutKey():'';
+ return meterRgbBalanceFormula()+'|'+(greyMode==null?'':greyMode)+'|'
+  +(blackLevel==null?'':String(blackLevel))+'|'+gamut+'|'+(generation==null?'0':String(generation));
+}
+
+// Operator-selectable noise floor in L* points (pre-gain deviation), read from
+// the meterRgbBalanceNoiseFloor select next to the RGB bal picker. Off (empty
+// value) disables the 'within meter noise' annotation entirely. The floor
+// never changes plotted values — the tooltip annotates them, so the operator
+// keeps the full trace and only gains context.
+function meterRgbBalanceNoiseFloor(){
+ const sel=document.getElementById('meterRgbBalanceNoiseFloor');
+ const floor=Number(sel&&sel.value);
+ return (sel&&sel.value&&Number.isFinite(floor)&&floor>0)?floor:0;
+}
+// chValue is a balance channel result (100-centered), gain the perceptual gain
+// applied to it (1 for the unweighted formula). Returns true when the raw L*
+// deviation is inside the operator-selected meter noise floor (false when the
+// floor is Off or the value is not finite).
+function meterRgbBalanceWithinNoise(chValue,gain){
+ const floor=meterRgbBalanceNoiseFloor();
+ if(!(floor>0)) return false;
+ if(!Number.isFinite(chValue)) return false;
+ return Math.abs((chValue-100)/(Number.isFinite(gain)&&gain>0?gain:1))<=floor;
+}
+
 // Dispatcher — keeps every existing caller working while honoring the
-// new <select id="meterRgbBalanceFormula"> selector.
+// new <select id="meterRgbBalanceFormula"> selector. All three formulas here
+// are PRESENTATION views. The on-device AutoCal solver grades convergence with
+// its own unweighted L* balance (usr/bin/meter_lg_autocal.pl, rgb_balance_error)
+// and its own thresholds; balancing to 100/100/100 under Perceptual does NOT
+// mean AutoCal saw zero shadow error. Keep both ends in sync when changing
+// either formula.
 function rgbBalance(reading,whiteRef,modeOrIncl,blackLevel){
  const formula=meterRgbBalanceFormula();
  if(formula==='hcfr') return rgbBalanceHCFR(reading,whiteRef,modeOrIncl,blackLevel);
@@ -11541,6 +11598,7 @@ function meterSaveColorPrefs(){
    grey_ref_mode: v('meterGreyRefMode'),
    gray_world:    v('meterGrayWorld'),
    rgb_formula:   v('meterRgbBalanceFormula'),
+   rgb_noise_floor: v('meterRgbBalanceNoiseFloor'),
    de_form:       v('meterDeltaEForm'),
    color_de_form: v('meterColorDeltaEForm'),
   color_incl_lum:cb('meterColorIncludeLumError'),
@@ -11594,6 +11652,7 @@ function meterLoadColorPrefs(){
     setVal('meterGreyRefMode', greyMode);
   setVal('meterGrayWorld',   p.gray_world);
   setVal('meterRgbBalanceFormula', p.rgb_formula);
+  setVal('meterRgbBalanceNoiseFloor', p.rgb_noise_floor);
   setVal('meterDeltaEForm',  meterNormalizeSavedGreyDeltaEForm(p.de_form));
   setVal('meterColorDeltaEForm', p.color_de_form);
   setChk('meterColorIncludeLumError', p.color_incl_lum);
@@ -13572,6 +13631,7 @@ function meterRebuildReadingsIndex(readings){
 
 function meterReplaceReadings(readings){
  meterReadings=Array.isArray(readings)?readings:[];
+ meterReadingsGeneration++;
  meterRebuildReadingsIndex(meterReadings);
  return meterReadings;
 }
@@ -13605,6 +13665,7 @@ function meterUpsertSeriesReading(reading,step){
   keys.forEach(key=>{ if(!index.has(key)) index.set(key,idx); });
   meterReadingsIndexLength=meterReadings.length;
  }
+ meterReadingsGeneration++;
 }
 
 function meterReadingHasLuminance(rd){

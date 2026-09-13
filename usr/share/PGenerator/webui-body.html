@@ -1320,12 +1320,23 @@ __PG_LOGO_DARK__
         <option value="0.05">Near-black (0.05)</option>
        </select>
       </label>
-      <label style="font-size:.7rem;color:var(--text2);user-select:none;display:flex;align-items:center;gap:4px" title="RGB balance method: Perceptual magnifies L* channel deviations by up to 20x near black and returns to normal at 100% IRE; Absolute uses the original unweighted L* calculation; Chromaticity uses linear RGB normalized to the target white.">
+      <!-- 'absolute' default is declared at three sibling sites (this select,
+           meterRgbBalanceFormula in webui-app.js, webui.pm saved-config
+           injection) and must be changed together. -->
+      <label style="font-size:.7rem;color:var(--text2);user-select:none;display:flex;align-items:center;gap:4px" title="RGB balance method: Perceptual magnifies L* channel deviations by up to 20x near black and returns to normal at 100% IRE; Absolute uses the original unweighted L* calculation; Chromaticity uses linear RGB normalized to the target white. Deviations inside the selected meter noise floor (pre-gain L*) are flagged 'within meter noise' in the Perceptual tooltip.">
        RGB bal
        <select id="meterRgbBalanceFormula" class="inline-select" onchange="meterOnRgbBalanceFormulaChange()">
         <option value="absolute" selected>Absolute (default)</option>
         <option value="perceptual">Perceptual</option>
         <option value="hcfr">Chromaticity</option>
+       </select>
+      </label>
+      <label style="font-size:.7rem;color:var(--text2);user-select:none;display:flex;align-items:center;gap:4px" title="Perceptual noise floor: near-black deviations smaller than this (pre-gain L* points) are labeled 'within meter noise' in the tooltip, because the shadow gain magnifies meter repeatability noise as much as signal. Typical colorimeter repeatability is ~0.2-0.5 L* points near black. Plotted values never change.">
+       Noise floor
+       <select id="meterRgbBalanceNoiseFloor" class="inline-select" onchange="meterSaveColorPrefs()">
+        <option value="" selected>Off (default)</option>
+        <option value="0.3">0.3 L*</option>
+        <option value="0.6">0.6 L*</option>
        </select>
       </label>
       <label style="font-size:.7rem;color:var(--text2);user-select:none;display:flex;align-items:center;gap:4px" title="Changes the greyscale ΔE calculation. At 0%, chromaticity is undefined, so only black-level luminance is scored.">
