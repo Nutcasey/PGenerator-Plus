@@ -15091,10 +15091,14 @@ function drawRGBChart(gs,allSteps,readingMap){
    rPts.push([x,Math.max(0,Math.min(1,norm[0]))]);
    gPts.push([x,Math.max(0,Math.min(1,norm[1]))]);
    bPts.push([x,Math.max(0,Math.min(1,norm[2]))]);
-   const flags=norm.map(n=>n<0?-1:(n>1?1:0));
+   // Off-scale is relative to the VISIBLE window: under a box-zoom the view
+   // covers a sub-range [view.y0,view.y1] of the axis, so values inside 0..1
+   // but outside the view are clamped by the clip and must be flagged too.
+   const vLo=chart.view.y0, vHi=chart.view.y1;
+   const flags=norm.map(n=>meterRgbBalanceOffScaleDir(n,vLo,vHi));
    // idx is the position inside rPts/gPts/bPts (they skip noChroma steps), NOT
    // the xSteps index.
-   if(flags.some(f=>f!==0)) offScale.push({x:x,idx:rPts.length-1,flags:flags,bal:bal});
+   if(flags.some(f=>f!==0)) offScale.push({x:x,idx:rPts.length-1,flags:flags,norm:norm,vLo:vLo,vHi:vHi,bal:bal});
   }
  });
  if(rPts.length>1){drawLine(ctx,chart,rPts,'#f44',2);drawLine(ctx,chart,gPts,'#4caf50',2);drawLine(ctx,chart,bPts,'#42a5f5',2);}
@@ -15105,10 +15109,17 @@ function drawRGBChart(gs,allSteps,readingMap){
   ctx.save();
   ctx.globalAlpha=0.9;
   offScale.forEach(pt=>{
+   // A horizontal box-zoom can push the whole column out of view; the axis
+   // grid skips those x positions, so must the markers.
+   if(pt.x<chart.view.x0||pt.x>chart.view.x1) return;
    pt.flags.forEach((f,ch)=>{
     if(f===0) return;
-    const pts=(ch===0?rPts:(ch===1?gPts:bPts));
-    const px=chart.toX(pts[pt.idx][0]), py=chart.toY(pts[pt.idx][1]);
+    // Pin the marker to the visible edge for that channel: clamp the value to
+    // the view window before toY (rPts coordinates are full-range clamped,
+    // which lands OUTSIDE the plot under a box-zoom).
+    const n=pt.norm[ch];
+    const edge=(n<pt.vLo)?pt.vLo:((n>pt.vHi)?pt.vHi:n);
+    const px=chart.toX(pt.x), py=chart.toY(edge);
     const s=4;
     ctx.fillStyle=colors[ch];
     ctx.beginPath();

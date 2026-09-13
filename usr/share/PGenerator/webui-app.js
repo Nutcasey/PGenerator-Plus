@@ -9802,6 +9802,18 @@ function rgbBalanceHCFR(reading,whiteRef,modeOrIncl,blackLevel){
  return { R:r*100, G:g*100, B:b*100 };
 }
 
+// Direction a balance value sits outside the VISIBLE y-window in normalized
+// axis space (0..1 across yMin..yMax, then windowed by box-zoom view.y0/y1):
+// -1 below, +1 above, 0 inside. Box-zoom is the reason this cannot compare to
+// plain 0/1 — a value inside the axis range can still be outside the zoomed
+// view, and that is exactly the clamped case the marker must flag.
+function meterRgbBalanceOffScaleDir(normValue,vLo,vHi){
+ if(!Number.isFinite(normValue)) return 0;
+ if(normValue<(Number.isFinite(vLo)?vLo:0)) return -1;
+ if(normValue>(Number.isFinite(vHi)?vHi:1)) return 1;
+ return 0;
+}
+
 // Identity of the full RGB-balance input tuple. The plotted-value cache and
 // the hover hit zones both key on this instead of the formula alone: the
 // plotted values also depend on the grey-reference mode, the analysis gamut
