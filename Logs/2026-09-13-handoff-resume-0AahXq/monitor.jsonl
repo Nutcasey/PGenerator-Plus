@@ -1,5 +1,0 @@
-{"action":"resume","status":"ok","message":"Automation resumed"}
-{"time":"2026-09-13T19:25:47.681Z","status":"running","job":3,"stage":"panel-light-settled","heartbeatAge":1,"worker":{}}
-{"time":"2026-09-13T19:27:50.309Z","status":"running","job":3,"stage":"greyscale-done","heartbeatAge":1,"worker":{"current_delta_e":23.6300894469691,"current_name":"Auto Cal 100%","current_step":"1","message":"Reading 100% for HDR20 1D DPG (2/16, target dE<=0.20)","status":"running","total_steps":"26"}}
-{"time":"2026-09-13T19:29:51.700Z","status":"stopped","job":3,"stage":"","heartbeatAge":1,"worker":{"message":"Cleanup complete: All workers stopped; meter released; TV acknowledged calibration exit"},"failure":{"message":"Automation stopped","stage":"greyscale-done"}}
-{"terminal":true,"time":"2026-09-13T19:29:51.700Z","status":"stopped","job":3,"stage":"","heartbeatAge":1,"worker":{"message":"Cleanup complete: All workers stopped; meter released; TV acknowledged calibration exit"},"failure":{"message":"Automation stopped","stage":"greyscale-done"}}
