@@ -17,7 +17,7 @@ PGAutomation::write_json_atomic($path,$run);
 PGAutomation::write_json_atomic(PGAutomation::base_dir().'/execution.json',{owner=>'automation',run_id=>$id,token=>'secret'});
 PGAutomation::write_json_atomic("$dir/pre/greyscale-21.json",{readings=>[{Y=>100}]});
 PGAutomation::append_line_locked("$dir/settings-checks.ndjson",PGAutomation::encode_json({key=>'brightness',expected=>50,observed=>50,verified=>1})."\n{partial");
-my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],status=>'running'};
+my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],status=>'running',message=>'Retrying invalid measurement',measurement_retry=>{patch=>'5%',attempt=>2,limit=>4}};
 {
  no warnings 'redefine';
  local *main::webui_automation_fresh_worker=sub{return $worker};
@@ -28,6 +28,8 @@ my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],
  is_deeply([map {$_->{message}} @{$detail->{readiness_issues}}],['TV cannot expose AI Picture'],'manual readiness limitations are scoped to selected job');
  is($detail->{snapshots}[0]{phase},'pre','before readings returned');
  is($detail->{live}{snapshot}{readings}[0]{Y},90,'owned worker measurements returned');
+ is($detail->{live}{snapshot}{message},'Retrying invalid measurement','live graph detail carries current activity');
+ is($detail->{live}{snapshot}{measurement_retry}{attempt},2,'live graph detail carries bounded retry state');
  ok(!exists $detail->{live}{snapshot}{token},'worker response is allowlisted');
  ok(!main::webui_automation_job_detail($id,1)->{live},'pending job never borrows active worker');
  $worker->{full_autocal_run_id}='another-run';

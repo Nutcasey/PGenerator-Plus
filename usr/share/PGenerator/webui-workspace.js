@@ -7964,7 +7964,8 @@ async function meterFullAutoCalCaptureReportSet(stage){
 }
 
 async function meterFullAutoCalBuildSnapshotReportSections(entries){
- const reportControls=['meterTargetGamut','meterDeltaEForm','meterColorDeltaEForm','meterCustomD65Enabled','meterTargetWhiteX','meterTargetWhiteY']
+ const previousReportGamma=window._meterSnapshotReportTargetGamma;
+ const reportControls=['meterTargetGamma','meterTargetGamut','meterDeltaEForm','meterColorDeltaEForm','meterCustomD65Enabled','meterTargetWhiteX','meterTargetWhiteY']
   .map(id=>document.getElementById(id)).filter(Boolean).map(el=>({el,value:el.value,checked:el.checked}));
  const restore={
   key:meterActiveSeriesKey,
@@ -7990,6 +7991,8 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries){
    // Report each job against its saved targets, not the operator's current
    // single-calibration selectors. No change events or TV writes are sent.
    const reportValue=(id,value)=>{const el=document.getElementById(id);if(el&&value!=null)el.value=String(value);};
+   reportValue('meterTargetGamma',snap.target_gamma||reportControls.find(control=>control.el.id==='meterTargetGamma')?.value);
+   window._meterSnapshotReportTargetGamma=snap.target_gamma||reportControls.find(control=>control.el.id==='meterTargetGamma')?.value||null;
    reportValue('meterTargetGamut',snap.target_gamut);
    reportValue('meterDeltaEForm',snap.delta_e_formula);
    reportValue('meterColorDeltaEForm',snap.delta_e_formula);
@@ -8023,6 +8026,8 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries){
    sectionHtml+=meterBuildCurrentSeriesReportSection(title);
   }
  } finally {
+  if(previousReportGamma===undefined)delete window._meterSnapshotReportTargetGamma;
+  else window._meterSnapshotReportTargetGamma=previousReportGamma;
   reportControls.forEach(({el,value,checked})=>{el.value=value;el.checked=checked;});
   meterSeriesCache=cacheBackup||{};
   meterPersistSeriesCache();

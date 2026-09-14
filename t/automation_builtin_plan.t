@@ -30,14 +30,16 @@ for my $item (@$items) {
  for my $key (qw(target_gamma tv_gamma_follows_target target_gamut target_delta_e target_white settings panel_light color_format max_bpc rgb_quant_range calibration)) {
   is_deeply($normal->{$key}, $item->{$key}, "$name preserves $key through server normalization");
  }
- is($normal->{template_id}, 'reference-settings-v4', "$name keeps reference version in saved recipes");
- is_deeply($normal->{stages},{pre_readings=>0,calibration=>1,post_readings=>0,apply_all=>0},"$name remains calibration-only after server normalization");
- is_deeply(main::_stages($normal),{pre=>0,calibration=>1,post=>0,apply_all=>0},"$name executes without optional sweeps");
+ is($normal->{template_id}, 'reference-settings-v5', "$name keeps reference version in saved recipes");
+ is_deeply($normal->{stages},{pre_readings=>0,calibration=>1,post_readings=>0,apply_all=>1},"$name applies to all inputs without optional sweeps after server normalization");
+ is_deeply(main::_stages($normal),{pre=>0,calibration=>1,post=>0,apply_all=>1},"$name executes Apply to All without optional sweeps");
  my $sdr=$normal->{signal_format} eq 'sdr';
  main::_record_setup_luminance($normal,419.71) if $sdr;
  my $grey=main::_grey_payload($normal);
  is($grey->{target_gamma},$sdr?$item->{target_gamma}:'2.2',"$name sends the correct 1D calibration gamma to the worker");
  is($grey->{target_delta_e},0.5,"$name sends delta E 0.5 to the 1D worker");
+ ok($grey->{dark_detail},"$name enables Dark Detail in the worker");
+ ok(scalar(grep {abs($_->{ire}-3.7)<0.001} @{$grey->{steps}}),"$name includes Dark Detail filler patches");
  if ($sdr) {
   is($grey->{target_luminance},419.71,"$name uses measured fixed-panel white, not the dormant 100-nit target");
  }

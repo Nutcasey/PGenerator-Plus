@@ -54,6 +54,8 @@ jobs:
         run: |
           node t/browser/automation_activity.cjs
           node t/browser/automation_history.cjs
+          node t/browser/automation_refresh.cjs
           node t/browser/automation_editor.cjs
           node t/browser/automation_job_detail.cjs
           node t/browser/automation_calibration_observer.cjs
+          node t/browser/automation_design_states.cjs

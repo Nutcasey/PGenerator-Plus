@@ -36,7 +36,7 @@ function pgAutomationReferenceItems(ids,context){
   if(hdr)settings.hdrDynamicToneMapping='off';
   return {
    name:mode.name,signal_format:mode.signal,picture_mode:mode.mode,tv_gamma_follows_target:sdr,
-   template_id:'reference-settings-v4',template_mode:mode.id,
+   template_id:'reference-settings-v5',template_mode:mode.id,
    manual_checks:['TruMotion: verify Off in the TV menu; this control is not available through the API.'],
    template_notes:'LG OLED starting settings. Check supported controls for this TV and mode. '+
     (sdr?'Fixed panel brightness; actual white is measured, not a promised 100-nit result. ':hdr?'Check Dynamic Tone Mapping is Off after reset. ':'DV gamut and tone mapping are decoder-managed. ')+
@@ -44,14 +44,14 @@ function pgAutomationReferenceItems(ids,context){
     'Set generator resolution to 1080p24 and Pattern Delay to 0.75 s in Display Settings. Check HDR/DV metadata: maximum 1000, minimum 0.005, MaxCLL 1000, MaxFALL 400; DV transport Standard. These global settings are not applied by the queue.',
    // Keep calibration's own measurement/results, without three extra sweeps
    // on either side. Users may opt into those stages on a saved/custom copy.
-   settings,stages:{pre_readings:false,calibration:true,post_readings:false,apply_all:false},
+   settings,stages:{pre_readings:false,calibration:true,post_readings:false,apply_all:true},
    pre_series:PG_AUTOMATION_SERIES.map(x=>x[1]),post_series:PG_AUTOMATION_SERIES.map(x=>x[1]),
    target_gamma:gamma,target_gamut:gamut,target_white:{x:.3127,y:.3290},target_luminance:100,
    target_delta_e:.5,delta_e_formula:'deitp',
    panel_light:{policy:'fixed',key:panelKey,fixed_value:brightness,target_luminance:100},
    calibration:{target_gamma:gamma,target_gamut:gamut,target_white:{x:.3127,y:.3290},target_luminance:100,
     target_delta_e:.5,delta_e_formula:'deitp',method:sdr?'hybrid':'matrix',profile_source:sdr?'hybrid3':'matrix',
-    lattice_size:3,solve_cube_size:33,lattice_residuals:sdr,dark_detail:false,shadow_fix:hdr},
+    lattice_size:3,solve_cube_size:33,lattice_residuals:sdr,dark_detail:true,shadow_fix:hdr},
    // Keep acceptance disabled: the source does not specify HDR/DV maximum-patch limits.
    quality:{enabled:false,dE_formula:'deitp',limits:sdr?{'greyscale-21':{avg:2,max:3},'colors-30':{avg:2,max:3},'saturations-24':{avg:2,max:3}}:{}},
    display_type:'oled_generic',ccss_override:meter.ccss_override||'',observer:'1931_2',
@@ -83,7 +83,7 @@ function pgAutomationFormatTime(iso){if(!iso)return '';const date=new Date(iso);
 function pgAutomationStateBadge(status){
  const badge=pgAutomationEl('State');if(!badge)return;
  badge.textContent=status.replace(/-/g,' ').replace(/^./,ch=>ch.toUpperCase());
- badge.style.background=status==='running'||status==='complete'?'var(--green)':['starting','checking','paused','stopping','completing'].includes(status)?'var(--orange)':['failed','blocked','interrupted'].includes(status)?'var(--red)':'var(--badge-neutral)';
+ badge.style.color=status==='complete'?'var(--green)':['starting','checking','running','stopping','completing'].includes(status)?'var(--accent)':['paused','interrupted','complete-with-warnings'].includes(status)?'var(--orange)':['failed','blocked'].includes(status)?'var(--red)':'var(--text2)';
 }
 function pgAutomationEscape(value){return String(value==null?'':value).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
 function pgAutomationClone(value){return value==null?value:JSON.parse(JSON.stringify(value));}
@@ -94,9 +94,10 @@ function pgAutomationStageEnabled(stages,key){
  return stages?.[key]==null?!['pre_readings','post_readings'].includes(key):!!stages[key];
 }
 function pgAutomationNotice(message,error){
- if(message){pgAutomation.logNotices.push({time:Date.now()/1000,level:error?'error':'info',message,source:'Browser'});pgAutomation.logNotices=pgAutomation.logNotices.slice(-100);pgAutomationRenderActivity();}
+ const level=error==='warning'?'warning':error?'error':'info';error=level==='error';
+ if(message){pgAutomation.logNotices.push({time:Date.now()/1000,level,message,source:'Browser'});pgAutomation.logNotices=pgAutomation.logNotices.slice(-100);pgAutomationRenderActivity();}
  const el=pgAutomationEl('Notice');if(!el)return;
- el.textContent=message||'';el.style.display=message?'block':'none';el.style.color=error?'var(--red)':'var(--text2)';
+ el.textContent=message||'';el.style.display=message?'block':'none';el.style.color=error?'var(--red)':level==='warning'?'var(--orange)':'var(--text2)';
  el.setAttribute('role',error?'alert':'status');
  if(error){pgAutomation.lastProblem=message;pgAutomationRenderProgress();}
  if(pgAutomationEl('Editor').open)pgAutomationEl('EditorError').textContent=error?(message||''):'';
@@ -550,7 +551,7 @@ function pgAutomationItemSummary(item){
  if(enabled('calibration'))targets.push('1D LUT ΔE '+(cal.target_delta_e??item.target_delta_e??.5)+' ('+pgAutomationLabel(cal.delta_e_formula||item.delta_e_formula||'deitp')+')');
  targets.push(signal==='sdr'?(panel.policy==='target'?'Setup white target '+(panel.target_luminance??item.target_luminance??100)+' nits':'Fixed panel light; setup white measured at run time'):'Measured peak luminance');
  targets.push(pgAutomationLabel(item.target_gamma||cal.target_gamma||(signal==='sdr'?'bt1886':'st2084')));targets.push(pgAutomationLabel(item.target_gamut||cal.target_gamut||(signal==='sdr'?'bt709':'p3d65')));
- return '<div class="auto-pills">'+pills.map(x=>'<span class="auto-pill">'+pgAutomationEscape(x)+'</span>').join('')+'</div><div class="auto-muted">'+targets.map(pgAutomationEscape).join(' · ')+'</div><div class="auto-muted">TV: '+pgAutomationEscape(settings.join(' · ')||'No explicit pins; default hazard controls applied')+'</div>'+(item.template_notes?'<details class="auto-muted"><summary>Setup notes</summary><p>'+pgAutomationEscape(item.template_notes)+'</p></details>':'');
+ return '<div class="auto-pills">'+pills.map(x=>'<span class="auto-pill">'+pgAutomationEscape(x)+'</span>').join('')+'</div><div class="auto-muted">'+targets.map(pgAutomationEscape).join(' · ')+'</div><div class="auto-muted auto-pin-summary"><strong>TV settings</strong>'+(settings.length?'<ul>'+settings.map(value=>'<li>'+pgAutomationEscape(value)+'</li>').join('')+'</ul>':'<p>No explicit pins; default hazard controls applied</p>')+'</div>'+(item.template_notes?'<details class="auto-muted"><summary>Setup notes</summary><p>'+pgAutomationEscape(item.template_notes)+'</p></details>':'');
 }
 function pgAutomationRenderRecipeList(){
  const list=pgAutomationEl('RecipeList'),select=pgAutomationEl('RecipeSelect'),prior=select.value;
@@ -806,6 +807,13 @@ function pgAutomationEstimateText(run,now){
  return (eta.scope==='batch'?'Estimated batch remaining: ':'Estimated current '+eta.scope+': ')+'~'+lower+(lower===higher?'':'–'+higher)
   +(eta.scope==='batch'?'':' · Batch estimate still learning');
 }
+function pgAutomationRunWarnings(run){
+ return [...new Set([...(run?.warnings||[]).map(pgAutomationIssueText),...(run?.items||[]).flatMap((item,index)=>(item.warnings||[]).map(w=>pgAutomationIssueText({message:pgAutomationIssueText(w),item_number:index})))].filter(Boolean))];
+}
+function pgAutomationRunWarningsHtml(run){
+ const warnings=pgAutomationRunWarnings(run);
+ return warnings.length?'<details class="auto-run-warnings"><summary>'+warnings.length+' recorded warning'+(warnings.length===1?'':'s')+'</summary><ul>'+warnings.map(w=>'<li>'+pgAutomationEscape(w)+'</li>').join('')+'</ul></details>':'';
+}
 function pgAutomationRenderProgress(){
  const box=pgAutomationEl('Progress');if(!box)return;
  const run=pgAutomation.current?.run;
@@ -818,6 +826,7 @@ function pgAutomationRenderProgress(){
   box.innerHTML='<strong>Last batch '+pgAutomationEscape(run.status.replace(/-/g,' '))+' · '+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Calibration queue')+'</strong><p class="auto-muted">No calibration is running. Jobs and results are saved in History.</p>'
    +(run.status==='failed'&&run.failure?'<p>'+pgAutomationEscape(pgAutomationIssueText(run.failure))+'</p>':'')
    +(pgAutomation.statusError?'<p>'+pgAutomationEscape(pgAutomation.statusError)+'</p>':'')
+   +pgAutomationRunWarningsHtml(run)
    +'<button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationClearLastRun()">Clear last batch</button>';
   return;
  }
@@ -837,7 +846,7 @@ function pgAutomationRenderProgress(){
    const sameFailure=itemFailure&&pgAutomationIssueText({...run.failure,item_number:null})===pgAutomationIssueText({...itemFailure,item_number:null});
    issues.push(sameFailure?{...run.failure,item_number:index}:run.failure);
   }
-  items.forEach((item,i)=>{if(item.failure){if(pgAutomationResuming(run))issues.push({message:'Previous attempt: '+pgAutomationIssueText(item.failure),item_number:i});else{error=true;issues.push({...item.failure,item_number:i});}}(item.warnings||[]).forEach(w=>issues.push({message:pgAutomationIssueText(w),item_number:i}));});
+  items.forEach((item,i)=>{if(item.failure){if(pgAutomationResuming(run))issues.push({message:'Previous attempt: '+pgAutomationIssueText(item.failure),item_number:i});else{error=true;issues.push({...item.failure,item_number:i});}}(item.warnings||[]).forEach(w=>issues.push({message:pgAutomationIssueText(w),item_number:i,level:'warning'}));});
   error=error||['failed','interrupted'].includes(run.status);
   if(error&&!issues.length)issues.push({message:'Run '+run.status+'. Open Live Run or History for its saved checkpoints.'});
   if(run.heartbeat_age>60&&['running','starting','stopping','completing'].includes(run.status))issues.push({message:'No runner heartbeat for '+run.heartbeat_age+' seconds. Progress is unconfirmed; do not start a second run.'});
@@ -854,7 +863,7 @@ function pgAutomationRenderProgress(){
  box.innerHTML='<strong>'+pgAutomationEscape(title||(error?'Automation needs attention':'Automation'))+'</strong><div class="auto-muted">'+pgAutomationEscape(message)+'</div>'
   +(total?'<progress aria-label="'+(showRun?'Completed jobs':'Validated queue configurations')+'" value="'+completed+'" max="'+total+'"></progress><div class="auto-muted auto-progress-footer"><span>'+completed+' / '+total+' '+(showRun?'jobs complete':'queue configurations validated; TV settings checked per job')+'</span>'
    +(showRun?'<span data-automation-eta title="Rough estimate from live patch pace and comparable saved stage timings. Recalculated every two minutes and when the stage changes. Calibration speed varies; the range is not a guarantee.">'+pgAutomationEscape(pgAutomationEstimateText(run))+'</span>':'')+'</div>':'')
-  +(unique.length?'<details '+(error?'open':'')+'><summary>'+(error?'Problems requiring attention':'Warnings and manual checks')+' ('+unique.length+')</summary><div class="auto-issues">'+unique.map(text=>'<p class="auto-muted">'+pgAutomationEscape(text)+'</p>').join('')+'</div></details>':'');
+  +(unique.length?'<details '+(error?'open':'')+'><summary>'+(error?'Problems requiring attention':'Warnings and manual checks')+' ('+unique.length+')</summary><div class="auto-issues">'+unique.map(text=>'<p class="auto-muted"'+(issues.some(issue=>pgAutomationIssueText(issue)===text&&issue.level==='warning')?' data-level="warning"':'')+'>'+pgAutomationEscape(text)+'</p>').join('')+'</div></details>':'');
 }
 function pgAutomationBeginChecks(intent){
  const id='ui-'+Date.now()+'-'+Math.random().toString(36).slice(2,10);
@@ -865,7 +874,9 @@ function pgAutomationBeginChecks(intent){
 function pgAutomationRenderReadiness(result){
  const box=pgAutomationEl('Readiness');if(!result){box.textContent='Readiness request failed';return;}
  const checks=[...(result.checks||[])].sort((a,b)=>Number(a.ok)-Number(b.ok));
- box.innerHTML='<p class="auto-muted">'+pgAutomationEscape(result.message||'Readiness')+' · '+checks.length+' checks. See the activity log for details.</p>';
+ const problems=checks.filter(check=>!check.ok);
+ box.innerHTML='<p class="auto-muted">'+pgAutomationEscape(result.message||'Readiness')+' · '+checks.length+' checks. See the activity log for details.</p>'
+  +(problems.length?'<ul class="auto-readiness-problems">'+problems.map(check=>'<li data-level="'+(check.level==='warning'?'warning':'error')+'">'+pgAutomationEscape(pgAutomationIssueText(check))+'</li>').join('')+'</ul>':'');
  pgAutomation.current={...pgAutomation.current,activity:{entries:checks.map(check=>({...check,source:'Startup check',level:check.ok?'ok':check.level||'error'}))}};pgAutomationRenderActivity();
  if(!result.ready){pgAutomation.lastProblem=result.message||'Startup checks failed';pgAutomationRenderProgress();pgAutomationEl('Progress')?.scrollIntoView({block:'nearest'});}
 }
@@ -904,7 +915,7 @@ async function pgAutomationEditActiveQueue(){
  if(!pgAutomation.editingRunId)return;
  try{
   const result=await pgAutomationRequest('runs/'+encodeURIComponent(pgAutomation.editingRunId)+'/edit',{first_pending:pgAutomation.firstPending,items:pgAutomation.queue.items.slice(pgAutomation.firstPending)});
-  pgAutomationNotice(result.warning?'Pending changes saved. '+result.warning:'Pending changes saved',!!result.warning);await pgAutomationPollLive();
+  pgAutomationNotice(result.warning?'Pending changes saved. '+result.warning:'Pending changes saved',result.warning?'warning':false);await pgAutomationPollLive();
  }catch(e){pgAutomationNotice(e.message+' Reload pending items if the batch has advanced.',true);}
 }
 function pgAutomationRenderLiveRun(run,execution){
@@ -921,7 +932,8 @@ function pgAutomationRenderLiveRun(run,execution){
  if(!run){live.innerHTML='<div class="auto-empty">'+(checking?'Checking TV/meter availability and queue configuration. Each job checks its own TV settings after selecting its signal and picture mode.':pre&&['blocked','failed','interrupted'].includes(pre.status)?'Calibration has not started. Resolve the startup problems shown above, then retry.':'No active batch. Completed and stopped runs are in History.')+'</div>';pgAutomationEl('LiveDetail').innerHTML='';delete pgAutomation.jobViews.live;return;}
  const terminal=pgAutomationTerminal(run),active=run.active_item!=null?Number(run.active_item):-1,items=run.items||[],worker=terminal?{}:run.worker_status||{};
  if(terminal){
-  live.innerHTML='<h3>Last batch · '+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Batch')+'</h3><p class="auto-muted">'+pgAutomationEscape(status)+' · Nothing is running. Results remain available below and in History.</p>'
+  live.innerHTML='<h3>Last batch · '+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Batch')+'</h3><p class="auto-muted">'+pgAutomationEscape(status.replace(/-/g,' '))+' · Nothing is running. Results remain available below and in History.</p>'
+   +pgAutomationRunWarningsHtml(run)
    +items.map((item,i)=>pgAutomationJobButton(item,i,'live',run.id,false)).join('');
   if(pgAutomation.tab==='live')pgAutomationSyncLiveDetail(run);return;
  }
@@ -955,7 +967,7 @@ async function pgAutomationPollLive(){
  }
 }
 function pgAutomationHistorySummary(run,index){
- return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--border)"><span><strong>'+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Automation queue')+'</strong><br><small style="color:var(--text2)">'+pgAutomationEscape(pgAutomationFormatTime(run.created_at_iso)||run.id||'')+' · '+pgAutomationEscape(run.status||'')+'</small>'+(run.failure?'<p style="color:var(--red)">'+pgAutomationEscape(pgAutomationIssueText(run.failure))+'</p>':'')+'</span><span><button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationOpenHistory('+index+')">Open</button> <button class="btn btn-sm btn-danger" type="button" onclick="pgAutomationDeleteRun('+index+')">Delete</button></span></div>';
+ return '<div class="auto-history-row"><div><strong>'+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Automation queue')+'</strong><small>'+pgAutomationEscape(pgAutomationFormatTime(run.created_at_iso)||run.id||'')+' · '+pgAutomationEscape((run.status||'').replace(/-/g,' '))+'</small>'+(run.status==='complete-with-warnings'?'<p class="auto-warning-note">Completed with warnings. Open the run for details.</p>':'')+(run.failure?'<p style="color:var(--red)">'+pgAutomationEscape(pgAutomationIssueText(run.failure))+'</p>':'')+'</div><div class="auto-actions"><button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationOpenHistory('+index+')">Open</button><button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationDeleteRun('+index+')">Delete</button></div></div>';
 }
 
 function pgAutomationRenderHistoryList(){
@@ -977,7 +989,8 @@ async function pgAutomationOpenHistory(index){
  const detail=document.getElementById('pgAutomationHistoryDetail');
  if(!detail)return;
  delete pgAutomation.jobViews.history;
- detail.innerHTML='<div style="font-weight:700;margin-bottom:8px">'+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Automation queue')+' · '+pgAutomationEscape(run.status||'')+'</div>'
+ detail.innerHTML='<h3>'+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Automation queue')+' · '+pgAutomationEscape((run.status||'').replace(/-/g,' '))+'</h3>'
+  +pgAutomationRunWarningsHtml(run)
   +'<div style="color:var(--text2);margin-bottom:8px">'+pgAutomationEscape(run.failure&&run.failure.message||'')+'</div>'
   +(Array.isArray(run.hazard_restore_failures)&&run.hazard_restore_failures.length?'<div style="color:var(--red);margin-bottom:8px">TV protections were not restored: '+pgAutomationEscape(run.hazard_restore_failures.map(x=>typeof x==='string'?x:(x.key||'')+(x.message?' ('+x.message+')':'')).join(', '))+'. Check the TV\'s energy saving, screen saver and power-off settings.</div>':'')
   +'<div class="auto-job-layout"><div id="pgAutomationHistoryJobs">'+(run.items||[]).map((item,i)=>pgAutomationJobButton(item,i,'history',run.id,false)).join('')+'</div><aside id="pgAutomationHistoryJobDetail" class="auto-job-detail" aria-label="Selected historical job details"></aside></div>';
@@ -990,10 +1003,15 @@ function pgAutomationJobButton(item,index,view,runId,active){
  return '<button type="button" class="auto-job-pick '+(active?'auto-run-current':'')+'" data-job-index="'+index+'" aria-pressed="'+!!(selected?.runId===runId&&selected.index===index)+'" '+(active?'aria-current="step"':'')+' onclick="pgAutomationSelectJob(\''+view+'\',\''+pgAutomationEscape(runId)+'\','+index+')"><strong>'+(index+1)+'. '+pgAutomationEscape(item.name||'Job')+'</strong><small>'+pgAutomationEscape(status)+(active?' · Current job':'')+'</small>'+(item.failure?'<small>'+pgAutomationEscape(pgAutomationIssueText(item.failure))+'</small>':'')+'</button>';
 }
 function pgAutomationJobStatus(item,runStatus){return item.status==='running'&&['paused','interrupted','stopped','failed'].includes(runStatus)?runStatus:item.status||'queued';}
+function pgAutomationJobFailureHtml(item){
+ if(!item?.failure)return '';
+ const cancelled=item.status==='stopped'&&item.failure.status==='interrupted'&&!item.failure.message&&!item.failure.error_code;
+ return '<p style="color:var('+(cancelled?'--text2':'--red')+')">'+(cancelled?'Stopped during ':'')+pgAutomationEscape(pgAutomationIssueText(item.failure))+'</p>';
+}
 function pgAutomationSyncLiveDetail(run){
  if(!run?.items?.length)return;
  if(pgAutomation.liveSelection?.runId!==run.id){pgAutomation.followLive=true;pgAutomation.liveSelection=null;}
- const index=pgAutomation.followLive?Number(run.active_item??0):pgAutomation.liveSelection.index;
+ const index=pgAutomation.followLive?Math.max(0,Math.min(Number(run.active_item??0),run.items.length-1)):pgAutomation.liveSelection.index;
  pgAutomationShowJob('live',run.id,index);
 }
 function pgAutomationSelectJob(view,runId,index){
@@ -1003,6 +1021,14 @@ function pgAutomationSelectJob(view,runId,index){
 function pgAutomationBackToLive(){pgAutomation.followLive=true;pgAutomationSyncLiveDetail(pgAutomation.current?.run);}
 function pgAutomationJobTarget(view){return pgAutomationEl(view==='calibration'?'CalibrationDetail':view==='live'?'LiveDetail':'HistoryJobDetail');}
 function pgAutomationCalibrationOccupied(run){return !!run&&['starting','running','paused','interrupted','stopping','completing'].includes(run.status);}
+function pgAutomationOpenRun(){
+ if(typeof pgSelectDesktopWorkspace==='function')pgSelectDesktopWorkspace('automation');
+ pgAutomationTab('live');
+ pgAutomationBackToLive();
+ document.getElementById('automationCard')?.scrollIntoView({behavior:'smooth',block:'start'});
+ const live=pgAutomationEl('Live'),run=pgAutomation.current?.run,index=Math.max(0,Math.min(Number(run?.active_item||0),(run?.items?.length||1)-1));
+ (live?.querySelector('[aria-current="step"]')||live?.querySelector('[data-job-index="'+index+'"]')||document.querySelector('[data-auto-tab="live"]'))?.focus({preventScroll:true});
+}
 function pgAutomationSyncCalibrationView(run){
  const card=pgAutomationEl('CalibrationCard'),meter=document.getElementById('meterCard');
  if(!card||!meter)return;
@@ -1015,9 +1041,15 @@ function pgAutomationSyncCalibrationView(run){
  card.style.display='';meter.inert=true;document.body.classList.add('pg-automation-calibration-observer');
  const badge=pgAutomationEl('CalibrationBadge');
  badge.dataset.state=run.status;
- badge.textContent='Automation '+({running:'active',starting:'starting',paused:'paused',interrupted:'interrupted',stopping:'stopping',completing:'finishing',complete:'complete',stopped:'stopped',failed:'failed'}[run.status]||run.status)+' · Read only';
+ badge.textContent='Automation '+({running:'active',starting:'starting',paused:'paused',interrupted:'interrupted',stopping:'stopping',completing:'finishing',complete:'complete','complete-with-warnings':'complete with warnings',stopped:'stopped',failed:'failed'}[run.status]||run.status)+' · Read-only';
  const index=Math.max(0,Math.min(Number(run.active_item??0),(run.items?.length||1)-1)),item=run.items?.[index],worker=pgAutomationTerminal(run)?{}:run.worker_status||{};
- pgAutomationEl('CalibrationProgress').textContent=(pgAutomation.statusError?pgAutomation.statusError+' · ':'')+'Job '+(index+1)+' of '+(run.items?.length||0)+': '+(item?.name||'Preparing job')+' · '+run.status+' · '+pgAutomationStageLabel(run.active_stage||'Between stages')+(worker.current_name?' · '+worker.current_name:'')+(worker.total_steps?' · '+Number(worker.current_step||0)+' / '+worker.total_steps:'');
+ const terminal=pgAutomationTerminal(run),esc=pgAutomationEscape;
+ const stage=terminal?({stopped:'Run stopped',failed:'Run failed',complete:'Run complete','complete-with-warnings':'Run complete with warnings'}[run.status]||'Saved results'):pgAutomationStageLabel(run.active_stage||'Preparing job');
+ const held=['paused','interrupted'].includes(run.status);
+ const detail=[held?(run.status==='paused'?'Paused':'Interrupted'):null,stage,!terminal&&worker.current_name,!terminal&&worker.total_steps?(held?'Last patch ':'Patch ')+Number(worker.current_step||0)+' / '+worker.total_steps:null].filter(Boolean).join(' · ');
+ const progress='<div class="auto-observer-eyebrow">Job '+(index+1)+' of '+(run.items?.length||0)+(terminal?' · Saved results':'')+'</div><h3 class="auto-observer-title">'+esc(item?.name||'Preparing job')+'</h3><p class="auto-observer-stage">'+esc(detail)+'</p>'+(!terminal&&worker.message?'<p class="auto-observer-activity">'+(held?'Last activity: ':'')+esc(worker.message)+'</p>':'');
+ const progressEl=pgAutomationEl('CalibrationProgress');if(progressEl.innerHTML!==progress)progressEl.innerHTML=progress;
+ pgAutomationEl('CalibrationHelp').textContent=pgAutomation.statusError|| ({complete:'Saved results for this completed run.','complete-with-warnings':'Measurements saved. Review the warnings in Automation.',stopped:'Run stopped. Saved measurements may be partial.',failed:'Run failed. Any saved measurements may be partial.',paused:'Batch paused. Resume or stop the run in Automation.',interrupted:'Batch interrupted. Review the run in Automation before continuing.'}[run.status]||'Read-only view of the active batch. Manage the run in Automation.');
  pgAutomationEl('CalibrationRelease').style.display=occupied?'none':'';
  if(typeof pgSyncDesktopPanels==='function')pgSyncDesktopPanels();
  const state=pgAutomation.jobViews.calibration;
@@ -1044,11 +1076,12 @@ function pgAutomationShowJob(view,runId,index,force=false){
  let state=pgAutomation.jobViews[view];
  if(!state||state.runId!==runId||state.index!==index){
   state={runId,index,showBefore:true,showAfter:true,lastFetch:0};pgAutomation.jobViews[view]=state;
-  target.innerHTML='<div class="auto-toolbar" data-job-nav></div><div data-job-meta>Loading job details…</div><div data-job-error role="status"></div><div data-job-settings></div><div data-job-toggles></div><div data-job-graphs></div>';
+  target.innerHTML='<div class="auto-toolbar" data-job-nav></div><div data-job-meta>Loading job details…</div><div data-job-error role="status"></div><div data-job-settings></div><div data-job-toggles></div><div data-job-measurement role="status"></div><div data-job-graphs></div>';
  }
  const list=view==='calibration'?null:pgAutomationEl(view==='live'?'Live':'HistoryJobs');
  list?.querySelectorAll('[data-job-index]').forEach(button=>button.setAttribute('aria-pressed',String(Number(button.dataset.jobIndex)===index)));
- target.querySelector('[data-job-nav]').innerHTML=view==='live'&&!pgAutomation.followLive?'<button class="btn btn-sm btn-primary" onclick="pgAutomationBackToLive()">Back to live job</button>':'<span class="auto-muted">'+(view==='live'?'Following live job':'Saved job results')+'</span>';
+ const saved=view!=='live'||pgAutomationTerminal(pgAutomation.current?.run);
+ target.querySelector('[data-job-nav]').innerHTML=view==='live'&&!saved&&!pgAutomation.followLive?'<button class="btn btn-sm btn-primary" onclick="pgAutomationBackToLive()">Back to live job</button>':'<span class="auto-muted">'+(saved?'Saved job results':'Following live job')+'</span>';
  if(!state.loading&&(force||Date.now()-state.lastFetch>(view==='calibration'?2500:10000)))pgAutomationFetchJob(view,state);
 }
 async function pgAutomationFetchJob(view,state){
@@ -1060,9 +1093,16 @@ async function pgAutomationFetchJob(view,state){
   if(view==='calibration'&&data.active_stage!==pgAutomation.current?.run?.active_stage)return;
   state.data=data;
   const target=pgAutomationJobTarget(view),item=data.item;
+  const measurement=target.querySelector('[data-job-measurement]');
+  if(measurement){
+   const snap=data.live?.snapshot,retry=snap?.measurement_retry;
+   const timestamps=(snap?.readings||[]).filter(r=>!r.null_read).map(r=>Number(r.timestamp)).filter(t=>Number.isFinite(t)&&t>0);
+   measurement.style.color=retry?'var(--orange)':'';
+   measurement.textContent=retry?'Retrying invalid measurement · '+(snap.message||retry.reason)+'. Graphs retain the last measurements.':snap?[snap.message,timestamps.length?'Last valid measurement '+new Date(Math.max(...timestamps)*1000).toLocaleTimeString():null].filter(Boolean).join(' · '):'';
+  }
   target.querySelector('[data-job-error]').textContent='';
   const meta=target.querySelector('[data-job-meta]'),configExpanded=meta.querySelector('details')?.open;
-  meta.innerHTML='<h3>'+pgAutomationEscape(item.name||'Job '+(state.index+1))+'</h3><p class="auto-muted">'+pgAutomationEscape(pgAutomationJobStatus(item,data.run_status))+' · Results updated '+new Date(data.fetched_at*1000).toLocaleTimeString()+'</p>'+(item.failure?'<p style="color:var(--red)">'+pgAutomationEscape(pgAutomationIssueText(item.failure))+'</p>':'')+'<details><summary>Configured settings and targets</summary>'+pgAutomationItemSummary(item)+'</details>';
+  meta.innerHTML=(view==='calibration'?'':'<h3>'+pgAutomationEscape(item.name||'Job '+(state.index+1))+'</h3><p class="auto-muted">'+pgAutomationEscape(pgAutomationJobStatus(item,data.run_status))+' · Results updated '+new Date(data.fetched_at*1000).toLocaleTimeString()+'</p>')+pgAutomationJobFailureHtml(item)+'<details><summary>Configured settings and targets</summary>'+pgAutomationItemSummary(item)+'</details>';
   if(configExpanded)meta.querySelector('details').open=true;
   const settings=target.querySelector('[data-job-settings]'),expanded=settings.querySelector('details')?.open;
   const manualChecks=[...new Set([...(item.manual_checks||[]),...(data.readiness_issues||[]).map(issue=>issue.message).filter(Boolean)])];
@@ -1071,7 +1111,7 @@ async function pgAutomationFetchJob(view,state){
   const before=(data.snapshots||[]).some(s=>s.phase==='pre'&&s.snapshot?.readings?.length)||(data.live?.phase==='pre'&&data.live.snapshot?.readings?.length);
   target.querySelector('[data-job-toggles]').innerHTML=(before?'<label><input type="checkbox" '+(state.showBefore?'checked':'')+' onchange="pgAutomationGraphToggle(\''+view+'\',\'showBefore\',this.checked)"> Before</label> ':'')+'<label><input type="checkbox" '+(state.showAfter?'checked':'')+' onchange="pgAutomationGraphToggle(\''+view+'\',\'showAfter\',this.checked)"> '+(/^complete/.test(item.status||'')?'Final':'Latest / after')+'</label>';
   await pgAutomationRenderJobGraphs(view,state);
- }catch(e){if(pgAutomation.jobViews[view]===state)pgAutomationJobTarget(view).querySelector('[data-job-error]').textContent='Unable to refresh job details: '+e.message+'. Any displayed results are the last received, not confirmed current.';}
+ }catch(e){if(pgAutomation.jobViews[view]===state)pgAutomationJobTarget(view).querySelector('[data-job-error]').textContent=state.data?'Unable to refresh job details: '+e.message+'. Any displayed results are the last received, not confirmed current.':'Unable to load job details: '+e.message+'. No measurements have been loaded for this job. The next status check will retry.';}
  finally{state.loading=false;}
 }
 function pgAutomationApplyAllNote(item){
@@ -1118,7 +1158,7 @@ function pgAutomationGraphToggle(view,key,value){const state=pgAutomation.jobVie
 function pgAutomationGraphGroup(key){return /^grey/.test(key)?'greyscale':/^colors/.test(key)?'colors':/^saturations/.test(key)?'saturations':key;}
 function pgAutomationCalibrationSnapshots(data){
  const snapshots=data.snapshots||[];
- if(['complete','failed','stopped'].includes(data.run_status)){
+ if(['complete','complete-with-warnings','failed','stopped'].includes(data.run_status)){
   const post=snapshots.filter(s=>s.phase==='post');
   return post.length?post:snapshots.filter(s=>s.phase==='calibration');
  }
@@ -1156,10 +1196,15 @@ async function pgAutomationRenderJobGraphs(view,state){
   const label=s.phase==='pre'?(s.isLive?'Before (measuring)':'Before'):s.phase==='post'?(s.isLive?'After (measuring)':'After'):s.isLive?'Live calibration':'Saved calibration';
   entries.push({title:label+' · '+(s.key==='grey'?'1D LUT':s.key==='3d'?'3D LUT':s.key==='dv-profile'?'Dolby Vision profile':pgAutomationSeriesLabel(s.key)),snapshot:snap});
  });
- const signature=JSON.stringify(entries);if(signature===state.graphSignature)return;
+ // Render at least as wide as the destination, including the source card's
+ // padding. The shared canvas renderer handles display pixel density/zoom.
+ const renderWidth=Math.max(1100,Math.ceil(target.offsetWidth)+80);
+ const signature=JSON.stringify([entries,renderWidth,window.devicePixelRatio||1,typeof pgDesktopZoom==='number'?pgDesktopZoom:1]);if(signature===state.graphSignature)return;
  if(!entries.length){target.innerHTML='<p class="auto-muted">'+(observer?'No measurements for the current stage yet. '+pgAutomationEscape(pgAutomationStageLabel(data.active_stage||'Between stages'))+'. Previous-stage graphs are not shown as live.':!state.showBefore&&!state.showAfter?'Select a comparison to show graphs.':'No measured graph data is available for this selection yet.')+'</p>';state.graphSignature=signature;return;}
  if(typeof meterFullAutoCalBuildSnapshotReportSections!=='function'){target.textContent='The calibration chart renderer is unavailable. Reload the page to load it.';return;}
  pgAutomation.reportBusy=true;
+ const previousWidth=document.body.style.getPropertyValue('--automation-report-width');
+ document.body.style.setProperty('--automation-report-width',renderWidth+'px');
  document.body.classList.add('pg-automation-report-render');
  try{
   const html=await meterFullAutoCalBuildSnapshotReportSections(entries);
@@ -1170,10 +1215,24 @@ async function pgAutomationRenderJobGraphs(view,state){
  }catch(e){if(pgAutomation.jobViews[view]===state)target.textContent='Unable to draw measurements: '+e.message;}
  finally{
   document.body.classList.remove('pg-automation-report-render');pgAutomation.reportBusy=false;
+  if(previousWidth)document.body.style.setProperty('--automation-report-width',previousWidth);
+  else document.body.style.removeProperty('--automation-report-width');
   const pending=pgAutomation.pendingJobGraphs||{};pgAutomation.pendingJobGraphs={};
   Object.entries(pending).forEach(([nextView,nextState])=>{if(pgAutomation.jobViews[nextView]===nextState)pgAutomationRenderJobGraphs(nextView,nextState);});
  }
 }
+
+// Rebuild snapshots after a window/screen change, even if measurements have
+// not changed. Reuse saved job data; resizing must never make device requests.
+if(typeof window!=='undefined')window.addEventListener('resize',()=>{
+ clearTimeout(pgAutomation.graphResizeTimer);
+ pgAutomation.graphResizeTimer=setTimeout(()=>{
+  Object.entries(pgAutomation.jobViews||{}).forEach(([view,state])=>{
+   const target=pgAutomationJobTarget(view);
+   if(target&&target.getBoundingClientRect().width>0)pgAutomationRenderJobGraphs(view,state);
+  });
+ },200);
+});
 
 function pgAutomationHistoryItemHtml(item,index){
  const apply=item&&item['apply-all'];
@@ -1187,7 +1246,7 @@ function pgAutomationHistoryItemHtml(item,index){
  if(panel&&panel.warning)details.push(pgAutomationEscape(panel.warning));
  const base=item&&item.item_number!=null?item.item_number:index;
  const qualityRows=quality?.enabled?Object.entries(quality.series||{}).map(([key,result])=>'<tr><td>'+pgAutomationEscape(pgAutomationSeriesLabel(key))+'</td><td>'+(result.average==null?'Unavailable':Number(result.average).toFixed(2))+'</td><td>'+(result.maximum==null?'Unavailable':Number(result.maximum).toFixed(2))+'</td><td>'+(result.passed==null?'Unverified':result.passed?'Pass':'Limit missed')+'</td></tr>').join(''):'';
- return '<div style="padding:12px 0;border-top:1px solid var(--border)"><strong>Item '+(index+1)+': '+pgAutomationEscape(item&&item.name||item&&item.picture_mode||'')+'</strong>'+pgAutomationItemSummary(item)+'<p style="color:var(--text2)">'+details.join(' · ')+'</p>'+(item.failure?'<p style="color:var(--red)">'+pgAutomationEscape(item.failure.message||item.failure.stage)+'</p>':'')+(qualityRows?'<table><thead><tr><th>Sweep</th><th>Average ΔE</th><th>Maximum ΔE</th><th>Quality</th></tr></thead><tbody>'+qualityRows+'</tbody></table>':'')+'<div class="btn-row" style="margin-top:8px"><a class="btn btn-sm btn-secondary" href="/api/automation/runs/'+encodeURIComponent(pgAutomation.currentHistoryRunId||'')+'/artifact/items/'+base+'/settings-checks.ndjson" target="_blank" rel="noopener">Settings Checks</a></div></div>';
+ return '<div style="padding:12px 0;border-top:1px solid var(--border)"><strong>Item '+(index+1)+': '+pgAutomationEscape(item&&item.name||item&&item.picture_mode||'')+'</strong>'+pgAutomationItemSummary(item)+'<p style="color:var(--text2)">'+details.join(' · ')+'</p>'+pgAutomationJobFailureHtml(item)+(qualityRows?'<table><thead><tr><th>Sweep</th><th>Average ΔE</th><th>Maximum ΔE</th><th>Quality</th></tr></thead><tbody>'+qualityRows+'</tbody></table>':'')+'<div class="btn-row" style="margin-top:8px"><a class="btn btn-sm btn-secondary" href="/api/automation/runs/'+encodeURIComponent(pgAutomation.currentHistoryRunId||'')+'/artifact/items/'+base+'/settings-checks.ndjson" target="_blank" rel="noopener">Settings Checks</a></div></div>';
 }
 
 async function pgAutomationBuildHistoryReport(run){
@@ -1238,23 +1297,34 @@ async function pgAutomationDeleteRun(index){
  await pgAutomationRefresh();
 }
 
+function pgAutomationTabKey(event){
+ const tabs=[...document.querySelectorAll('#automationCard [data-auto-tab]')],current=tabs.indexOf(event.target);
+ if(current<0||!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+ event.preventDefault();
+ const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(current+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
+ pgAutomationTab(tabs[next].dataset.autoTab);tabs[next].focus();
+}
 function pgAutomationTab(tab){
  pgAutomationDragCancel();
  ['recipes','queue','live','history'].forEach(name=>{const el=document.getElementById('pgAutomationTab'+name.charAt(0).toUpperCase()+name.slice(1));if(el)el.style.display=name===tab?'':'none';});
  pgAutomation.tab=tab;
  pgAutomationRenderActivity();
- document.querySelectorAll('[data-auto-tab]').forEach(el=>el.setAttribute('aria-selected',String(el.getAttribute('data-auto-tab')===tab)));
+ document.querySelectorAll('[data-auto-tab]').forEach(el=>{const selected=el.getAttribute('data-auto-tab')===tab;el.setAttribute('aria-selected',String(selected));el.tabIndex=selected?0:-1;});
  if(tab==='history')pgAutomationRefresh();
  if(tab==='live')pgAutomationPollLive();
 }
 
 async function pgAutomationRefresh(){
+ // The live poll owns run state. Do not hold it behind history loading or
+ // overwrite a newer poll with the result of an older bulk refresh.
+ pgAutomationPollLive();
+ if(pgAutomation.refreshing)return pgAutomation.refreshing;
+ const pending=(async()=>{
  const responses=await Promise.all([
   fetchJSON('/api/automation/recipes',{_quiet:true,_timeoutMs:5000}),
   fetchJSON('/api/automation/queues',{_quiet:true,_timeoutMs:5000}),
   // Saved manifests can take longer than a live-status poll on the Pi.
-  fetchJSON('/api/automation/runs',{_quiet:true,_timeoutMs:30000}),
-  fetchJSON('/api/automation/runs/current',{_quiet:true,_timeoutMs:5000})
+  fetchJSON('/api/automation/runs',{_quiet:true,_timeoutMs:30000})
  ]);
  if(responses[0]&&Array.isArray(responses[0].recipes))pgAutomation.recipes=responses[0].recipes;
  if(responses[1]&&Array.isArray(responses[1].queues))pgAutomation.queues=responses[1].queues;
@@ -1265,11 +1335,9 @@ async function pgAutomationRefresh(){
  pgAutomationRenderSavedQueues();
  pgAutomationRenderQueue();
  pgAutomationRenderHistoryList();
- if(responses[3]&&responses[3].status!=='error'){pgAutomation.current=responses[3];pgAutomation.statusError='';}
- else pgAutomation.statusError='Cannot refresh run status. Showing the last known state; progress is unconfirmed.';
- pgAutomationRenderLiveRun(pgAutomation.current?.run,pgAutomation.current?.execution);
- const active=responses[3]&&responses[3].run&&['starting','running','paused','stopping','completing','interrupted'].indexOf(responses[3].run.status)>=0;
- if(active&&!pgAutomation.liveTimer)pgAutomation.liveTimer=setTimeout(async()=>{pgAutomation.liveTimer=null;await pgAutomationPollLive();},3000);
+ })();
+ pgAutomation.refreshing=pending;
+ try{await pending;}finally{if(pgAutomation.refreshing===pending)pgAutomation.refreshing=null;}
 }
 
 function pgAutomationInit(){

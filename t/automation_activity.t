@@ -54,4 +54,26 @@ ok(!exists($log->{entries}[0]{private}),'job-check output is allowlisted');
  is(main::webui_automation_log_time('2026-99-13T16:17:41'),undef,'invalid legacy dates cannot invent an event time');
 }
 POSIX::tzset();
+my @severity=(
+ ['Job 1 | 1D LUT | sdr26_2.3% | Attempt 7/12 | dE 0.935; target <=1.00; previous best 1.389; requested target 0.50 (near-black allowance active) | Y 0.1050 cd/m2; luminance error +3.8%','info'],
+ ['luminance error -30.0%; dE 4.2; target <=0.50','info'],
+ ['LUT upload failed | luminance error +3.8%','error'],
+ ['daemon request failed; retrying in 2 seconds','warning'],
+ ['LG request reported a connection failure; refreshing the pairing (attempt 1)','warning'],
+ ['upload failed after retries','error'],
+ ['Unable to read meter; retry manually','error'],
+ ['Reconnection failed; reconnect manually','error'],
+ ['Stop cleanup FAILED: TV did not acknowledge exit; retry manually','error'],
+ ['stage greyscale-done interrupted by stop request for item 0','info'],
+ ['Workers cancelled; sending TV calibration exit even if no job is active','info'],
+ ['runner parked an interrupted run for resume','warning'],
+ ['Force stopping meter worker after cancellation grace period','warning'],
+ ['Worker activity gap: earlier detail events expired','warning'],
+ ['Apply to All Inputs sent - confirmation unavailable on this TV','info'],
+ ['TV settings readback: 2/3 matched; warning: some controls cannot be verified - see setting checks','warning'],
+ ['No errors; 0 failures','info'],
+ ['unable to copy automation artifact','error'],
+ ['Stop cleanup complete: calibration mode off','info'],
+);
+for my $case (@severity){is(main::webui_automation_log_level($case->[0]),$case->[1],$case->[0]);}
 done_testing();

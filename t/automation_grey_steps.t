@@ -45,9 +45,22 @@ is(step_at($hdr8,5)->{r},13,'8-bit Full HDR10 uses its own canonical slot table'
 is(step_at($hdr8,5)->{input_max},255,'8-bit HDR10 never advertises a 10-bit code domain');
 
 my $dv=main::_grey_steps({signal_format=>'dv',signal_range=>'2',max_bpc=>8,color_format=>'0'});
-is(step_at($dv,0)->{r},0,'Dolby Vision Full black is code zero');
-is(step_at($dv,100)->{r},255,'Dolby Vision Full white is code 255');
-is(step_at($dv,5)->{input_max},255,'Dolby Vision reference transport remains 8-bit');
+is(step_at($dv,0)->{r},256,'DV full HDMI transport still authors legal black');
+is(step_at($dv,100)->{r},3760,'DV nominal white is legal 12-bit white, not transport maximum');
+is(step_at($dv,5)->{r},431,'DV 5% is above black (old code 13 scaled to 208, below black 256)');
+is(step_at($dv,5)->{input_max},4095,'DV source precision is independent of 8-bit transport');
+for my $bits (8,10,12) {
+ for my $range ('1','2') {
+  my $item={signal_format=>'dv',signal_range=>$range,max_bpc=>$bits,color_format=>'0',calibration=>{dark_detail=>1}};
+  my $steps=main::_grey_steps($item);
+  my $manual=PGSignalCode::signal_code_policy({signal_mode=>'dv',dv_series=>1,dv_series_code_bits=>12,dv_series_full_range=>0});
+  for my $step (@$steps) {
+   my $expected=PGSignalCode::signal_percent_to_code($manual,$step->{ire});
+   is_deeply([@$step{qw(r g b input_max)}],[($expected->{code})x3,$expected->{input_max}],"DV $bits/$range $step->{ire}% matches manual source encoding");
+  }
+  is($item->{signal_range},$range,'authoring patches does not rewrite transport settings');
+ }
+}
 
 my $sdr=main::_grey_steps({signal_format=>'sdr',signal_range=>'1',max_bpc=>10,color_format=>'1'});
 is_deeply(body_slots($sdr),guided_slots('METER_LG_GREY_AUTOCAL_26_SLOTS'),

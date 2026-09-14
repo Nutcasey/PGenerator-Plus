@@ -832,6 +832,13 @@ sub webui_route_is_concurrent_safe (@) {
  # /api/stats reads /proc/sysfs plus a 2s response cache; its cross-call CPU
  # delta baseline is :shared, so the pool does not corrupt the percentage.
  return 1 if($path eq "/api/stats" || $path eq "/api/info");
+ # Live automation and one-job graph snapshots must not wait behind the
+ # complete history scan. Job details read atomically published files only.
+ # Current status also reaps a dead runner: recovery rechecks its PID inside
+ # the manifest lock, and execution reconciliation has its own file lock.
+ # Keep bulk history/artifacts and every control/write off this fast lane.
+ return 1 if($method eq "GET" && ($path eq "/api/automation/runs/current"
+  || $path=~m{^/api/automation/runs/[A-Za-z0-9][A-Za-z0-9_.-]*/jobs/\d+$}));
  # A meter read is performed by the external session daemon, which publishes
  # its state in an atomic JSON file. Polling that file does not compete for
  # the meter, so it must not queue behind slow display commands on the single
@@ -944,10 +951,9 @@ sub webui_route_device_lane (@) {
  # it is meant to interrupt. Cleanup is performed by the runner afterwards.
  return "" if($method eq "POST" && $path=~m{^/api/automation/runs/(?:[^/]+/control/)?stop$});
  return "meter" if($method eq "POST" && $path=~m{^/api/lg/dv-profile/(?:stop|kill)$});
- # Automation history and live-state reads only touch the filesystem. Keep
- # them on the general lane so a slow LG command cannot make the live card
- # report the TV lane as unavailable. Writes and readiness stay on the TV lane
- # because they coordinate the LG automation lock.
+ # Bulk automation history stays on the general lane. Current status and
+ # single-job snapshots are allowlisted on the fast lane above. Writes and
+ # readiness stay on the TV lane because they coordinate the LG lock.
  if($method eq "GET" && $path=~m{^/api/automation(?:/|$)}) {
   return "";
  }
@@ -13117,6 +13123,22 @@ sub webui_automation_log_time (@) {
  return $stamp;
 }
 
+sub webui_automation_log_level (@) {
+ my $line=defined($_[0]) ? $_[0] : '';
+ # These are measurement residuals, not execution errors. Apply the same
+ # interpretation to historical logs without rewriting the saved evidence.
+ $line=~s/\b(?:luminance|gamma|chromaticity|relative|absolute) error\s*[:=]?\s*[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?\s*%?//ig;
+ $line=~s/\b(?:no|0) (?:errors?|failures?)\b//ig;
+ return 'error' if $line=~/\b(?:fatal|panic)\b|\b(?:cleanup|checkpoint|preparation|restoration) failed\b|\bfailed after retries\b/i;
+ # A recoverable attempt is distinct from a terminal failure.
+ return 'warning' if $line=~/\b(?:retrying|retry in|reconnecting|refreshing the pairing|force stopping|worker activity gap)\b/i;
+ return 'warning' if $line=~/; warning: some controls cannot be verified - see setting checks/i && $line!~/\b(?:failed|failure|fatal|error)\b/i;
+ return 'error' if $line=~/\b(?:fail(?:ed|ure)?|errors?|unable|cannot|could not)\b/i;
+ return 'info' if $line=~/\b(?:stop requested|interrupted by stop request|retained for stop cleanup)\b/i;
+ return 'warning' if $line=~/\b(?:warn(?:ing)?|interrupt(?:ed|ion)?|unverifi(?:ed|able))\b|Stop idle pattern: unavailable/i;
+ return 'info';
+}
+
 sub webui_automation_activity (@) {
  my ($run,$preflight)=@_;
  my @entries;
@@ -13159,7 +13181,7 @@ sub webui_automation_activity (@) {
     $stamp=&webui_automation_log_time($stamp);
     $line=~s/\Q$run->{token}\E/[redacted]/g if($run->{token});
     $line=~s/("?(?:automation_token|client[_-]key|token|password)"?\s*[=:]\s*)(?:"[^"]*"|'[^']*'|\S+)/${1}[redacted]/ig;
-    push @entries,{time=>$stamp,level=>$line=~/fail|error|unable|interrupt/i?"error":$line=~/warn|retry|reconnect/i?"warning":"info",message=>$line,source=>"Runner"};
+    push @entries,{time=>$stamp,level=>&webui_automation_log_level($line),message=>$line,source=>"Runner"};
    }
   } elsif(-e $path) {
    push @entries,{level=>"error",message=>"Saved runner log could not be read: $!",source=>"Log"};
@@ -13267,7 +13289,7 @@ sub webui_automation_job_detail (@) {
     && defined($after->{active_item}) && $after->{active_item} == $index && ($after->{active_stage}||"") eq $stage
     && ($after->{stage_started_at}||0) == $run->{stage_started_at}) {
    my %safe;
-   foreach my $key (qw(type points status steps readings white_reading black_reading signal_mode target_gamma max_luma dv_map_mode lg_autocal_26_best_known current_name current_step current_delta_e current_luminance luminance_error_pct)) {
+   foreach my $key (qw(type points status steps readings white_reading black_reading signal_mode target_gamma max_luma dv_map_mode lg_autocal_26_best_known current_name current_step current_delta_e current_luminance luminance_error_pct message measurement_retry)) {
     $safe{$key}=$state->{$key} if(exists($state->{$key}));
    }
    $live={key=>$source->[0] eq "series" ? ($run->{active_series}{key}||"series") : $source->[0],phase=>$stage eq "pre-readings-done" ? "pre" : $stage eq "post-readings-done" ? "post" : "calibration",snapshot=>\%safe};

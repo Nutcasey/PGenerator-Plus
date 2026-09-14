@@ -115,6 +115,16 @@ const html=require('./automation_activity_preview.cjs');
   await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:touch.tx,y:touch.ty}]});
   await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
   assert.equal((await names())[1],beforeTouch[0],'touch drag reorders jobs on narrow screens');
+  await page.evaluate(()=>{
+   pgAutomation.lastProblem='';pgAutomationNotice('Pending changes saved; optional control unverified','warning');
+   if(pgAutomation.logNotices.at(-1).level!=='warning'||pgAutomationEl('Notice').style.color!=='var(--orange)'||pgAutomation.lastProblem)throw new Error('A successful save with a warning must not become a red blocking error');
+   pgAutomationNotice('Upload failed',true);
+   if(pgAutomation.logNotices.at(-1).level!=='error'||pgAutomationEl('Notice').style.color!=='var(--red)')throw new Error('Actual failures remain red');
+   const stopped=pgAutomationJobFailureHtml({status:'stopped',failure:{status:'interrupted',stage:'volume-done'}});
+   if(!stopped.includes('Stopped during')||stopped.includes('--red'))throw new Error('Normal cancellation stage is neutral');
+   const failed=pgAutomationJobFailureHtml({status:'stopped',failure:{status:'interrupted',stage:'volume-done',message:'Cleanup failed'}});
+   if(!failed.includes('--red'))throw new Error('A stopped job with an actual failure remains red');
+  });
   assert.deepEqual(errors,[]);console.log('PASS drag/drop, locks, cancel, keyboard, mobile; '+logChecks);
  }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exit(1)});

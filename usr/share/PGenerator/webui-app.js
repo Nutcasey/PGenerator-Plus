@@ -5643,6 +5643,9 @@ function meterDvRelativeSt2084UsesLegalRange(){
 }
 
 function meterGreyTargetGammaSelection(){
+ // Snapshot rendering spans animation frames. Startup/manual UI restoration
+ // can update selectors in between; the report still owns its saved target.
+ if(typeof window!=='undefined'&&window._meterSnapshotReportTargetGamma)return window._meterSnapshotReportTargetGamma;
  // Active-series snapshot wins during an LG HDR autocal (the solver pins a
  // 2.2 power target and the chart has to grade against the same curve).
  // Outside autocal, the operator's TARGET GAMMA dropdown is the source of
@@ -10807,13 +10810,13 @@ function meterTargetGammaLabel(){
 	 const usesPqTarget=(typeof meterGreyChartUsesPqTarget==='function')?meterGreyChartUsesPqTarget():meterChartIsPq();
 	 if(autoPower) return 'Gamma 2.2';
 	 if(meterChartIsHlg()) return 'HLG';
-	 if(meterChartIsDv()){
+	 if(meterChartIsDv()||!usesPqTarget){
 	  const tgt=((typeof meterGreyChartTargetGammaSelection==='function')?meterGreyChartTargetGammaSelection():((typeof meterGreyTargetGammaSelection==='function')?meterGreyTargetGammaSelection():''))||'';
 	  if(tgt==='2.2') return 'Gamma 2.2';
 	  if(tgt==='2.4') return 'Gamma 2.4';
 	  if(tgt==='bt1886') return 'BT.1886';
 	  if(tgt==='srgb') return 'sRGB';
-	  return 'ST 2084';
+	  if(meterChartIsDv()) return 'ST 2084';
 	 }
 	 if(!sel) return usesPqTarget ? (meterChartBt2390Enabled()?'PQ + BT.2390':'PQ') : 'Gamma';
  const opt=sel.options[sel.selectedIndex];

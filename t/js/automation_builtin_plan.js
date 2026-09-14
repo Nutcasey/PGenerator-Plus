@@ -45,7 +45,8 @@ for (const item of items) {
  assert.equal(item.stages.calibration, true);
  assert.equal(item.stages.pre_readings, false, 'reference jobs omit separate baseline sweeps');
  assert.equal(item.stages.post_readings, false, 'reference jobs omit separate after sweeps');
- assert.equal(item.stages.apply_all, false, 'optional apply-all must not block the starter plan');
+ assert.equal(item.stages.apply_all, true, 'reference jobs apply the result to all inputs');
+ assert.equal(item.calibration.dark_detail, true, 'reference jobs include Dark Detail');
  assert.equal(item.quality.enabled, false, 'unconfirmed quality gates are not enabled');
  assert.equal(item.calibration.target_gamma, item.target_gamma);
  assert.equal(item.calibration.target_gamut, item.target_gamut);

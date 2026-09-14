@@ -574,14 +574,15 @@ sub _grey_steps {
         push @ires, grep { !$seen{$_}++ } @fillers;
     }
     # Use the same signal-code policy as the guided series path. In particular,
-    # HDR20 has a slot table and Dolby Vision follows the selected tunnel bit
-    # depth and range; a linear 12-bit Limited approximation is not equivalent.
+    # HDR20 has a slot table. Standard DV authors 12-bit Limited components
+    # inside an 8-bit Full HDMI tunnel, just like the manual wizard. The link's
+    # range/bit depth must not become the source-code range/bit depth.
     my $code_policy = PGSignalCode::signal_code_policy({
         signal_mode=>$signal, pattern_range=>$range, max_bpc=>$max_bpc,
         color_format=>$item->{color_format} || '0',
         ($signal eq 'sdr' ? (autocal_26_codes=>1)
          : $signal eq 'hdr10' ? (hdr20_codes=>1,hdr20_use_limited=>1,hdr20_full=>($range ne '1' ? 1 : 0))
-         : (dv_series=>1,dv_series_code_bits=>$max_bpc,dv_series_full_range=>($range ne '1' ? 1 : 0))),
+         : (dv_series=>1,dv_series_code_bits=>12,dv_series_full_range=>0)),
     });
     die "Unable to build greyscale signal-code policy\n" if !defined($code_policy);
     my @steps;

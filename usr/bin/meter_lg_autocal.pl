@@ -15015,6 +15015,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 		clear_state_step_measurements($state);
 		write_state($state);
 		my ($wr,$werr)=read_step($config,$rs,$state);
+		autocal_dpg_read_failure($state,"hdr20","100% white reference",$werr) if($werr || ref($wr) ne "HASH");
 		if(!$werr && ref($wr) eq "HASH") {
 			my $wy=luminance($wr);
 			$white_ref=$wy if(defined($wy) && $wy+0 > 0);
@@ -15188,6 +15189,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 		# floor, then run the normal loop from that resolvable point.
 		{
 			my ($probe_rd,$probe_err)=read_step($config,$rs,$state);
+			autocal_dpg_read_failure($state,"hdr20",$label,$probe_err) if($probe_err || ref($probe_rd) ne "HASH");
 			# Log the INITIAL probe read separately from the post-probe-up read
 			# so an operator can tell whether the read itself was inaccurate (a
 			# settling / pattern-insertion / DPG-modulation race) or whether the
@@ -15244,7 +15246,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 					my ($puk,$pmsg)=$upload_dpg->($current_dpg);
 					return (undef,undef) if(!$puk);
 					my ($rd,$err)=read_step($config,$rs,$state);
-					return (undef,undef) if($err || ref($rd) ne "HASH");
+					autocal_dpg_read_failure($state,"hdr20",$label,$err) if($err || ref($rd) ne "HASH");
 					my $y=luminance($rd);
 					return ($rd,(defined($y)?$y+0:undef));
 				};
@@ -15478,6 +15480,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 						my $_vd=undef;
 						if($bok && !cancelled()) {
 							my ($arr,$are)=read_step($config,$rs,$state);
+							autocal_dpg_read_failure($state,"hdr20",$label,$are) if($are || ref($arr) ne "HASH");
 							if(!$are && ref($arr) eq "HASH") {
 								$last_reading=$arr;
 								my $_tl=luminance($arr);
@@ -15641,6 +15644,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 					my ($auk,$aumsg)=$upload_dpg->($current_dpg);
 					if($auk) {
 						my ($arr,$are)=read_step($config,$rs,$state);
+						autocal_dpg_read_failure($state,"hdr20",$label,$are) if($are || ref($arr) ne "HASH");
 						if(!$are && ref($arr) eq "HASH") {
 							$reading=$arr;
 							$last_reading=$arr;
@@ -15763,6 +15767,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 			  my $_vd=undef;
 			  if($bok && !cancelled()) {
 			   my ($arr,$are)=read_step($config,$rs,$state);
+			   autocal_dpg_read_failure($state,"hdr20",$label,$are) if($are || ref($arr) ne "HASH");
 			   if(!$are && ref($arr) eq "HASH") {
 			    $last_reading=$arr;
 			    my $_tl=luminance($arr);
@@ -16944,6 +16949,7 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
     my ($auk,$aumsg)=$upload_dpg->($current_dpg_ref);
     if($auk) {
      my ($arr,$are)=read_step($config,$rs,$state);
+     autocal_dpg_read_failure($state,"sdr",$label,$are) if($are || ref($arr) ne "HASH");
      if(!$are && ref($arr) eq "HASH") {
       $reading=$arr;
       $last_reading=$arr;
@@ -21493,6 +21499,7 @@ sub read_step {
  $attempts=1 if($attempts < 1);
  $attempts=5 if($attempts > 5);
  my $last_error="";
+ delete $state_ref->{"measurement_retry"} if(ref($state_ref) eq "HASH");
 	 # When the operator's low-light handler already repeats this patch
 	 # (2/3/5 samples reduced in linear XYZ), the low-shadow median ladder is
 	 # deliberately stood down: stacking both would read the patch up to 15
@@ -21507,10 +21514,14 @@ sub read_step {
 	  my $sample_count=low_shadow_sample_count_for_step($config,$step);
 	  my $sample_timeout=low_shadow_sample_read_timeout($config,$step);
 	  my $max_sample_attempts=$sample_count+2;
+	  my $sample_attempts=0;
 	  for(my $sample=1;$sample<=$max_sample_attempts && @samples < $sample_count;$sample++) {
+	   $sample_attempts=$sample;
 	   my $sample_index=@samples+1;
 	   if(ref($state_ref) eq "HASH") {
-	    $state_ref->{"message"}="Reading ".($step->{"name"}||"low shadow")." sample $sample_index/$sample_count";
+	    $state_ref->{"message"}=$state_ref->{"measurement_retry"}
+       ? "Retrying invalid measurement for ".($step->{"name"}||"patch")." ($sample/$max_sample_attempts); waiting for a valid sample"
+       : "Reading ".($step->{"name"}||"low shadow")." sample $sample_index/$sample_count";
 	    write_state($state_ref);
 	   }
 	   my ($reading,$error)=read_step_once($config,$step,$sample,{ read_timeout=>$sample_timeout, low_shadow_sample=>1 });
@@ -21518,12 +21529,14 @@ sub read_step {
 	    if(invalid_low_shadow_reading($reading,$step)) {
 	     log_line("Discarding invalid low-shadow sample for ".($step->{"name"}||format_percent($step->{"ire"}||0)."%"));
 	     if(ref($state_ref) eq "HASH") {
-	      $state_ref->{"message"}="Discarded invalid low-shadow sample; rereading ".($step->{"name"}||"patch");
+	      $state_ref->{"measurement_retry"}={patch=>$step->{"name"}||"patch",attempt=>$sample,limit=>$max_sample_attempts,reason=>"No usable shadow measurement"};
+	      $state_ref->{"message"}="Invalid shadow measurement for ".($step->{"name"}||"patch")." ($sample/$max_sample_attempts); checking again before any adjustment";
 	      write_state($state_ref);
 	     }
 	     select(undef,undef,undef,0.4);
 	     next;
 	    }
+	    delete $state_ref->{"measurement_retry"} if(ref($state_ref) eq "HASH");
 	    push @samples,$reading;
 	    next;
 	   }
@@ -21532,25 +21545,29 @@ sub read_step {
    reset_meter_session_after_read_error($error) if(defined($error) && transient_read_error($error));
    last if(defined($error) && !transient_read_error($error));
   }
+  delete $state_ref->{"measurement_retry"} if(@samples && ref($state_ref) eq "HASH");
   return (median_autocal_readings(\@samples),undef) if(@samples >= 2);
   return ($samples[0],undef) if(@samples == 1);
+  # Exhausting the shadow ladder must not fall through to a fresh read that
+  # accepts exactly the zero-valued sample we just rejected. Both DPG solvers
+  # propagate this read failure through their normal calibration-exit cleanup.
+  my $label=$step->{"name"}||"shadow patch";
+  return (undef,"No usable meter measurement for $label after $sample_attempts sample attempts; check the signal range, displayed patch and meter alignment".($last_error ne "" ? ": $last_error" : ""));
  }
 	 for(my $attempt=1;$attempt<=$attempts;$attempt++) {
 	  my ($reading,$error)=read_step_once($config,$step,$attempt);
 	  if(!$error) {
 	   # An all-zero reading the meter session already re-measured and could not
-	   # clear. Inside the shadow ladder that can be a genuinely crushed output,
-	   # and the sampling path above handles it by discarding samples rather than
-	   # aborting a calibration that exists to fix exactly that. Above the ladder
-	   # a lit patch cannot legitimately measure zero, so stop with something the
-	   # operator can act on instead of baking the zero into a DPG or a LUT. The
+   # clear. The median ladder above has its own bounded validity checks. When
+   # that ladder is disabled (including application averaging), reject the same
+   # unusable shadow data here. True black is still valid. The
 	   # wording deliberately avoids the transient_read_error vocabulary: this is
 	   # not a retryable hiccup, the session already retried.
-	   if(session_flagged_null_reading($reading) && !autocal_step_is_low_shadow($step) && !autocal_step_is_true_black($step)) {
+   if(!autocal_step_is_true_black($step) && (session_flagged_null_reading($reading) || invalid_low_shadow_reading($reading,$step))) {
 	    my $label=$step->{"name"}||format_percent($step->{"ire"}||0)."%";
 	    my $retries=($reading->{"null_read_retries"}||0)+0;
 	    log_line("Rejecting null meter reading for $label that survived $retries re-measures");
-	    return (undef,"Meter returned an unusable all-zero reading for $label that survived $retries re-measures; check the meter is aimed at the patch, awake, and still connected");
+    return (undef,"Meter returned an unusable reading for $label after $retries session re-measures; check the signal range, displayed patch and meter alignment");
 	   }
 	   delete $state_ref->{"meter_read_retry"} if(ref($state_ref) eq "HASH");
 	   reset_meter_session_success();
