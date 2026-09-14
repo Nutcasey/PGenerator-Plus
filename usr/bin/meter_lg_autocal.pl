@@ -3300,6 +3300,23 @@ sub autocal_dpg_terminal_error {
  return undef;
 }
 
+# Both DPG solvers must abort through the normal top-level CAL_END cleanup
+# on a failed physical read, including failures after an earlier good sample.
+# Do not continue on stale readings or claim a finished curve / final dE.
+sub autocal_dpg_read_failure {
+ my ($state,$prefix,$patch,$reason)=@_;
+ my $label=$prefix eq "hdr20" ? "HDR20" : "SDR26";
+ my $message="$label 1D DPG measurement failed at $patch: ".($reason||"No usable meter reading");
+ $state->{"${prefix}_1d_dpg_exit_reason"}="read_failed";
+ $state->{"${prefix}_1d_dpg_uploaded"}=JSON::PP::false;
+ $state->{"${prefix}_1d_dpg_final_de"}=undef;
+ $state->{"phase"}="error";
+ $state->{"message"}=$message;
+ write_state($state);
+ log_line($message);
+ die "$message\n";
+}
+
 sub committed_polish_far_from_target {
  my ($de,$target_delta)=@_;
  return 0 if(!defined($de));
@@ -12658,6 +12675,37 @@ sub mark_autocal_diagnostic_reading {
  return $reading;
 }
 
+# A small event buffer bridges the worker's fast updates to the automation poll.
+# Emit at measurement/write boundaries, never infer an adjustment from a later
+# reading. The same events are saved in the standalone worker log.
+sub autocal_activity_event {
+ my ($state,$message)=@_;
+ return if(ref($state) ne 'HASH');
+ $message =~ s/[\r\n]+/ /g;
+ my $events=$state->{activity_events} ||= [];
+ push @$events,{seq=>++$state->{activity_sequence},time=>time(),message=>$message};
+ splice(@$events,0,@$events-64) if(@$events>64);
+ log_line($message);
+ write_state($state);
+}
+
+sub autocal_activity_reading {
+ my ($state,$label,$iteration,$budget,$de,$best,$target,$y,$target_y,$requested)=@_;
+ my $message=sprintf('%s | Attempt %d/%d | dE %s; target <=%.2f',
+  $label,$iteration,$budget,defined($de)?sprintf('%.3f',$de):'unavailable',$target);
+ $message.=sprintf('; previous best %.3f',$best) if(defined($best));
+ $message.=sprintf('; requested target %.2f (near-black allowance active)',$requested) if(defined($requested)&&abs($requested-$target)>0.00001);
+ $message.=sprintf(' | Y %.4f cd/m2',$y) if(defined($y));
+ $message.=sprintf('; luminance error %+.1f%%',100*($y/$target_y-1)) if(defined($y)&&defined($target_y)&&$target_y>0);
+ autocal_activity_event($state,$message);
+}
+
+sub autocal_activity_upload {
+ my ($state,$label,$iteration,$before,$after,$idx,$ok)=@_;
+ my $changes=join(', ',map {sprintf('%s %s->%d',('R','G','B')[$_],defined($before->[$_])?$before->[$_]:'unknown',$after->[$idx+1024*$_])} 0..2);
+ autocal_activity_event($state,"$label | Attempt $iteration | ".($ok?'LUT upload accepted':'LUT upload failed')." | LUT codes: $changes".($ok?' | Not yet measured':''));
+}
+
 sub write_state {
  my ($state)=@_;
  $state={} if(ref($state) ne "HASH");
@@ -15267,8 +15315,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 			write_state($state);
 			my ($reading,$err)=read_step($config,$rs,$state);
 			if($err || ref($reading) ne "HASH") {
-				log_line("HDR20 1D DPG greyscale: read failed at ".$label." (".$i."): ".($err||"no reading"));
-				last;
+				autocal_dpg_read_failure($state,"hdr20",$label,$err);
 			}
 			$last_reading=$reading;
 			# Target luminance per anchor on the 2.2 curve vs the peak white_ref,
@@ -15293,6 +15340,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 			$state->{"current_luminance"}=luminance($reading);
 			my $de=autocal_delta_e_for_step($config,$reading,$rs,$white_ref,$target_x,$target_y,$tl);
 			$state->{"current_delta_e"}=defined($de)?$de:undef;
+			autocal_activity_reading($state,$label,$i,$budget,$de,$best_de,$_effective_target_de,luminance($reading),$tl,$target_de);
 			# Trajectory max (kept as-is, includes reverted overshoots). Useful in
 			# transient / per-iter logs so the operator can see the worst move the
 			# worker tried. The headline max dE is updated from $best_de only
@@ -15463,7 +15511,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 					# consecutive reverts the move is 0.125x -- effectively no change
 					# for most panels, which is why the 3-revert break below fires.
 					$move_scaling*=0.5 if($move_scaling+0 > 0.001);
-					log_line("HDR20 1D DPG greyscale: iter ".$i." reverted to best dE=".sprintf("%.4f",$best_de)." (this dE=".sprintf("%.4f",$de+0)." > prev dE=".sprintf("%.4f",$prev_de+0).", move_scaling=".sprintf("%.4f",$move_scaling).", tier=".($_anchor_ire+0 >= $high_ire_threshold?"high-IRE":"low-IRE").")");
+					autocal_activity_event($state,sprintf('%s | Attempt %d | Result worsened (dE %.3f); restoring best %.3f and reducing step size',$label,$i,$de,$best_de));
 					my $_revert_budget=($_anchor_ire < $very_low_ire_threshold) ? $very_low_revert_budget : (($_anchor_ire+0 >= $high_ire_threshold) ? $high_ire_revert_budget : 3);
 					# Noise-limited early stop (SDR26 port). A low-IRE anchor already
 					# inside the noise band around its effective target gains nothing
@@ -15477,7 +15525,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 					if($_anchor_ire+0 <= $low_ire_threshold+0 && defined($best_de)
 					   && $best_de+0 <= ($_effective_target_de+0)*$low_ire_close_factor
 					   && $consecutive_reverts >= 2) {
-						log_line("HDR20 1D DPG greyscale: low-IRE anchor noise-limited near target (best dE=".sprintf("%.4f",$best_de).", ".$consecutive_reverts." reverts), keeping best and moving on");
+						autocal_activity_event($state,sprintf('%s | Stopping refinement after %d reversions near target; best measured dE %.3f',$label,$consecutive_reverts,$best_de));
 						last;
 					}
 					if($consecutive_reverts >= $_revert_budget) {
@@ -15508,9 +15556,6 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 				# against the most recent measurement, not best_de.
 				$prev_de=$de+0;
 			}
-			# Per-read audit line: lets the operator tail the log in real time and
-			# confirm every read is recorded + which is the running best.
-			log_line("HDR20 1D DPG greyscale: ".$label." i".$i." dE=".sprintf("%.4f",defined($de)?$de+0:-1)." best=".sprintf("%.4f",defined($best_de)?$best_de+0:-1).($acceptance_pending?" (acceptance)":""));
 			# Per-iter state push: lets the next-run investigation see the
 			# full trajectory in the state JSON without reconstructing from
 			# the spotread session log. Each row is one iter; rows accumulate
@@ -15778,6 +15823,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 			 }
 			}
 			my @anchors_for_build=(@done,{idx=>$idx,r_gain=>$sr,g_gain=>$sg,b_gain=>$sb});
+			my @activity_before=map {($panel_out_of_sync||$upload_fail_streak)?undef:$current_dpg->[$idx+1024*$_]} 0..2;
 			$current_dpg=lg_autocal_26_build_hdr20_1d_dpg($current_dpg,\@anchors_for_build);
 			if(ref($current_dpg) ne "ARRAY" || @$current_dpg != 3072) {
 				$upload_failed=1; $exit_reason="build_error";
@@ -15790,6 +15836,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 			$state->{"hdr20_1d_dpg_iteration"}=$total_inner_iters+0;
 			$state->{"hdr20_1d_dpg_max_de"}=$max_de_overall+0;
 			my ($uploaded,$umsg)=$upload_dpg->($current_dpg);
+			autocal_activity_upload($state,$label,$i,\@activity_before,$current_dpg,$idx,$uploaded);
 			$state->{"hdr20_1d_dpg_uploaded"}=$uploaded ? JSON::PP::true : JSON::PP::false;
 			$state->{"hdr20_1d_dpg_upload_message"}=$umsg;
 			$state->{"message"}=$uploaded
@@ -15914,10 +15961,11 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 					}
 				}
 				write_state($state);
-				log_line("HDR20 1D DPG greyscale: ".$label." final-state restore to best dE=".sprintf("%.4f",$best_de).($bok?" (re-uploaded)":" (re-upload FAILED: ".($bmsg//"unknown").")").($_restored_ok?" (charted best reading, no re-read)":" (no best reading to chart)"));
+				autocal_activity_event($state,$label.' | Restore best curve: '.($bok?'upload accepted':'FAILED: '.($bmsg//'unknown')).sprintf(' | Best measured dE %.3f',$best_de).' | No fresh verification measurement');
 			}
 		}
 		$max_de_overall_committed=autocal_committed_max($max_de_overall_committed,$best_de);
+		autocal_activity_event($state,$label.' | Point '.(cancelled()?'stopped':$upload_failed?'failed':'finished').(defined($best_de)?sprintf(' | Best measured dE %.3f',$best_de):' | No usable result'));
 		return ($converged,$last_reading);
 	};
 
@@ -16600,8 +16648,7 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
   write_state($state);
   my ($reading,$err)=read_step($config,$rs,$state);
   if($err || ref($reading) ne "HASH") {
-   log_line("SDR26 1D DPG greyscale: read failed at ".$label." (".$i."): ".($err||"no reading"));
-   last;
+   autocal_dpg_read_failure($state,"sdr",$label,$err);
   }
   $last_reading=$reading;
   # Peak is chroma-only (Limited 109 legal / Full 100): targets OWN measured Y
@@ -16620,7 +16667,7 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
   $tl=$white_ref if(!(defined($tl) && $tl+0 > 0));
   # Peak normalises to itself (autocal_white_y = its own Y); body normalises
   # to the calibrated peak white_ref. Mirrors the HDR pattern.
-  log_line("SDR26 1D DPG greyscale: legal_peak_check anchor_ire=".sprintf("%.4f",$_anchor_ire+0)." is_legal_peak=".($_is_legal_peak?1:0)." target_Yn_will_equal_measured=".($_is_legal_peak?1:0)." tl_source=".($_is_legal_peak?"measured_luminance":"curve_via_white_ref")." chroma_only=".($_is_legal_peak?1:0)) if($_is_legal_peak);
+  log_line("SDR26 1D DPG: $label anchors peak white; correcting white balance only") if($_is_legal_peak && $i==1);
   annotate_reading_target($reading,($_is_legal_peak ? $tl : $white_ref),$tl,$target_x,$target_y);
   # Tag the peak reading so charts/tooltips treat it as the white reference
   # (no gamma-derived target Y line that drifts with each move). Limited 109
@@ -16669,6 +16716,7 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
    $state->{"current_luminance"}=luminance($reading);
    my $de=autocal_delta_e_for_step($config,$reading,$rs,$white_ref,$target_x,$target_y,$tl);
    $state->{"current_delta_e"}=defined($de)?$de:undef;
+   autocal_activity_reading($state,$label,$i,$budget,$de,$best_de,$_effective_target_de,luminance($reading),$tl,$target_de);
    # Trajectory max (kept as-is, includes reverted overshoots). Useful in
    # transient / per-iter logs so the operator can see the worst move the
    # worker tried. The HEADLINE max dE reported to the caller (and ultimately
@@ -16782,14 +16830,14 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
     $panel_out_of_sync=1;
     $consecutive_reverts++;
     $move_scaling*=0.5 if($move_scaling+0 > 0.001);
-    log_line("SDR26 1D DPG greyscale: iter ".$i." reverted to best dE=".sprintf("%.4f",$best_de)." (this dE=".sprintf("%.4f",$de+0)." > prev dE=".sprintf("%.4f",$prev_de+0).", move_scaling=".sprintf("%.4f",$move_scaling).", tier=".(($_anchor_ire+0 >= $high_ire_threshold+0)?"high-IRE":"low-IRE").")");
+    autocal_activity_event($state,sprintf('%s | Attempt %d | Result worsened (dE %.3f); restoring best %.3f and reducing step size',$label,$i,$de,$best_de));
     # Noise-limited early stop: a low-IRE anchor already near its
     # effective target is meter-noise-limited -- once a move has failed to
     # beat the best twice, further reverts only scatter the dE (and the
     # final restore charts the committed best anyway). Keep the best and
     # move on instead of burning the whole revert budget on large bad moves.
     if($_anchor_ire+0 < $low_ire_threshold+0 && defined($best_de) && $best_de+0 <= ($_effective_target_de+0)*$low_ire_close_factor && $consecutive_reverts >= 2) {
-     log_line("SDR26 1D DPG greyscale: low-IRE anchor noise-limited near target (best dE=".sprintf("%.4f",$best_de).", ".$consecutive_reverts." reverts), keeping best and moving on");
+     autocal_activity_event($state,sprintf('%s | Stopping refinement after %d reversions near target; best measured dE %.3f',$label,$consecutive_reverts,$best_de));
      last;
     }
     if($consecutive_reverts >= $revert_budget) {
@@ -16813,7 +16861,6 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
    # the high-band threshold is lowered via conf).
    $prev_de=$de+0;
   }
-  log_line("SDR26 1D DPG greyscale: ".$label." i".$i." dE=".sprintf("%.4f",defined($de)?$de+0:-1)." best=".sprintf("%.4f",defined($best_de)?$best_de+0:-1).($acceptance_pending?" (acceptance)":""));
   # Per-iter state push for diagnostic parity with HDR.
   {
    my $hist=$state->{"sdr_1d_dpg_anchor_history"};
@@ -17246,6 +17293,7 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
      $label,$i,$idx+0,$sr+0,$sg+0,$sb+0,$_y_log,$_tl_log,$_before,$_after));
    }
   }
+  my @activity_before=map {($panel_out_of_sync||$upload_fail_streak)?undef:$current_dpg_ref->[$idx+1024*$_]} 0..2;
   @{$current_dpg_ref}=@{$new_dpg};
   if(ref($state) eq "HASH") {
    $state->{"sdr_1d_dpg_data"}=$current_dpg_ref;
@@ -17253,6 +17301,7 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
    $state->{"sdr_1d_dpg_computed_at"}=int(time()*1000);
   }
   my ($uploaded,$umsg)=$upload_dpg->($current_dpg_ref);
+  autocal_activity_upload($state,$label,$i,\@activity_before,$current_dpg_ref,$idx,$uploaded);
   if(ref($state) eq "HASH") {
    $state->{"sdr_1d_dpg_uploaded"}=$uploaded ? JSON::PP::true : JSON::PP::false;
    $state->{"sdr_1d_dpg_upload_message"}=$umsg;
@@ -17327,11 +17376,11 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
    }
    $state->{"current_delta_e"}=$_restored_de if(ref($state) eq "HASH");
    write_state($state) if(ref($state) eq "HASH");
-   my $_reread_suffix=$_restored_ok ? " (charted best reading, no re-read)" : " (no best reading to chart)";
-   log_line("SDR26 1D DPG greyscale: ".$label." final-state restore to best dE=".sprintf("%.4f",$best_de).((($_differs || $panel_out_of_sync))?($bok?" (re-uploaded)":" (re-upload FAILED: ".($bmsg//"unknown").")"):" (already at best)").$_reread_suffix);
+   autocal_activity_event($state,$label.' | Restore best curve: '.(($_differs || $panel_out_of_sync)?($bok?'upload accepted':'FAILED: '.($bmsg//'unknown')):'already selected').sprintf(' | Best measured dE %.3f',$best_de).' | No fresh verification measurement');
   }
  }
  $max_de_anchor_committed=autocal_committed_max(0,$best_de);
+ autocal_activity_event($state,$label.' | Point '.(cancelled()?'stopped':$upload_failed?'failed':'finished').(defined($best_de)?sprintf(' | Best measured dE %.3f',$best_de):' | No usable result'));
  # Return the headline-committed max (not the trajectory max). The caller
  # binds this to its own $max_de_overall, which then feeds $state's final_de
  # and the run summary's "final max dE=..." log line. The trajectory max
@@ -21320,6 +21369,23 @@ sub end_calibration_mode {
  },90);
  log_line("CAL_END cleanup: ".((ref($result) eq "HASH") ? ($result->{"message"}||$result->{"status"}||"done") : "invalid response"));
  return $result;
+}
+
+sub autocal_error_calibration_cleanup {
+ my ($state,$picture_mode)=@_;
+ my $result=lg_calibration_end_retry_forbidden($state) ? undef : end_calibration_mode($picture_mode);
+ my $closed=ref($result) eq "HASH" && ($result->{status}||"") eq "ok"
+  && exists($result->{calibration_mode}) && !$result->{calibration_mode};
+ if($closed) {
+  set_state_calibration_mode($state,0,"");
+  return 1;
+ }
+ set_state_calibration_mode($state,1,$picture_mode);
+ $state->{calibration_mode_end_unconfirmed}=JSON::PP::true;
+ $state->{calibration_recovery_message}||="TV calibration exit was not confirmed: ".
+  (ref($result) eq "HASH" ? ($result->{message}||"missing exit acknowledgement") : "no exit acknowledgement").
+  ". Stop and confirm recovery before starting another calibration.";
+ return 0;
 }
 
 sub autocal_completion_pattern_cleanup {
@@ -26952,13 +27018,11 @@ eval {
 } or do {
  my $err=$@ || "Auto Cal failed";
  $err=~s/[\r\n]+/ /g;
- log_line("autocal eval die caught: err=\"".$err."\" calibration_mode_active_before=".($calibration_mode_active?1:0)." cancelled=".cancelled()?1:0);
- if($calibration_mode_active && !lg_calibration_end_retry_forbidden($state)) {
-  end_calibration_mode($active_picture_mode_for_cleanup);
-  $calibration_mode_active=0;
-  set_state_calibration_mode($state,0,"");
- } elsif($calibration_mode_active) {
-  set_state_calibration_mode($state,1,$active_picture_mode_for_cleanup || ($state->{"calibration_picture_mode"}||""));
+ log_line("autocal eval die caught: err=\"".$err."\" calibration_mode_active_before=".($calibration_mode_active?1:0)." cancelled=".(cancelled()?1:0));
+ if($calibration_mode_active || $state->{calibration_mode}) {
+  my $closed=autocal_error_calibration_cleanup($state,$active_picture_mode_for_cleanup || $state->{calibration_picture_mode} || "");
+  $calibration_mode_active=$closed ? 0 : 1;
+  $err.=" ".$state->{calibration_recovery_message} if(!$closed);
  }
  $state->{"status"}=cancelled() ? "cancelled" : "error";
  $state->{"current_name"}=cancelled() ? "Auto Cal cancelled" : "Auto Cal error";

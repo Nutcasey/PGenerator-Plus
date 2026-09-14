@@ -33,4 +33,8 @@ my $artifact = main::webui_automation_artifact($id,'items/0/pre/greyscale-21.jso
 is_deeply(PGAutomation::decode_json($artifact->{data}),{readings=>[{Y=>100}]},'first item (index zero) measurement artifact is readable');
 ok(!defined(main::webui_automation_artifact($id,'items/../run.json')),'artifact traversal is refused');
 ok(!defined(main::webui_automation_artifact($id,'items//0/pre/greyscale-21.json')),'empty artifact path component is refused');
+ok(!defined(main::webui_automation_artifact($id,'run.json')),'run manifest (carries the run token) is not served as an artifact');
+ok(!defined(main::webui_automation_artifact($id,'control.json')),'control file is not served as an artifact');
+my $clean = main::webui_automation_normalize_item({name=>'Injected',status=>'complete',checkpoints=>[{name=>'greyscale-done',status=>'done'}],failure=>{message=>'x'},warnings=>['w'],recheck=>1});
+ok(!exists($clean->{$_}),"normalised item drops client-supplied $_") for qw(status checkpoints failure warnings recheck);
 done_testing();

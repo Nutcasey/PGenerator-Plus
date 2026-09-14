@@ -262,6 +262,7 @@ const LG_DISPLAY_CONTROL_ITEMS=[
  {key:'colorGamut',label:'Color Gamut',type:'select',options:['auto','native','extended','wide']},
  {key:'energySaving',label:'Energy Saving',type:'select',options:['off','minimum','medium','maximum','auto','screenOff']},
  {key:'dynamicContrast',label:'Dynamic Contrast',type:'select',options:['off','low','medium','high']},
+ {key:'hdrDynamicToneMapping',label:'HDR Dynamic Tone Mapping',type:'select',options:['off','on','hGiG']},
  {key:'dynamicColor',label:'Dynamic Color',type:'select',options:['off','low','medium','high']},
  {key:'localDimming',label:'Local Dimming',type:'select',options:['off','low','medium','high']},
  {key:'noiseReduction',label:'Noise Reduction',type:'select',options:['off','low','medium','high','auto']},
@@ -277,16 +278,17 @@ const LG_DISPLAY_CONTROL_ITEMS=[
 ];
 const LG_DISPLAY_CONTROL_KEYS=LG_DISPLAY_CONTROL_ITEMS.map(item=>item.key);
 
-// Some controls in this list are ones a given TV never reports a value for. A
-// 2021 C1 on webOS 6.5.3 refuses a read of oledLight ("Some keys are not
-// allowed for the request"), and lg_picture_settings reports that back as
-// unsupported_picture_keys; other keys are simply absent for the active
-// picture mode. lgDisplayControlRefresh already stored this in
+// Some controls in this list are ones a given TV never reports a value for.
+// A TV can refuse a read of oledLight ("Some keys are not allowed for the
+// request", the same refusal the G5 returns for applyToAllInput reads), and
+// the helper reports that back as unsupported_picture_keys via
+// webui_lg_picture_settings in lg.pm; other keys are simply absent for the
+// active picture mode. lgDisplayControlRefresh already stored this in
 // lgDisplayControlCapabilities -- but nothing read it, so a control with no
 // value rendered as a dead slider showing "--" with no explanation and no
-// pointer to the control that IS reporting (on the C1, panel brightness reads
-// back as Backlight, two cells away). Operators reasonably read the dead
-// slider as broken and reach for the TV remote.
+// pointer to the control that IS reporting (panel brightness may read back
+// under the neighbouring Backlight cell instead). Operators reasonably read
+// the dead slider as broken and reach for the TV remote.
 //
 // This annotates WHY a control has no value. It is scoped to exactly that:
 // a read refusal is not a write refusal -- the daemon reaches these keys over
@@ -1067,7 +1069,7 @@ function lgDisplayControlRender(){
   const displayValue=supported?String(value):'--';
   // Only annotate once a real load has populated values/capabilities. Before
   // that (modal just opened, or mid-refresh) every control has no value yet,
-  // and rendering 30 identical notes would be noise that reflows on load.
+  // and rendering 31 identical notes would be noise that reflows on load.
   const reason=(!supported&&lgDisplayControlLoaded)?String(state.reason||''):'';
   const titleAttr=reason?' title="'+lgEscapeHtml(reason)+'"':'';
   html+='<div class="lg-display-control-item'+(supported?'':' lg-display-control-unavailable')+'" data-lg-display-control="'+lgEscapeHtml(meta.key)+'"'+titleAttr+'>';
@@ -1877,7 +1879,7 @@ async function lgApplyAllInputsConfirmed(){
    // Green only when the TV reported the action done or accepted the
    // request outright; a bare alert-bridge dispatch is a warning, not a
    // result.
-   toast(r.message||'Applied picture settings to all inputs',!(r.confirmed||r.acknowledged));
+   toast(r.message||'Applied picture settings to all inputs',!(r.confirmed||r.acknowledged||r.confirmation_unavailable));
   }else{
    toast(r&&r.message?r.message:'Unable to apply picture settings to all inputs','err');
   }
@@ -2173,4 +2175,3 @@ async function lgCalHistoryDownload(id){
 // Calibration history loads only on demand:
 // - tablet: History button -> lgOpenCalHistoryModal()
 // - desktop: navigating to LG Display workspace (pgSelectDesktopWorkspace)
-

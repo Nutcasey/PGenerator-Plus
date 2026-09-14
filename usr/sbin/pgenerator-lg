@@ -1314,7 +1314,7 @@ sub lg_picture_get_workflow (@) {
  $tv_input=lc($tv_input);
  $tv_input="" if($tv_input !~ /^hdmi[1-4](?:_pc)?$/);
  $force_ddc_white_balance=$force_ddc_white_balance ? 1 : 0;
- $category="picture" if(!defined($category) || $category eq "" || $category !~ /\A[A-Za-z0-9$_.-]{1,200}\z/);
+ $category=&lg_picture_category_or_default($category);
  my $auth=&lg_authenticated_session($ip,$client_key,$connect_timeout,$DEFAULT_PAIR_TIMEOUT,0);
  return $auth if(($auth->{"status"}||"") ne "ok");
  my $session=$auth->{"session"};
@@ -4187,6 +4187,14 @@ sub lg_hdr_calman_reset_workflow (@) {
   &websocket_close($session);
   return &json_error("HDR reset requires an active HDR picture mode.",{ ip => $ip, active_picture_mode => $active_picture_mode, calibration_picture_mode => $cal_mode });
  }
+ if($cal_mode eq "hdr_cinema_bright") {
+  &websocket_close($session);
+  return &json_error("HDR Cinema Home is not a supported LG AutoCal mode. Select HDR Cinema, Filmmaker or Game explicitly, or use readings only. No calibration reset was sent.",{
+   ip => $ip, active_picture_mode => $active_picture_mode,
+   calibration_picture_mode => $cal_mode,
+   error_code => "lg-calibration-mode-unsupported",
+  });
+ }
  # HDR10 Full Auto Cal makes no picture-mode reset call, so this workflow is
  # where the preflight guard's evidence has to come from: same probe, same
  # rules, as the picture reset (lg_picture_mode_probe). Runs before CAL_START
@@ -4207,7 +4215,7 @@ sub lg_hdr_calman_reset_workflow (@) {
   my $driver_stuck=&lg_externalpq_error_is_expected_driver_rejection($start,$start_message);
   &websocket_close($session);
   my $message=$driver_stuck
-   ? "The LG TV rejected HDR CAL_START with error 20, which can mean another calibration session is held. No CAL_END was sent because it could close that session. Cold-restart the TV before retrying."
+   ? "The LG TV rejected HDR CAL_START with driver error 20. This does not establish a stuck session: the selected calibration mode may be unsupported. No reset was sent. Check mode support and other calibration clients before retrying; CAL_END was not sent because it could close another session."
    : ($start_message||"LG TV did not confirm HDR calibration reset start.");
   return &json_error($message,{
    ip => $ip,
@@ -4216,7 +4224,7 @@ sub lg_hdr_calman_reset_workflow (@) {
    steps => \@steps,
    cal_start_explicit_rejection => &json_bool($start_rejected),
    (defined($end_cleanup) ? (cal_end_cleanup_response => $end_cleanup) : ()),
-   error_code => $driver_stuck ? "lg-calibration-driver-stuck" : ($start_rejected ? "lg-calibration-start-rejected" : "lg-calibration-start-unconfirmed"),
+   error_code => ($driver_stuck || $start_rejected) ? "lg-calibration-start-rejected" : "lg-calibration-start-unconfirmed",
    tv_restart_may_be_required => &json_bool($driver_stuck),
   });
  }
@@ -6331,6 +6339,15 @@ sub lg_ddc_1d_white_balance_set (@) {
 			 }));
 }
 
+# Scoped categories look like "picture$hdmi1.filmMaker.2d.x". Keep the dollar
+# escaped inside the class: an unescaped "$_" there interpolates the current
+# topic and silently drops the dollar, downgrading every scoped category.
+sub lg_picture_category_or_default (@) {
+ my ($category)=@_;
+ return "picture" if(!defined($category) || $category eq "" || $category !~ /\A[A-Za-z0-9\$_.-]{1,200}\z/);
+ return $category;
+}
+
 sub lg_picture_set_workflow (@) {
  my ($ip,$client_key,$connect_timeout,$settings,$readback_keys,$tv_input,$keep_calibration_mode,$fallback_picture_mode,$calibration_mode_active,$reset_ddc_baseline,$verify_ddc_upload,$force_ddc_white_balance,$signal_mode,$category)=@_;
  $keep_calibration_mode=$keep_calibration_mode ? 1 : 0;
@@ -6345,7 +6362,7 @@ sub lg_picture_set_workflow (@) {
  $signal_mode="" if(!defined($signal_mode));
  $signal_mode=lc($signal_mode);
  $signal_mode="" if($signal_mode ne "sdr" && $signal_mode ne "hdr10" && $signal_mode ne "hlg" && $signal_mode ne "dv");
- $category="picture" if(!defined($category) || $category eq "" || $category !~ /\A[A-Za-z0-9$_.-]{1,200}\z/);
+ $category=&lg_picture_category_or_default($category);
  $tv_input=lc($tv_input);
  $tv_input="" if($tv_input !~ /^hdmi[1-4](?:_pc)?$/);
  return &json_error("No picture settings were provided",{ ip => $ip }) if(!%{$settings});
@@ -7392,6 +7409,14 @@ sub lg_apply_all_inputs_state (@) {
 # applyToAllInput value read (or ""), $readback_error the TV's rejection
 # of the read (or ""), and $transition_seen records a fresh "picture"
 # state during this dispatch.
+sub lg_apply_all_inputs_readback_unavailable (@) {
+ my ($error)=@_;
+ # This specific settings-service rejection is a capability limitation, not
+ # a dropped connection, missing reply, or evidence that dispatch failed.
+ return defined($error) && !ref($error)
+  && $error =~ /Some keys are not allowed for the request\.\s*\(\s*applyToAllInput\s*\)/i ? 1 : 0;
+}
+
 sub lg_apply_all_inputs_outcome (@) {
  my ($active,$route,$readback,$readback_error,$transition_seen)=@_;
  $readback="" if(!defined($readback));
@@ -7406,6 +7431,8 @@ sub lg_apply_all_inputs_outcome (@) {
  my $message;
  if($confirmed) {
   $message="LG TV accepted Apply to All Inputs for $subject and reports the all-inputs action as done.";
+ } elsif(($route eq "ssap" || $route eq "luna") && &lg_apply_all_inputs_readback_unavailable($readback_error)) {
+  $message="Apply to All Inputs sent for $subject - confirmation unavailable on this TV.";
  } elsif($acknowledged) {
   $message="LG TV accepted Apply to All Inputs for $subject but did not report the action as done ($read); check another input to confirm.";
  } else {
@@ -7496,6 +7523,7 @@ sub lg_picture_apply_all_inputs_workflow (@) {
   transport => $route,
   acknowledged => &json_bool($acknowledged),
   confirmed => &json_bool($confirmed),
+  confirmation_unavailable => &json_bool(!$confirmed && &lg_apply_all_inputs_readback_unavailable($readback_error)),
   readback => $readback,
   readback_error => $readback_error,
   transition_seen => &json_bool($transition_seen),
@@ -7827,7 +7855,7 @@ sub main (@) {
  my $last_written_picture_mode=$request->{"last_written_picture_mode"}||"";
  my $dpg_data=$request->{"dpg_data"};
  my $category=$request->{"category"}||"picture";
- $category="picture" if($category !~ /\A[A-Za-z0-9$_.-]{1,200}\z/);
+ $category=&lg_picture_category_or_default($category);
  my $result;
 
  if(!$ip || !&valid_ipv4($ip)) {

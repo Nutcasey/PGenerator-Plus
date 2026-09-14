@@ -9,6 +9,7 @@ BEGIN {
 }
 
 use Fcntl qw(:DEFAULT :flock);
+use IO::Handle ();
 use File::Path qw(make_path remove_tree);
 use JSON::PP ();
 use POSIX qw(strftime);
@@ -124,6 +125,9 @@ sub write_atomic {
     my $ok = 0;
     if (open(my $fh, '>:raw', $tmp)) {
         $ok = print {$fh} $data;
+        # Flush and fsync before the rename so a power cut on the SD card
+        # cannot leave the renamed file empty.
+        if ($ok) { $fh->flush; $fh->sync; }
         $ok = 0 if !$ok || !close($fh);
     }
     if ($ok && defined($mode)) {
@@ -143,12 +147,12 @@ sub write_json_atomic {
 
 sub with_lock {
     my ($path, $callback) = @_;
-    return (0, undef) if !defined($path) || ref($callback) ne 'CODE';
+    return (0, undef, 'invalid lock request') if !defined($path) || ref($callback) ne 'CODE';
     my $lock_path = $path . '.lock';
     my $parent = _parent_dir($lock_path);
-    return (0, undef) if !_ensure_dir($parent);
-    return (0, undef) if !open(my $lock, '>>', $lock_path);
-    return (0, undef) if !flock($lock, LOCK_EX);
+    return (0, undef, "unable to create $parent") if !_ensure_dir($parent);
+    return (0, undef, "unable to open $lock_path: $!") if !open(my $lock, '>>', $lock_path);
+    return (0, undef, "unable to lock $lock_path: $!") if !flock($lock, LOCK_EX);
     my $current = read_json_file($path);
     my ($ok, $result) = (1, undef);
     my $error = '';
@@ -158,6 +162,7 @@ sub with_lock {
         $result = undef;
     } elsif ($ok && defined($result)) {
         $ok = write_json_atomic($path, $result, 0664);
+        $error = "unable to write $path" if !$ok;
     }
     flock($lock, LOCK_UN);
     close($lock);

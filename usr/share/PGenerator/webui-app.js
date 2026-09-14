@@ -3109,6 +3109,7 @@ function pgSelectDesktopWorkspace(workspace,options){
  // LG calibration history: only when entering LG Display, not on loadInfo poll.
  try{ if(typeof lgMaybeRefreshCalHistoryForDesktopWorkspace==='function') lgMaybeRefreshCalHistoryForDesktopWorkspace(workspace,workspaceChanged); }catch(e){}
  pgRefreshVisibleWorkspace();
+ if(workspace==='calibration'&&typeof pgAutomationSyncCalibrationView==='function')pgAutomationSyncCalibrationView(pgAutomation.current?.run);
  if(options&&options.focus&&title){
   try{ title.focus({preventScroll:true}); }catch(e){ title.focus(); }
  }
@@ -4731,6 +4732,10 @@ function meterReadingsWouldRecoverAsBlackOnly(readings,type,steps){
 // it, and is reported.
 let _meterCodeMismatchNotified='';
 function meterNoteCodeMismatch(mismatched,type){
+ // Historical reports temporarily use the chart workspace. Its current
+ // transport controls are not evidence about the saved run's drive codes.
+ // Keep the measured codes, but do not emit a live-calibration error toast.
+ if(document.body.classList.contains('pg-automation-report-render'))return;
  if(!mismatched.length) return;
  const key=String(type||'')+'|'+(typeof meterActiveSeriesKey!=='undefined'?meterActiveSeriesKey:'')+'|'+mismatched.length;
  if(_meterCodeMismatchNotified===key) return;
@@ -10595,7 +10600,10 @@ function meterGreyInverseEotfSignalFromLuminance(luminance,refWhite,blackLevel){
   if(denom>0){
    const a=Math.pow(denom,g);
    const b=lbRoot/denom;
-   return Math.max(0,Math.min(1.1,Math.pow(y/Math.max(a,1e-12),1/g)-b));
+   // This is a chart transform, not a legal signal-code limit. SDR EOTF
+   // charts use a fixed 200-nit reference, so brighter measured whites
+   // legitimately exceed 1.1. Clipping here invented a flat highlight tail.
+   return Math.max(0,Math.pow(y/Math.max(a,1e-12),1/g)-b);
   }
   return Math.pow(ratio,1/g);
  }
@@ -13285,7 +13293,7 @@ function meterRecoverSeries(s){
   window.requestAnimationFrame(()=>setTimeout(drawRecoveredCharts,0));
  } else drawRecoveredCharts();
   meterCacheSeriesState(s.status||'complete',s&&s._defer_cache_persist?{deferPersist:true}:null);
-  if(s.status==='running'||s.status==='setup'||s.status==='started'){
+  if(s.series_id&&(s.status==='running'||s.status==='setup'||s.status==='started')){
   // Series is still running — start polling and show stop button
   meterSeriesRunning=true;
   meterSeriesAwaitingReady=!!s.awaiting_ready;
@@ -13299,7 +13307,10 @@ function meterRecoverSeries(s){
   if(meterSeriesPolling) clearInterval(meterSeriesPolling);
   meterSeriesPolling=setInterval(meterPollSeries,meterSeriesPollIntervalMs);
  } else {
-  // Complete/cancelled/error — just show results, no polling
+  // Cached/report snapshots have no live series identity. Their saved
+  // "running" status is evidence, not permission to poll a different run.
+  if(meterSeriesPolling){clearInterval(meterSeriesPolling);meterSeriesPolling=null;}
+  // Complete/cancelled/error or cached results — display only, no polling.
   meterSeriesRunning=false;
   document.getElementById('meterStopBtn').style.display='none';
   document.getElementById('meterReadSeriesBtn').classList.add('btn-secondary');
@@ -16130,8 +16141,8 @@ async function meterStop(){
  if(meterAutoCalRunning){
   return meterStopAutoCal();
  }
- if(meterFullAutoCalRunning&&!fullReportSeriesActive){
-  return meterFullAutoCalAbort('Full Auto Cal stopped',false);
+ if(meterFullAutoCalRunning){
+  return meterStopAutoCal();
  }
  const hadContinuousStop=meterContinuousActive||meterContinuousSuspendedForLgWrite;
  const hadManualStop=meterManualPromptAwaiting;
@@ -16144,22 +16155,17 @@ async function meterStop(){
  meterSeriesSpectroSetupActive=false;
  meterReadySignalPending=false;
  meterPendingDeviceReadyAction=null;
- const continuousOnlyStop=hadContinuousStop&&!hadSeriesStop&&!hadManualStop;
- // Continuous mode uses the reusable meter_session. Stopping its browser loop
- // must not tear down spotread: let any in-flight read finish, then leave the
- // session idle for the next Read Once/Continuous request. Series and explicit
- // manual/setup stops still call the backend because they own work that must
- // be cooperatively cancelled.
- const needsBackendStop=!continuousOnlyStop;
+ // Explicit Stop tears down the reusable session as well as its browser loop.
+ const needsBackendStop=true; // Explicit Stop releases the meter and TV too.
  if(hadSeriesStop&&meterBuild3dLutPending) meterBuild3dLutMeasureHide();
  if(hadSeriesStop) meterBuild3dLutPending=null;
  meterClearManualPromptAwaiting(true);
  meterSpectroSetupApply(null);
- meterActionPending=hadSeriesStop||hadContinuousStop||hadManualStop;
+ meterActionPending=true;
  // Blocking modal while the stop RTT runs. Without it the series buttons
  // look idle but meterActionPending freezes every click until the helper
  // is actually dead (often several seconds on a mid-read series).
- if(hadSeriesStop||hadContinuousStop||hadManualStop){
+ if(needsBackendStop){
   meterStopModalShow(hadSeriesStop?'series':(hadContinuousStop?'continuous':'meter'));
  }
  document.getElementById('meterReadOnce').innerHTML='&#9679; Read Once';
@@ -16206,8 +16212,8 @@ async function meterStop(){
  let patternStopped=false;
  try{
   if(needsBackendStop){
-   const stopResult=await fetchJSON('/api/meter/stop',{method:'POST',_quiet:true,_timeoutMs:15000});
-   stopRequestConfirmed=!!(stopResult&&stopResult.status==='ok');
+   await meterStopAndConfirm();
+   stopRequestConfirmed=true;
   }
   // Blank the Pi output or restore the companion alignment pattern immediately,
   // but leave the modal and interaction lock in place until spotread exits.
@@ -16217,9 +16223,7 @@ async function meterStop(){
   }catch(e){}
   if(hadSeriesStop) await waitForSeriesTeardown();
  }catch(e){
-  // A transient request failure is handled by the polling loop's idempotent
-  // stop retry. For non-series stops, preserve the previous best-effort flow.
-  if(hadSeriesStop) await waitForSeriesTeardown();
+  toast(e.message||'Stop cleanup could not be confirmed. Check the TV before another run.',true);
  }finally{
   if(!patternStopped){
    try{

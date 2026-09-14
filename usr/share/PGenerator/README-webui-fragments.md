@@ -13,14 +13,17 @@ placeholder lines changes the rendered response. `icc_profile.html` is
 spliced into the same page; `icc_profile.css`, `icc_profile.js`, and
 `hcfr_chc.js` are served verbatim from `/assets/`.
 
-`webui-colour-math.js` opens with `'use strict';` and is concatenated into
-the SAME inline `<script>` block as `webui-app.js` and `webui-workspace.js`,
-so the directive governs all three fragments. Any new code in those files
-must be strict-mode clean: no undeclared assignments, no `with`, no
-block-scoped function declarations relied on across blocks.
+`webui.html` emits two inline `<script>` blocks. The first concatenates
+`webui-colour-math.js` and `webui-app.js`; colour-math opens with
+`'use strict';`, so the directive governs both. The second block concatenates
+`webui-workspace.js` and `webui-automation.js` with no directive, so those two
+run in sloppy mode. Code added to the first block must be strict-mode clean:
+no undeclared assignments, no `with`, no block-scoped function declarations
+relied on across blocks. Do not add `'use strict';` to the second block
+without auditing `webui-workspace.js` for the same.
 
-The old extraction script and golden-hash test were removed with the original
-heredoc split. Validate an intentional fragment change by checking the
+The extraction script and golden-hash test were added by the original heredoc
+split and removed later when regression tests were kept local. Validate an intentional fragment change by checking the
 allowlist, marker splices, LF endings, and JavaScript syntax, then run the
 normal Perl suite:
 

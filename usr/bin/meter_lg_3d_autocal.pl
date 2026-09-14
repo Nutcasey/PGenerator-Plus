@@ -27,10 +27,12 @@ use PGCalibrationMath qw(
 );
 use PGMeterReading qw(reading_xyz);
 use PGSignalCode qw(signal_code_policy signal_percent_to_code);
+use PGAutomationProcessing ();
 
 our $PGAC_LOADED = 0;
 eval { require '/usr/share/PGenerator/PGAutoCalRun.pm'; $PGAC_LOADED = 1; 1 };
 our $LG_3D_AUTOMATION_TOKEN = "";
+our $LG_3D_SETTINGS_EPOCH = 0;
 
 my $config_file = shift || "/tmp/meter_lg_3d_autocal_config.json";
 my $state_file = shift || "/tmp/meter_lg_3d_autocal.json";
@@ -178,6 +180,9 @@ sub cancelled {
 sub api_json {
  my ($method,$path,$payload,$timeout)=@_;
  $method ||= "GET";
+ # Recheck processing once after a calibration write, not once per patch.
+ $LG_3D_SETTINGS_EPOCH++ if $method eq 'POST'
+  && $path =~ m{^/api/lg/(?:1d-dpg/upload|hdr-tone-map/upload|3d-lut/(?:upload|reset|probe)|calibration-mode)$};
  $timeout ||= 30;
  $timeout=1 if($timeout < 1);
  my $request_payload=$payload;
@@ -3647,6 +3652,12 @@ sub note_confirmed_zero_reading {
 
 sub read_step {
  my ($config,$step,$state)=@_;
+ if (!$config->{fixture_mode}) {
+  my $ok=eval {PGAutomationProcessing::enforce($config,$state,$LG_3D_SETTINGS_EPOCH,\&api_json,\&log_line)};
+  my $error=$@;
+  write_state($state) if ref($state) eq 'HASH';
+  return (undef,$error||'Unable to verify queued processing settings') if !$ok;
+ }
  my $fixture=fixture_reading_for_step($step,$config);
  if($fixture) {
   $fixture->{"signal_mode"}=$config->{"signal_mode"}||"sdr";
@@ -4825,7 +4836,7 @@ sub run_hdr20_postcal_shadow_correction {
 
    $state->{"phase"}="postcal_shadow";
    $state->{"current_name"}="HDR20 post-cal shadow correction pass $pass";
-   $state->{"message"}=sprintf("Re-committing DPG (per-anchor trim, worst=%.3f)",($pass==1 ? 1e9 : 0));
+   $state->{"message"}="Re-committing DPG before reading shadow anchors (pass $pass)";
    write_state($state);
    my ($cand_resp,$cand_bound,$cand_msg)=$bind_dpg->($candidate);
    $state->{"postcal_shadow_pass_".$pass."_counts"}={ %counts };
@@ -5199,6 +5210,7 @@ if($retry_upload_only) {
  delete $state->{"elapsed_ms"};
  delete $state->{"terminal_commit_verified"};
 }
+delete $state->{automation_processing_epoch}; # A new worker must obtain fresh evidence.
 if($config->{"full_workflow"}) {
  $state->{"full_workflow"}=json_true();
  $state->{"full_autocal_run_id"}=$config->{"full_autocal_run_id"} if(defined($config->{"full_autocal_run_id"}) && $config->{"full_autocal_run_id"} ne "");
@@ -5903,6 +5915,13 @@ eval {
   } else {
    log_line("Final 1D DPG shadow smoothing: skipped (no committed 3072-value DPG in config)");
   }
+ }
+
+ # The final smoothing upload also exits CAL mode. Verify queued processing
+ # before returning, so the next stage cannot inherit reset menu defaults.
+ if (!$config->{fixture_mode}) {
+  PGAutomationProcessing::enforce($config,$state,$LG_3D_SETTINGS_EPOCH,\&api_json,\&log_line);
+  write_state($state);
  }
 
  # Surface any null meter reads that had to be discarded during the run. They

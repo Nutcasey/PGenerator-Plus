@@ -80,7 +80,17 @@ sub lg_automation_guard_json (@) {
  my $payload=eval { JSON::PP::decode_json($body||"") };
  $payload={} if(ref($payload) ne "HASH");
  my $token=$payload->{automation_token}||"";
- return "" if($token ne "" && $token eq ($execution->{token}||""));
+ if($token ne "" && $token eq ($execution->{token}||"")) {
+  my $id=$execution->{run_id}||"";
+  if(!$payload->{automation_cleanup} && $id=~/\A[A-Za-z0-9._-]+\z/ && $id ne "." && $id ne "..") {
+   my $base=$ENV{PGEN_AUTOMATION_DIR}||"/var/lib/PGenerator/automation";
+   my $control;
+   if(open(my $fh,"<:raw","$base/runs/$id/control.json")) {local $/;$control=eval {JSON::PP::decode_json(<$fh>)};close($fh);}
+   return &lg_encode_json({status=>"error",error_code=>"automation-stopping",message=>"Automation is stopping; pending TV changes were cancelled"})
+    if(ref($control) eq "HASH" && ($control->{request}||"") eq "stop");
+  }
+  return "";
+ }
  my $run_id=$execution->{run_id}||"current run";
  return &lg_encode_json({
   status => "error",
@@ -88,6 +98,15 @@ sub lg_automation_guard_json (@) {
   message => "Automation queue is active ($run_id). Stop or finish it before starting a guided LG or meter operation.",
   run_id => $run_id,
  });
+}
+
+# Scoped categories look like "picture$hdmi1.filmMaker.2d.x". Keep the dollar
+# escaped inside the class: an unescaped "$_" there interpolates the current
+# topic and silently drops the dollar, downgrading every scoped category.
+sub lg_picture_category_or_default (@) {
+ my ($category)=@_;
+ return "picture" if(!defined($category) || $category eq "" || $category !~ /\A[A-Za-z0-9\$_.-]{1,200}\z/);
+ return $category;
 }
 
 sub lg_helper_path (@) {
@@ -1634,7 +1653,7 @@ sub lg_autocal_worker_running (@) {
  # unknown blocks; the reset path leaves it unset so unknown cannot lock the
  # operator out of their own recovery route.
  my ($strict)=@_;
- foreach my $name (qw(webui_meter_lg_autocal_running webui_meter_lg_3d_autocal_running)) {
+ foreach my $name (qw(webui_meter_lg_autocal_running webui_meter_lg_3d_autocal_running webui_meter_lg_dv_profile_running)) {
   no strict 'refs';
   next if(!defined(&{"main::$name"}));
   my $running=eval { &{"main::$name"}() };
@@ -1872,7 +1891,7 @@ sub webui_lg_picture_settings (@) {
  my $picture_mode=$payload->{"picture_mode"}||"";
  $picture_mode=$clients->{"calibration_picture_mode"}||"" if($picture_mode eq "" && !$ignore_calibration_picture_mode);
  my $category=$payload->{"category"}||"picture";
- $category="picture" if($category !~ /\A[A-Za-z0-9$_.-]{1,200}\z/);
+ $category=&lg_picture_category_or_default($category);
 # Read-only poll: if CEC already knows the panel is in standby there is
 # nothing to read, and spawning the helper would burn the full 60s
 # picture_get wrapper on the daemon's single WebUI request thread. The
@@ -1944,7 +1963,7 @@ sub webui_lg_picture_settings_set (@) {
  my $picture_mode=$payload->{"picture_mode"}||"";
  $picture_mode=$clients->{"calibration_picture_mode"}||"" if($picture_mode eq "" && !$ignore_calibration_picture_mode);
  my $category=$payload->{"category"}||"picture";
- $category="picture" if($category !~ /\A[A-Za-z0-9$_.-]{1,200}\z/);
+ $category=&lg_picture_category_or_default($category);
 	 my $ddc_white_balance=&lg_settings_are_ddc_white_balance($settings);
 	 my $keep_calibration_mode=exists($payload->{"keep_calibration_mode"})
 	  ? ($payload->{"keep_calibration_mode"} ? 1 : 0)
@@ -2703,13 +2722,7 @@ sub webui_meter_lg_dv_profile_stop (@) {
    if(!&webui_meter_lg_dv_profile_request_stop());
   return &lg_encode_json({status=>"ok",message=>"Dolby Vision profile stop requested"});
  }
- &webui_meter_lg_dv_profile_kill(1);
- # Strip full-workflow keys from the greyscale status so a refresh right
- # after Stop cannot re-adopt the already-finished greyscale stage as an
- # ongoing Full DV AutoCal (same reasoning as webui_meter_lg_3d_autocal_stop).
- &webui_meter_lg_autocal_clear_full_workflow_state();
- &webui_meter_stop();
- return '{"status":"ok","message":"Dolby Vision profile measurement stopped"}';
+ return &webui_meter_stop_complete($body);
 }
 
 sub webui_meter_lg_dv_profile_force_stop (@) {
@@ -3648,8 +3661,8 @@ sub lg_close_calibration_mode_at_run_end (@) {
  $clients={} if(ref($clients) ne "HASH");
  $payload={} if(ref($payload) ne "HASH");
  return { status => "ok", calibration_cleanup_needed => &lg_json_false() }
-  if(!$clients->{"calibration_mode"});
- if(&lg_autocal_worker_running()) {
+  if(!$clients->{"calibration_mode"} && !$payload->{force_stop});
+ if(&lg_autocal_worker_running(1)) {
   return {
    status => "error",
    error_code => "lg-calibration-session-active",
