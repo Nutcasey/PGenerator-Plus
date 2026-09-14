@@ -17509,13 +17509,19 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale {
     push @sdr26_codes,$code;
    }
   } else {
-   # 8-bit codes are already formula-derived over the merged labels.
+   # Keep 100% at legal white (235), with 105/109 in the 235..255
+   # headroom segment. A 239-span formula below 100% drove every body
+   # patch too high and collapsed both 105% and 109% onto code 255.
+   my $policy=signal_code_policy({
+    signal_mode=>"sdr",pattern_range=>"limited",max_bpc=>8,
+    color_format=>$sdr26_color_format,autocal_26_codes=>1,
+   });
+   return "Unable to resolve 8-bit SDR YCbCr signal policy" if(!defined($policy));
    for(my $k=0;$k<@sdr26_labels;$k++) {
     my $ire=$sdr26_labels[$k]+0;
-    my $code=int($ire/100*239+16+0.5);
-    $code=255 if($code > 255);
-    $code=16 if($code < 16);
-    push @sdr26_codes,$code;
+    my $encoded=signal_percent_to_code($policy,$ire);
+    return "Unable to encode 8-bit SDR YCbCr anchor $ire" if(ref($encoded) ne "HASH");
+    push @sdr26_codes,$encoded->{"code"};
    }
   }
  } else {
@@ -17572,7 +17578,7 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale {
    if($sdr26_rgb_limited && $sdr26_bits >= 10) {
     $idx=lg_autocal_sdr26_dpg_sample_index_for_limited_code($code,$sdr26_dpg_max_idx);
    } elsif($sdr26_rgb_limited) {
-    my $code10=int(64+($code+0)*(940-64)/(235-16)+0.5);
+    my $code10=int(64+($code-16)*(940-64)/(235-16)+0.5);
     $code10=940 if($code10 > 940);
     $idx=lg_autocal_sdr26_dpg_sample_index_for_limited_code($code10,$sdr26_dpg_max_idx);
    } else {

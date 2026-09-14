@@ -495,6 +495,18 @@ sub _measurement_options {
     } keys %$item;
 }
 
+# The step builder and every worker must see the same transport. In particular,
+# omitting color_format makes the SDR DPG worker default to RGB even when its
+# supplied steps describe the YCbCr 99/105/109 ladder.
+sub _transport_options {
+    my ($item) = @_;
+    my $cal = ref($item->{calibration}) eq 'HASH' ? $item->{calibration} : {};
+    return (
+        color_format => $item->{color_format} // '0',
+        max_bpc => $item->{max_bpc} || $cal->{max_bpc} || (_signal($item) eq 'dv' ? 8 : 10),
+    );
+}
+
 sub _series_payload {
     my ($item, $key, $run_id) = @_;
     my ($type, $points) = _series_info($key);
@@ -504,6 +516,7 @@ sub _series_payload {
         || ($signal eq 'sdr' ? 'bt1886' : $signal eq 'hlg' ? 'hlg' : 'st2084');
     $target_gamma = 'st2084' if $signal eq 'dv';
     my $payload = {
+        _transport_options($item),
         type => $type,
         points => $points,
         display_type => $item->{display_type} || 'lcd',
@@ -558,7 +571,8 @@ sub _grey_steps {
     my $signal = _signal($item);
     my $range = _default_range($item);
     my $cal = ref($item->{calibration}) eq 'HASH' ? $item->{calibration} : {};
-    my $max_bpc = $item->{max_bpc} || $cal->{max_bpc} || 10;
+    my %transport = _transport_options($item);
+    my $max_bpc = $transport{max_bpc};
     my @ires;
     if ($signal eq 'hdr10' || $signal eq 'dv') {
         @ires = (100, 0, 90, 80, 70, 60, 50, 45, 40, 35, 30, 25, 20, 15, 10, 7, 5, 4, 2.7, 2, 1.4);
@@ -640,6 +654,7 @@ sub _grey_payload {
     $target_gamma = '2.2' if $signal eq 'hdr10' || $signal eq 'dv';
     my $body = {
         _measurement_options($item),
+        _transport_options($item),
         type => 'greyscale',
         points => 26,
         display_type => $item->{display_type} || 'lcd',
@@ -650,6 +665,7 @@ sub _grey_payload {
         signal_range => _default_range($item),
         pattern_signal_range => _default_range($item),
         transport_signal_range => $item->{transport_signal_range} || _default_range($item),
+        ($signal eq 'dv' ? (dv_map_mode => '2') : ()),
         target_delta_e => 0 + ($cal->{target_delta_e} || $item->{target_delta_e} || 0.5),
         delta_e_formula => $cal->{delta_e_formula} || $item->{delta_e_formula} || 'deitp',
         target_gamma => $target_gamma,
@@ -736,6 +752,7 @@ sub _three_d_payload {
     $grey = {} if ref($grey) ne 'HASH';
     my $body = {
         _measurement_options($item),
+        _transport_options($item),
         method => $method,
         type => 'lg-3d-lut',
         display_type => $item->{display_type} || 'lcd',
@@ -758,7 +775,6 @@ sub _three_d_payload {
         lattice_patches => ($method =~ /^(?:lattice|skeleton|hybrid)$/ ? _lattice_patches($item) : undef),
         solve_matrix_only => $cal->{lattice_residuals} ? JSON::PP::false : JSON::PP::true,
         solve_cube_size => int($cal->{solve_cube_size} || 17),
-        max_bpc => $item->{max_bpc} || $cal->{max_bpc} || 10,
         refresh_rate => $item->{refresh_rate} || '',
         require_device_ready => JSON::PP::false,
         post_check => JSON::PP::false,
@@ -787,6 +803,9 @@ sub _dv_payload {
     my $range = _default_range($item);
     return {
         _measurement_options($item),
+        _transport_options($item),
+        signal_mode => 'dv',
+        dv_map_mode => '2',
         input_max => 4095,
         display_type => $item->{display_type} || 'lcd',
         ccss_override => $item->{ccss_override} || '',
@@ -1003,7 +1022,7 @@ sub _snapshot_series {
         return undef;
     }
     my %snapshot;
-    foreach my $field (qw(type points steps readings white_reading black_reading signal_mode target_gamma max_luma dv_map_mode status report_key)) {
+    foreach my $field (qw(type points steps readings white_reading black_reading signal_mode target_gamma target_gamut calibration_target_context max_luma dv_map_mode color_format max_bpc signal_range pattern_signal_range transport_signal_range status report_key)) {
         $snapshot{$field} = $status->{$field} if exists($status->{$field});
     }
     $snapshot{type} = (_series_info($key))[0] if !exists($snapshot{type});
@@ -1011,7 +1030,7 @@ sub _snapshot_series {
     $snapshot{steps} = [] if ref($snapshot{steps}) ne 'ARRAY';
     $snapshot{readings} = [] if ref($snapshot{readings}) ne 'ARRAY';
     my $context = _series_payload(_item_snapshot($ACTIVE_ITEM), $key, $RUN_ID);
-    foreach my $field (qw(signal_mode target_gamma max_luma dv_map_mode)) {
+    foreach my $field (qw(signal_mode target_gamma target_gamut max_luma dv_map_mode color_format max_bpc signal_range pattern_signal_range transport_signal_range)) {
         $snapshot{$field} = $context->{$field} if !defined($snapshot{$field});
     }
     $snapshot{status} = $status->{status} || 'error' if !defined($snapshot{status});

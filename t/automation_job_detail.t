@@ -17,7 +17,9 @@ PGAutomation::write_json_atomic($path,$run);
 PGAutomation::write_json_atomic(PGAutomation::base_dir().'/execution.json',{owner=>'automation',run_id=>$id,token=>'secret'});
 PGAutomation::write_json_atomic("$dir/pre/greyscale-21.json",{readings=>[{Y=>100}]});
 PGAutomation::append_line_locked("$dir/settings-checks.ndjson",PGAutomation::encode_json({key=>'brightness',expected=>50,observed=>50,verified=>1})."\n{partial");
-my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],status=>'running',message=>'Retrying invalid measurement',measurement_retry=>{patch=>'5%',attempt=>2,limit=>4}};
+my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],status=>'running',message=>'Retrying invalid measurement',measurement_retry=>{patch=>'5%',attempt=>2,limit=>4},
+ color_format=>'1',max_bpc=>10,signal_range=>'1',pattern_signal_range=>'1',transport_signal_range=>'1',dv_map_mode=>'2',
+ calibration_target_context=>{signal_mode=>'sdr',target_gamma=>'2.4'},sdr_1d_dpg_peak_ire=>109};
 {
  no warnings 'redefine';
  local *main::webui_automation_fresh_worker=sub{return $worker};
@@ -30,6 +32,9 @@ my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],
  is($detail->{live}{snapshot}{readings}[0]{Y},90,'owned worker measurements returned');
  is($detail->{live}{snapshot}{message},'Retrying invalid measurement','live graph detail carries current activity');
  is($detail->{live}{snapshot}{measurement_retry}{attempt},2,'live graph detail carries bounded retry state');
+ for my $field (qw(color_format max_bpc signal_range pattern_signal_range transport_signal_range dv_map_mode calibration_target_context sdr_1d_dpg_peak_ire)) {
+  is_deeply($detail->{live}{snapshot}{$field},$worker->{$field},"live graph preserves $field");
+ }
  ok(!exists $detail->{live}{snapshot}{token},'worker response is allowlisted');
  ok(!main::webui_automation_job_detail($id,1)->{live},'pending job never borrows active worker');
  $worker->{full_autocal_run_id}='another-run';

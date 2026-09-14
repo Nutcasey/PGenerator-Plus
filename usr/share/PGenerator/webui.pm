@@ -6950,8 +6950,7 @@ sub webui_meter_lg_3d_autocal_start (@) {
  # The 3D LUT body may or may not carry signal_mode (it usually inherits
  # from the active display state). Resolve signal_mode the same way the
  # server-side greyscale path does: body first, then the active conf's
- # signal_mode (dv_status/is_hdr/eotf). Same helper as the greyscale
- # autocal — promotes the link to max_bpc=10 when SDR + max_bpc<10.
+ # signal_mode (dv_status/is_hdr/eotf).
  my $_ac3_signal_mode="";
  $_ac3_signal_mode=$1 if($body=~/"signal_mode"\s*:\s*"([^"]+)"/);
  if($_ac3_signal_mode eq "") {
@@ -6964,7 +6963,10 @@ sub webui_meter_lg_3d_autocal_start (@) {
    $_ac3_signal_mode="sdr";
   }
  }
- my $_ac3_max_bpc_promoted=&webui_meter_lg_autocal_ensure_10b($_ac3_signal_mode);
+ # The 3D worker is bit-depth-aware, like the greyscale worker. Keep the
+ # selected link depth instead of restarting an 8-bit run at 10-bit halfway
+ # through and invalidating its saved transport and post-check context.
+ my $_ac3_max_bpc_promoted=0;
  # Range alignment (SDR + HDR10): pattern codes MUST match the live HDMI
  # quant range (rgb_quant_range). Defaulting missing/wrong body fields to
  # limited ("1") made Full-range Full AutoCal profile 3D LUTs against 16-235
@@ -13289,7 +13291,7 @@ sub webui_automation_job_detail (@) {
     && defined($after->{active_item}) && $after->{active_item} == $index && ($after->{active_stage}||"") eq $stage
     && ($after->{stage_started_at}||0) == $run->{stage_started_at}) {
    my %safe;
-   foreach my $key (qw(type points status steps readings white_reading black_reading signal_mode target_gamma max_luma dv_map_mode lg_autocal_26_best_known current_name current_step current_delta_e current_luminance luminance_error_pct message measurement_retry)) {
+   foreach my $key (qw(type points status steps readings white_reading black_reading signal_mode target_gamma target_gamut calibration_target_context max_luma dv_map_mode color_format max_bpc signal_range pattern_signal_range transport_signal_range sdr_1d_dpg_peak_ire lg_autocal_26_best_known current_name current_step current_delta_e current_luminance luminance_error_pct message measurement_retry)) {
     $safe{$key}=$state->{$key} if(exists($state->{$key}));
    }
    $live={key=>$source->[0] eq "series" ? ($run->{active_series}{key}||"series") : $source->[0],phase=>$stage eq "pre-readings-done" ? "pre" : $stage eq "post-readings-done" ? "post" : "calibration",snapshot=>\%safe};
@@ -13543,6 +13545,9 @@ sub webui_automation_normalize_item (@) {
  $item->{patch_size}=&webui_automation_clamp_number($item->{patch_size},10,1,100);
  $item->{delay_ms}=int(&webui_automation_clamp_number($item->{delay_ms},1000,0,30000));
  $item->{max_bpc}=(0+(&webui_automation_clamp_number($item->{max_bpc},10,8,10)))>=10 ? 10 : 8;
+ # Match the HDMI renderer's 4:2:2 requirement before freezing the recipe.
+ # Otherwise Apply silently promotes the link but workers/reports still say 8.
+ $item->{max_bpc}=10 if(($item->{color_format}//"0") eq "2" && $signal ne "dv");
  if($signal eq "dv") {
   $item->{color_format}="0"; $item->{max_bpc}=8;
   $item->{$_}="2" foreach qw(signal_range pattern_signal_range transport_signal_range rgb_quant_range);

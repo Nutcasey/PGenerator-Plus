@@ -7965,6 +7965,7 @@ async function meterFullAutoCalCaptureReportSet(stage){
 
 async function meterFullAutoCalBuildSnapshotReportSections(entries){
  const previousReportGamma=window._meterSnapshotReportTargetGamma;
+ const previousReportContext=window._meterSnapshotReportContext;
  const reportControls=['meterTargetGamma','meterTargetGamut','meterDeltaEForm','meterColorDeltaEForm','meterCustomD65Enabled','meterTargetWhiteX','meterTargetWhiteY']
   .map(id=>document.getElementById(id)).filter(Boolean).map(el=>({el,value:el.value,checked:el.checked}));
  const restore={
@@ -7988,8 +7989,15 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries){
     sectionHtml+=meterBuildEmptySeriesReportSection(title);
     continue;
    }
+   if(snap.transport_context_inferred){
+    sectionHtml+=meterBuildNoticeReportSection('Saved transport settings',
+     'Some transport settings were not recorded. Missing values use the automation runner defaults (RGB, 10-bit, Full range), not the current output. Verify the original settings before treating these charts as calibration evidence.');
+   }
    // Report each job against its saved targets, not the operator's current
    // single-calibration selectors. No change events or TV writes are sent.
+   // Keep transport and phase scoped across animation frames as well: another
+   // job may be running in a different range, bit depth or DV map mode.
+   window._meterSnapshotReportContext=snap;
    const reportValue=(id,value)=>{const el=document.getElementById(id);if(el&&value!=null)el.value=String(value);};
    reportValue('meterTargetGamma',snap.target_gamma||reportControls.find(control=>control.el.id==='meterTargetGamma')?.value);
    window._meterSnapshotReportTargetGamma=snap.target_gamma||reportControls.find(control=>control.el.id==='meterTargetGamma')?.value||null;
@@ -8002,6 +8010,8 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries){
    }
    meterRecoverSeries({
     series_id:null,
+    snapshot_report:true,
+    cache_key:snap.cache_key,
     type:snap.type,
     points:snap.points,
 	    status:'complete',
@@ -8026,6 +8036,8 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries){
    sectionHtml+=meterBuildCurrentSeriesReportSection(title);
   }
  } finally {
+  if(previousReportContext===undefined)delete window._meterSnapshotReportContext;
+  else window._meterSnapshotReportContext=previousReportContext;
   if(previousReportGamma===undefined)delete window._meterSnapshotReportTargetGamma;
   else window._meterSnapshotReportTargetGamma=previousReportGamma;
   reportControls.forEach(({el,value,checked})=>{el.value=value;el.checked=checked;});
@@ -18600,6 +18612,13 @@ function meterBuildReportSummaryCards(){
    {label:'Black Level',value:isFinite(black)?black.toFixed(3)+' cd/m²':'--'},
     {label:'Contrast Ratio',value:meterFormatContrastRatio(meterMeasuredContrastRatio(rawGs))},
    {label:'Average CCT',value:avgCct?Math.round(avgCct)+'K':'--'}
+  ];
+ } else if(typeof meterIs3dLutProfileChartContext==='function'&&meterIs3dLutProfileChartContext()){
+  // A native panel/profile pass measures its primaries; it is not an accuracy
+  // sweep against a target gamut. Do not invent a Delta-E score for it.
+  cards=[
+   {label:'Peak Luminance',value:Math.max(...valid.map(r=>Number(r.Y??r.luminance)||0)).toFixed(1)+' cd/m²'},
+   {label:'Readings',value:String(valid.length)}
   ];
  } else {
     const colorRefMode=meterColorRefMode();

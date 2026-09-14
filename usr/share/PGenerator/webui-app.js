@@ -5456,6 +5456,8 @@ function meterActiveGamut(){
 }
 
 function meterDvMapModeValue(){
+ const report=meterSnapshotReportContext();
+ if(report&&report.dv_map_mode!=null) return String(report.dv_map_mode);
  const active=(typeof meterActiveSeriesDvMapMode!=='undefined')?String(meterActiveSeriesDvMapMode||''):'';
  if(active) return active;
  const el=document.getElementById('dv_map_mode');
@@ -5505,7 +5507,15 @@ function linRgbToXyz(R,G,B,matrix){
  };
 }
 
+function meterSnapshotReportContext(){
+ return typeof window!=='undefined'&&window._meterSnapshotReportContext||null;
+}
+
 function meterIsLimitedRange(){
+ const report=meterSnapshotReportContext();
+ const saved=report&&(report.transport_signal_range??report.signal_range);
+ if(saved==='1'||saved===1) return true;
+ if(saved==='2'||saved===2) return false;
  const rangeEl=document.getElementById('rgb_quant_range');
  const v=String((rangeEl&&rangeEl.value)||'0');
  if(v==='1') return true;
@@ -5542,6 +5552,8 @@ function uiEnforceQuantRangeForColorFormat(){
 }
 
 function meterOutputFormatValue(){
+ const report=meterSnapshotReportContext();
+ if(report&&report.color_format!=null) return String(report.color_format);
  const fmtEl=document.getElementById('color_format');
  return String((fmtEl&&fmtEl.value) || (config&&config.color_format) || '0');
 }
@@ -5591,6 +5603,10 @@ function meterGreyscaleUsesFullSourceRange(){
 
 function meterPatchUsesVideoRange(){
  if(typeof meterChartIsDv==='function'&&meterChartIsDv()) return true;
+ const report=meterSnapshotReportContext();
+ const saved=report&&(report.pattern_signal_range??report.signal_range);
+ if(saved==='1'||saved===1) return true;
+ if(saved==='2'||saved===2) return false;
  return meterIsLimitedRange();
 }
 
@@ -5680,6 +5696,8 @@ function meterDvRelativeUsesGammaChartMath(){
 }
 
 function meterHdrAutoCalUsesPowerGammaChartMath(){
+ const report=meterSnapshotReportContext();
+ if(report) return report.type==='greyscale'&&(report.signal_mode==='hdr10'||report.signal_mode==='dv')&&report.target_gamma==='2.2';
  const phase=String((typeof meterAutoCalPhase!=='undefined'&&meterAutoCalPhase)||'');
  const status=(typeof meterAutoCalLatestStatus!=='undefined')?meterAutoCalLatestStatus:null;
  const statusRunning=!!(status&&String(status.status||'').toLowerCase()==='running');
@@ -5729,11 +5747,15 @@ function meterHdrAutoCalUsesPowerGammaChartMath(){
 }
 
 function meterGreyChartTargetGammaSelection(){
+ const report=meterSnapshotReportContext();
+ if(report&&report.target_gamma) return report.target_gamma;
  if(meterHdrAutoCalUsesPowerGammaChartMath()) return '2.2';
  return meterGreyTargetGammaSelection();
 }
 
 function meterGreyChartUsesPqTarget(){
+ const report=meterSnapshotReportContext();
+ if(report&&report.target_gamma) return report.target_gamma==='st2084';
  const context=(typeof meterActiveCalibrationTargetContext!=='undefined')?meterActiveCalibrationTargetContext:null;
  if(context&&context.caller_policy==='browser_chart') return context.transfer_policy==='pq_absolute';
  if(meterHdrAutoCalUsesPowerGammaChartMath()) return false;
@@ -5808,7 +5830,8 @@ function meterGreyCodeRange(){
 
 function meterPatchBitDepth(){
  if(typeof meterChartIsDv==='function'&&meterChartIsDv()) return 12;
- const bpc=parseInt(getVal('max_bpc')||'8',10);
+ const report=meterSnapshotReportContext();
+ const bpc=parseInt((report&&report.max_bpc)||getVal('max_bpc')||'8',10);
  return bpc===12?10:bpc;
 }
 
@@ -8792,7 +8815,7 @@ function meterLgAutoCalChartReferenceWhite(item){
 	 if(!item||meterActiveSeriesType!=='greyscale') return false;
 	 if(meterReadingDisablesAutoCalTargetReference(item)) return false;
 	 const mode=String((meterActiveSeriesSignalMode||meterChartSignalMode()||'sdr')).toLowerCase();
-	 if(mode==='hdr10') return false;
+	 if(mode==='hdr10'||mode==='dv') return false;
 	 // RGB-Limited AND Full SDR: 100% is the true peak. It must stay on
 	 // thumbs and plot lines. YCbCr-Limited alone treats 100% as a
 	 // legal-white reference step (ddc 99) that is hidden from the body
@@ -10992,6 +11015,8 @@ function targetGammaValue(){
 }
 
 function meterChartSignalMode(){
+ const report=meterSnapshotReportContext();
+ if(report&&report.signal_mode) return report.signal_mode;
  const liveSel=(document.getElementById('signal_mode')||{}).value;
  if(liveSel) return liveSel;
  if(config&&config.dv_status==='1') return 'dv';
@@ -11000,6 +11025,8 @@ function meterChartSignalMode(){
 }
 
 function meterActiveChartSignalMode(){
+ const report=meterSnapshotReportContext();
+ if(report&&report.signal_mode) return report.signal_mode;
  const active=(typeof meterActiveSeriesSignalMode!=='undefined')?String(meterActiveSeriesSignalMode||'').toLowerCase():'';
  return active||meterChartSignalMode();
 }
@@ -11040,10 +11067,13 @@ function meterCalibrationTargetContextFromSource(source,metaStep,metaReading){
  const explicitTarget=Object.prototype.hasOwnProperty.call(src,'target_gamma')?String(src.target_gamma||'').toLowerCase():'';
  if(stamped&&typeof stamped==='object'&&(!explicitTarget||explicitTarget===String(stamped.target_gamma||'').toLowerCase())){
   const validated=calibrationTargetContext(stamped);
-  if(validated) return validated;
+  // Worker contexts own solver maths, not browser code decoding. In
+  // particular autocal_1d lacks the browser's headroom/range policy; treating
+  // it as browser context clamps distinct 100/105/109 SDR codes to white.
+  if(validated&&validated.caller_policy==='browser_chart') return validated;
  }
- // One-release legacy adapter for snapshots made before context v1. Mutable
- // controls are read only here, while constructing the replacement record.
+ // Adapt worker/legacy records to the browser policy. Saved report transport
+ // helpers are scoped below; manual charts use their current controls.
  const signal=String(src.signal_mode||src.requested_signal_mode||step.signal_mode||reading.signal_mode||meterChartSignalMode()||'sdr').toLowerCase();
  let target=String(src.target_gamma||step.target_gamma||reading.target_gamma||'').toLowerCase();
  if(!target&&signal==='dv'&&typeof meterDvAutoTargetGamma==='function') target=String(meterDvAutoTargetGamma()||'').toLowerCase();
@@ -11059,10 +11089,11 @@ function meterCalibrationTargetContextFromSource(source,metaStep,metaReading){
  const dvInterfaceEl=document.getElementById('dv_interface');
  const dvInterface=src.dv_interface!=null?src.dv_interface:(step.dv_interface!=null?step.dv_interface:(reading.dv_interface!=null?reading.dv_interface:((dvInterfaceEl&&dvInterfaceEl.value)||'')));
  const rangeEl=document.getElementById('rgb_quant_range');
- const transportLimited=String((rangeEl&&rangeEl.value)||'2')==='1';
+ const report=meterSnapshotReportContext();
+ const transportLimited=report?meterIsLimitedRange():String((rangeEl&&rangeEl.value)||'2')==='1';
  const patternLimited=(typeof meterPatchUsesVideoRange==='function')?meterPatchUsesVideoRange():transportLimited;
  const patternBits=(typeof meterPatchBitDepth==='function')?meterPatchBitDepth():(signal==='dv'?12:8);
- const transportBits=(()=>{const n=Number((document.getElementById('max_bpc')||{}).value);return [8,10,12].includes(n)?n:patternBits;})();
+ const transportBits=(()=>{const n=Number((report&&report.max_bpc)??(document.getElementById('max_bpc')||{}).value);return [8,10,12].includes(n)?n:patternBits;})();
  let headroom='none',headroomMax=100;
  if(signal==='sdr'&&typeof meterGreyAllowsHeadroomTargets==='function'&&meterGreyAllowsHeadroomTargets()){
   headroom='lg_sdr26_ladder'; headroomMax=109;
@@ -13159,7 +13190,7 @@ function meterRecoverSeries(s){
 	  ?meterInstallServerSeriesSteps(s,type,points,recoveredSelection):null;
 	 if(installedRunSteps&&!recoveredSelection){
 	  steps=installedRunSteps;
-	 }else{
+	 }else if(!s.snapshot_report){
 	  steps=meterCanonicalRecoveredSteps(type,points,steps,s.status||'complete');
 	  steps=meterRecoveryDisplaySteps(type,points,steps);
 	  steps=meterApplyColorSeriesTargetWhiteReference(steps,type,points);
@@ -18299,11 +18330,13 @@ function meterUseLgGreyscale21(points){
 
 function meterUseLgAutoCal26(points){
  const normalized=(points===256)?100:Number(points);
+ const report=meterSnapshotReportContext();
+ if(report) return report.type==='greyscale'&&normalized===26;
  return normalized===26&&meterGreyTvControlsActive();
 }
 
 function meterGreyAllowsHeadroomTargets(){
- const mode=String((meterActiveSeriesSignalMode||meterChartSignalMode()||'sdr')).toLowerCase();
+ const mode=meterActiveChartSignalMode();
  const normalized=(Number(meterActiveSeriesPoints)===256)?100:Number(meterActiveSeriesPoints);
  // Only YCbCr-Limited SDR has the super-white ladder (99/105/109). Full and
  // RGB Limited never carry headroom above 100%, so the headroom chart math

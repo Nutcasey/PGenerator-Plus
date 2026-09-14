@@ -25,6 +25,7 @@ my $json=JSON::PP->new->canonical->allow_nonref;
 my $api_host="127.0.0.1";
 my $api_port=80;
 my $automation_token="";
+my $config;
 
 sub read_file {
  my ($path)=@_;
@@ -35,6 +36,17 @@ sub read_file {
 
 sub write_state {
  my (%state)=@_;
+ # Automation reads this file directly. Retain ownership and the measured
+ # phase's context rather than requiring the standalone status endpoint to
+ # reconstruct them from a mutable config file.
+ $state{signal_mode}="dv";
+ $state{target_gamma}="2.2";
+ $state{dv_map_mode}="2";
+ if(ref($config) eq "HASH") {
+  foreach my $key (qw(full_autocal_run_id color_format max_bpc signal_range pattern_signal_range transport_signal_range)) {
+   $state{$key}=$config->{$key} if(defined($config->{$key}));
+  }
+ }
  open(my $fh,'>',$state_file) or return;
  print $fh $json->encode(\%state);
  close($fh);
@@ -102,7 +114,7 @@ sub api_json {
  return {status=>"error",message=>"Invalid Web UI API response"};
 }
 
-my $config=eval { $json->decode(read_file($config_file)) } || {};
+$config=eval { $json->decode(read_file($config_file)) } || {};
 die "Empty/invalid config\n" if(ref($config) ne "HASH");
 $automation_token=$config->{automation_token}
  if(defined($config->{automation_token})

@@ -1156,6 +1156,49 @@ function pgAutomationSettingsEvidence(checks,item){
 }
 function pgAutomationGraphToggle(view,key,value){const state=pgAutomation.jobViews[view];if(!state)return;state[key]=value;state.graphSignature=null;pgAutomationRenderJobGraphs(view,state);}
 function pgAutomationGraphGroup(key){return /^grey/.test(key)?'greyscale':/^colors/.test(key)?'colors':/^saturations/.test(key)?'saturations':key;}
+function pgAutomationGraphSnapshot(entry,item){
+ const saved=entry.snapshot||{},cal=item.calibration||{};
+ const signal=saved.signal_mode||item.signal_format;
+ const calibration=entry.phase==='calibration';
+ const snap={...saved,signal_mode:signal,
+  target_gamma:saved.target_gamma||(calibration&&(signal==='dv'||entry.key==='grey'&&signal==='hdr10')?'2.2':item.target_gamma||cal.target_gamma),
+  target_gamut:saved.target_gamut||item.target_gamut||cal.target_gamut,
+  delta_e_formula:saved.delta_e_formula||item.delta_e_formula||cal.delta_e_formula,
+  target_white:saved.target_white||item.target_white||cal.target_white};
+ // Legacy worker snapshots omitted these fields. Recover from THIS job's
+ // frozen recipe, never the currently running job or manual output controls.
+ for(const key of ['color_format','max_bpc','signal_range','pattern_signal_range','transport_signal_range','max_luma']){
+  if(snap[key]==null)snap[key]=item[key]??cal[key];
+ }
+ snap.signal_range??=item.rgb_quant_range;
+ // Sparse legacy recipes use the runner's documented defaults. Flag the
+ // assumption rather than silently using today's unrelated output settings.
+ snap.transport_context_inferred=!!saved.transport_context_inferred||
+  signal!=='dv'&&(snap.color_format==null||snap.max_bpc==null||snap.signal_range==null);
+ snap.color_format??='0';
+ snap.max_bpc??=signal==='dv'?8:10;
+ snap.signal_range??='2';
+ snap.pattern_signal_range??=snap.signal_range;
+ snap.transport_signal_range??=snap.signal_range;
+ if(signal==='dv'){
+  snap.dv_map_mode=saved.dv_map_mode||(calibration?'2':'1');
+  snap.color_format??='0';snap.max_bpc??=8;snap.signal_range??='2';
+  snap.transport_signal_range??='2';
+ }
+ if(entry.key==='dv-profile'){
+  // The actual profile worker saves measured xyY in steps, not readings.
+  // This is native-panel characterisation, not a ColorChecker accuracy test.
+  if(!snap.readings?.length)snap.readings=(saved.steps||[]).filter(st=>st&&st.luminance!=null&&Number.isFinite(Number(st.luminance))&&Number(st.luminance)>=0)
+   .map(st=>({...st,series_type:'colors',signal_mode:'dv'}));
+  snap.cache_key='lg-dv-profile';
+ }
+ if(entry.key==='3d'){
+  snap.cache_key=(saved.method||cal.method)==='matrix'?'lg-3d-matrix-profile':'lg-3d-lattice-profile-automation';
+ }
+ if(entry.key==='grey'){snap.type='greyscale';snap.points=snap.points||26;}
+ if(entry.key==='3d'||entry.key==='dv-profile'){snap.type='colors';snap.points=snap.points||snap.readings?.length||5;}
+ return snap;
+}
 function pgAutomationCalibrationSnapshots(data){
  const snapshots=data.snapshots||[];
  if(['complete','complete-with-warnings','failed','stopped'].includes(data.run_status)){
@@ -1175,8 +1218,10 @@ async function pgAutomationRenderJobGraphs(view,state){
  const target=pgAutomationJobTarget(view)?.querySelector('[data-job-graphs]');if(!target)return;
  const data=state.data,item=data.item,entries=[];
  const observer=view==='calibration';
- const snapshots=observer?pgAutomationCalibrationSnapshots(data):(data.snapshots||[]).filter(s=>!(data.live?.snapshot?.readings?.length&&s.key===data.live.key&&s.phase===data.live.phase));
- if(!observer&&data.live?.snapshot?.readings?.length)snapshots.push({...data.live,isLive:true});
+ const live=data.live?{...data.live,snapshot:pgAutomationGraphSnapshot(data.live,item),isLive:true}:null;
+ const sources=observer?pgAutomationCalibrationSnapshots(data):(data.snapshots||[]).filter(s=>!(live?.snapshot?.readings?.length&&s.key===live.key&&s.phase===live.phase));
+ if(!observer&&live?.snapshot?.readings?.length)sources.push(live);
+ const snapshots=sources.map(s=>({...s,snapshot:pgAutomationGraphSnapshot(s,item)}));
  const groups=[...new Set(snapshots.filter(s=>s.snapshot?.readings?.length).map(s=>pgAutomationGraphGroup(s.key)))];
  if(observer&&snapshots.some(s=>s.isLive))state.graphGroup=pgAutomationGraphGroup(snapshots.find(s=>s.isLive).key);
  if(!groups.includes(state.graphGroup))state.graphGroup=groups.includes('greyscale')?'greyscale':groups[0];
@@ -1188,11 +1233,7 @@ async function pgAutomationRenderJobGraphs(view,state){
   if(pgAutomationGraphGroup(s.key)!==state.graphGroup)return;
   if(hasAfterGrey&&s.phase==='calibration'&&s.key==='grey')return;
   if(!s.snapshot?.readings?.length||(s.phase==='pre'?!state.showBefore:!state.showAfter))return;
-  const snap={...s.snapshot,signal_mode:s.snapshot.signal_mode||item.signal_format,target_gamma:s.snapshot.target_gamma||item.target_gamma,
-   target_gamut:item.target_gamut||item.calibration?.target_gamut,delta_e_formula:item.delta_e_formula||item.calibration?.delta_e_formula,
-   target_white:item.target_white||item.calibration?.target_white};
-  if(s.key==='grey'){snap.type='greyscale';snap.points=snap.points||26;}
-  if(s.key==='3d'||s.key==='dv-profile'){snap.type='colors';snap.points=snap.points||snap.readings.length;}
+  const snap=s.snapshot;
   const label=s.phase==='pre'?(s.isLive?'Before (measuring)':'Before'):s.phase==='post'?(s.isLive?'After (measuring)':'After'):s.isLive?'Live calibration':'Saved calibration';
   entries.push({title:label+' · '+(s.key==='grey'?'1D LUT':s.key==='3d'?'3D LUT':s.key==='dv-profile'?'Dolby Vision profile':pgAutomationSeriesLabel(s.key)),snapshot:snap});
  });

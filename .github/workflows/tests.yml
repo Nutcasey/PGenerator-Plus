@@ -42,7 +42,10 @@ jobs:
         run: prove -v t/
 
   browser:
-    runs-on: ubuntu-latest
+    # Ubuntu 24.04's AppArmor policy denies user namespaces to Puppeteer's
+    # downloaded Chrome (PR #14: "No usable sandbox"). Keep Chrome sandboxed
+    # on the supported 22.04 image rather than adding --no-sandbox.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

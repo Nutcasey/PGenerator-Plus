@@ -56,6 +56,12 @@ is($hdr->{target_gamut}, 'p3d65', 'HDR10 default gamut agrees with the AutoCal c
 is($hdr->{calibration}{solve_cube_size}, 17, 'missing cube size defaults to 17');
 is($hdr->{patch_size}, 10, 'missing patch size defaults to 10');
 is($hdr->{max_bpc}, 10, 'missing bit depth defaults to 10');
+for my $signal (qw(sdr hdr10)) {
+ my $y422=main::webui_automation_normalize_item({signal_format=>$signal,color_format=>'2',max_bpc=>8});
+ is($y422->{max_bpc},10,"$signal 4:2:2 recipe records the renderer's required 10-bit link");
+ my $y444=main::webui_automation_normalize_item({signal_format=>$signal,color_format=>'1',max_bpc=>8});
+ is($y444->{max_bpc},8,"$signal 4:4:4 retains supported 8-bit transport");
+}
 my $srgb=main::webui_automation_normalize_item({signal_format=>'sdr',calibration=>{target_gamma=>'srgb',profile_source=>'hybrid9'}});
 is($srgb->{target_gamma},'srgb','SDR accepts the wizard sRGB target');
 is($srgb->{calibration}{lattice_size},9,'Hybrid 9 selects a nine-point cube axis');

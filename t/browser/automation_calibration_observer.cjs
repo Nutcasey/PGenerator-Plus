@@ -72,6 +72,21 @@ const root=path.resolve(__dirname,'../..');
    const live=pgAutomationCalibrationSnapshots(d);d.active_stage='volume-settings-verified';
    return {key:live[0].key,readings:live[0].snapshot.readings.length,between:pgAutomationCalibrationSnapshots(d).length};
   }),{key:'dv-profile',readings:1,between:0},'Dolby Vision follows its profile and verification stages never borrow pre-read graphs');
+  await page.evaluate(async()=>{
+   pgAutomation.current.run.active_stage='volume-done';data.active_stage='volume-done';
+   data.item={name:'DV Filmmaker',signal_format:'dv',target_gamma:'st2084',color_format:'0',signal_range:'2',max_bpc:8};
+   // Real worker schema: measured xyY lives in steps, with no readings array.
+   data.live={key:'dv-profile',phase:'calibration',snapshot:{steps:[
+    {name:'black',kind:'black',x:.3127,y:.329,luminance:0},
+    {name:'white',kind:'white',x:.3127,y:.329,luminance:500},
+    {name:'red',kind:'red',x:.64,y:.33,luminance:100}
+   ]}};
+   await pgAutomationFetchJob('calibration',pgAutomation.jobViews.calibration);
+  });
+  assert.deepEqual(await page.evaluate(()=>({
+   count:rendered[0].snapshot.readings.length,key:rendered[0].snapshot.cache_key,
+   gamma:rendered[0].snapshot.target_gamma,map:rendered[0].snapshot.dv_map_mode
+  })),{count:3,key:'lg-dv-profile',gamma:'2.2',map:'2'},'real partial DV profile reaches its native chart, not the no-data placeholder');
   await page.evaluate(()=>{
    pgAutomation.current.run.status='complete';pgAutomation.current.run.active_item=2;pgAutomation.current.run.active_stage='item-complete';data.run_status='complete';data.active_stage='item-complete';data.live=null;data.snapshots=[{key:'greyscale-21',phase:'post',snapshot:{readings:[{Y:500}]}}];
    pgAutomationSyncCalibrationView(pgAutomation.current.run);
