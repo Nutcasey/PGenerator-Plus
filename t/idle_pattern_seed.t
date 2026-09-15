@@ -19,7 +19,7 @@ use strict;
 use warnings;
 use FindBin qw($Bin);
 use File::Temp qw(tempdir);
-use Test::More tests => 41;
+use Test::More tests => 44;
 
 my $dir = "$Bin/../usr/share/PGenerator";
 ok(-f "$dir/pattern.pm", 'pattern.pm is present');
@@ -90,8 +90,15 @@ like(idle_pattern_text(), qr/^RGB=256,256,256$/m, 'and authors black at the lega
 like(idle_pattern_text(), qr/^BG=256,256,256$/m,  'background too');
 like(idle_pattern_text(), qr/^SOURCE_RANGE=LIMITED$/m,
      'DV inner components are legal-range even on a Full tunnel');
+# DV signalled through the transport flags with dv_status still 0 must still get
+# the 8-bit tunnel. sync_pattern_bits_default() only pins bits on dv_status==1, so
+# without the $bits=8-if-$dv guard this leaked BITS=10 under a 12-bit DV black.
 conf(max_bpc => 10, dv_status => 0, is_std_dovi => 1);
 like(idle_pattern_text(), qr/^RGB=256,256,256$/m, 'is_std_dovi alone is enough to mean DV');
+like(idle_pattern_text(), qr/^BITS=8$/m,          'is_std_dovi alone still forces the 8-bit tunnel');
+like(idle_pattern_text(), qr/^SOURCE_MAX=4095$/m, 'and still declares 12-bit source precision');
+conf(max_bpc => 10, dv_status => 0, is_ll_dovi => 1);
+like(idle_pattern_text(), qr/^BITS=8$/m,          'is_ll_dovi alone forces the 8-bit tunnel too');
 
 # --- the frame itself is full-screen black ---
 conf();
