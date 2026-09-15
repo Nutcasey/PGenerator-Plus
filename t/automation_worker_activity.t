@@ -41,6 +41,10 @@ $reading->{current_step}=28;$reading->{current_name}='Auto Cal 6%';
 isnt(main::_worker_progress($reading),$first,'next point remains visible');
 $reading->{status}='complete';$reading->{message}='Calibration committed';
 like(main::_worker_progress($reading),qr/complete.*Calibration committed/,'terminal outcome remains visible');
+is(main::_worker_progress({status=>'complete',current_name=>'Auto Cal complete',message=>'Auto Cal complete',current_step=>1,total_steps=>37}),
+ 'complete | Auto Cal complete','completion neither repeats its message nor shows a reset patch counter');
+like(main::_worker_progress({status=>'error',message=>'Meter disconnected',current_step=>7,total_steps=>37}),
+ qr/Meter disconnected.*Patch 7 \/ 37/,'failure retains the interrupted patch context');
 {
  @lines=();@times=();
  my $first={seq=>1,time=>101,message=>'7% | measured dE 0.61'};

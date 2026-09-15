@@ -792,17 +792,35 @@ function pgAutomationEstimateText(run,now){
  if(run.status!=='running')return '';
  if(pgAutomation.statusError||run.heartbeat_age>60)return 'Time estimate unavailable — waiting for live progress';
  const eta=run.time_estimate,at=now??Date.now()/1000;
- if(!eta||eta.scope==='unknown')return 'Estimating time remaining…';
- if(!['batch','stage','pass'].includes(eta.scope)||Number(eta.active_item)!==Number(run.active_item)||eta.stage!==run.active_stage)return 'Estimating time remaining…';
+ if(!eta)return 'Estimating time remaining…';
+ if(Number(eta.active_item)!==Number(run.active_item)||eta.stage!==run.active_stage)return 'Estimating time remaining…';
  const age=at-Number(eta.calculated_at),seconds=Number(eta.remaining_seconds);
- if(!Number.isFinite(age)||!Number.isFinite(seconds)||seconds<=0||age<0||age>180)return 'Updating time estimate…';
- const upper=seconds*1.5-age;
- if(upper<=0)return 'Updating time estimate…';
  const duration=value=>{
   let minutes=Math.max(1,Math.ceil(value/60));if(minutes>=10)minutes=Math.ceil(minutes/5)*5;
   const hours=Math.floor(minutes/60),rest=minutes%60;
   return hours?hours+'h'+(rest?' '+rest+'m':''):minutes+'m';
  };
+ if(eta.batch_unknown_stages!=null){
+  if(!Number.isFinite(age)||age<0||age>180)return 'Updating time estimate…';
+  const range=value=>{
+   if(!Number.isFinite(Number(value))||Number(value)<=0)return '';
+   // Only time the current stage consumes can count down; unknown stages
+   // cannot consume the estimate for future work while we wait for evidence.
+   const elapsed=Number(eta.stage_remaining_seconds)>0?age:0;
+   const low=duration(Math.max(60,Number(value)*.75-elapsed));
+   const high=duration(Math.max(60,Number(value)*1.5-elapsed));
+   return '~'+low+(low===high?'':'–'+high);
+  };
+  const job=range(eta.job_remaining_seconds),batch=range(eta.batch_known_seconds);
+  const parts=[job?'Current job: '+job+(eta.job_unknown_stages>0?' + untimed stages':' remaining'):'Current job: collecting stage timings'];
+  parts.push(batch?'Batch: '+batch+(eta.batch_unknown_stages>0?' of timed work ('+eta.known_stages+'/'+eta.remaining_stages+' remaining stages estimated)':' remaining'):'Batch: collecting stage timings');
+  if(eta.approximate_history)parts.push('Uses similar-job timings');
+  return parts.join(' · ');
+ }
+ if(eta.scope==='unknown'||!['batch','stage','pass'].includes(eta.scope))return 'Estimating time remaining…';
+ if(!Number.isFinite(age)||!Number.isFinite(seconds)||seconds<=0||age<0||age>180)return 'Updating time estimate…';
+ const upper=seconds*1.5-age;
+ if(upper<=0)return 'Updating time estimate…';
  const lower=duration(Math.max(60,seconds*.75-age)),higher=duration(upper);
  return (eta.scope==='batch'?'Estimated batch remaining: ':'Estimated current '+eta.scope+': ')+'~'+lower+(lower===higher?'':'–'+higher)
   +(eta.scope==='batch'?'':' · Batch estimate still learning');

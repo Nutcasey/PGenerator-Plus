@@ -12700,6 +12700,13 @@ sub autocal_activity_reading {
  autocal_activity_event($state,$message);
 }
 
+sub autocal_activity_point_finished {
+ my ($state,$label,$status,$best_de,$refinement_de)=@_;
+ my $result=defined($refinement_de) ? sprintf(' | Accepted refinement dE %.3f',$refinement_de)
+  : defined($best_de) ? sprintf(' | Best measured dE %.3f',$best_de) : ' | No usable result';
+ autocal_activity_event($state,$label.' | Point '.$status.$result);
+}
+
 sub autocal_activity_upload {
  my ($state,$label,$iteration,$before,$after,$idx,$ok)=@_;
  my $changes=join(', ',map {sprintf('%s %s->%d',('R','G','B')[$_],defined($before->[$_])?$before->[$_]:'unknown',$after->[$idx+1024*$_])} 0..2);
@@ -15970,7 +15977,7 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 			}
 		}
 		$max_de_overall_committed=autocal_committed_max($max_de_overall_committed,$best_de);
-		autocal_activity_event($state,$label.' | Point '.(cancelled()?'stopped':$upload_failed?'failed':'finished').(defined($best_de)?sprintf(' | Best measured dE %.3f',$best_de):' | No usable result'));
+		autocal_activity_point_finished($state,$label,cancelled()?'stopped':$upload_failed?'failed':'finished',$best_de);
 		return ($converged,$last_reading);
 	};
 
@@ -16589,6 +16596,7 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
  my $_osc_damp=1.0;
  my $acceptance_pending=0;
  my $accepted_best_de=undef;
+ my $accepted_refinement_de=undef; # Reporting only; never changes curve selection.
  my $accepted_best_dpg=undef;
  my $accepted_best_anchors=undef;
 
@@ -16940,6 +16948,7 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
    # fall through: the build below makes the one-more move
   } elsif($acceptance_pending) {
    if(defined($de) && $de+0 < $accepted_best_de+0) {
+    $accepted_refinement_de=$de+0;
     log_line("SDR26 1D DPG greyscale: ".$label." one-more move improved to dE=".sprintf("%.4f",$de+0).", moving on");
    } else {
     @{$current_dpg_ref}=@{$accepted_best_dpg};
@@ -17386,7 +17395,7 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
   }
  }
  $max_de_anchor_committed=autocal_committed_max(0,$best_de);
- autocal_activity_event($state,$label.' | Point '.(cancelled()?'stopped':$upload_failed?'failed':'finished').(defined($best_de)?sprintf(' | Best measured dE %.3f',$best_de):' | No usable result'));
+ autocal_activity_point_finished($state,$label,cancelled()?'stopped':$upload_failed?'failed':'finished',$best_de,$accepted_refinement_de);
  # Return the headline-committed max (not the trajectory max). The caller
  # binds this to its own $max_de_overall, which then feeds $state's final_de
  # and the run summary's "final max dE=..." log line. The trajectory max
@@ -18906,6 +18915,10 @@ sub start_calibration_mode {
  my $signal_mode=(ref($state) eq "HASH")
   ? ($state->{"requested_signal_mode"}||$state->{"signal_mode"}||"")
   : "";
+ if(ref($state) eq "HASH") {
+  $state->{"message"}="Entering LG calibration mode for ".($picture_mode||"the active picture mode");
+  write_state($state);
+ }
  my $result=api_json("POST","/api/lg/calibration-mode",{
   enabled => JSON::PP::true,
   picture_mode => $picture_mode||"",
@@ -18917,6 +18930,7 @@ sub start_calibration_mode {
   return undef;
  }
  my $error=(ref($result) eq "HASH") ? ($result->{"message"}||"LG TV rejected calibration mode start.") : "LG TV rejected calibration mode start.";
+ $state->{"error_code"}=$result->{"error_code"}||"lg-calibration-start-rejected" if(ref($state) eq "HASH" && ref($result) eq "HASH");
  log_line("CAL_START failed: $error");
  return $error;
 }

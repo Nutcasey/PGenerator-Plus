@@ -102,7 +102,8 @@ like(main::_settings_failure_message('c1',{values=>{
  is(main::_wait_worker('/fake-status','greyscale',{})->{status},'complete','logging leaves worker completion unchanged');
  is(scalar @logs,2,'only changed worker progress is logged, not identical polls');
  like($logs[0],qr/White.*Patch 1 \/ 2/,'worker log records patch and current name');
- like($logs[1],qr/complete.*Gray.*Patch 2 \/ 2/,'terminal worker progress is retained');
+ like($logs[1],qr/complete.*Gray/,'terminal worker outcome is retained');
+ unlike($logs[1],qr/Patch /,'completion does not retain a potentially reset patch counter');
 }
 {
  no warnings 'redefine';

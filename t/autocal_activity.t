@@ -37,4 +37,11 @@ is($state->{activity_events}[0]{seq},42,'oldest retained sequence identifies gap
 is(scalar @saved,105,'each event reaches status immediately');
 is(scalar @logs,105,'standalone worker log retains all events');
 ok($state->{activity_events}[-1]{time}>0,'events have worker timestamps');
+main::autocal_activity_point_finished($state,'80%','finished',.410,.074);
+like($logs[-1],qr/Point finished \| Accepted refinement dE 0\.074/,'accepted extra refinement reports its own measurement');
+unlike($logs[-1],qr/0\.410/,'earlier best cannot masquerade as the accepted refinement');
+main::autocal_activity_point_finished($state,'80%','finished',.410);
+like($logs[-1],qr/Best measured dE 0\.410/,'ordinary best-curve reporting is unchanged');
+main::autocal_activity_point_finished($state,'80%','failed',undef);
+like($logs[-1],qr/Point failed \| No usable result/,'failed point cannot invent a measurement');
 done_testing();

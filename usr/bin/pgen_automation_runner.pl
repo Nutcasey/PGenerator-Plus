@@ -858,9 +858,11 @@ sub _worker_progress {
     # plus actual measurements/events and exceptional state changes.
     $message='' if $message =~ /^Reading\b/i;
     $message='' if $status->{activity_sequence} && $message =~ / uploaded \(max dE=/;
+    $message='' if $message eq ($status->{current_name}||'');
     return join(' | ', grep { defined($_) && !ref($_) && $_ ne '' }
         $status->{status}, $status->{current_name}, $message,
-        defined($status->{current_step}) ? 'Patch '.$status->{current_step}.' / '.($status->{total_steps}||'?') : undef);
+        defined($status->{current_step}) && ($status->{status}||'') ne 'complete'
+            ? 'Patch '.$status->{current_step}.' / '.($status->{total_steps}||'?') : undef);
 }
 
 sub _log_worker_events {
@@ -889,6 +891,8 @@ sub _wait_worker {
     my $last_log_progress = '';
     my $last_activity_sequence = 0;
     my ($timing_started,$timing_base,$timing_last)=($started,0,0);
+    my $point_started=$started;
+    my @point_seconds;
     while (time() - $started < 21600) {
         _refresh_control();
         if ($STOP_REQUESTED) {
@@ -919,6 +923,13 @@ sub _wait_worker {
         my $step=0+($status->{current_step}||0);
         if ($state eq 'running' && $step<$timing_last) {
             ($timing_started,$timing_base)=($now,$step>0?$step-1:0);
+            @point_seconds=();$point_started=$now;
+        } elsif ($state eq 'running' && $step>$timing_last) {
+            if ($timing_last>0 && $now>$point_started) {
+                push @point_seconds,($now-$point_started)/($step-$timing_last);
+                shift @point_seconds while @point_seconds>5;
+            }
+            $point_started=$now;
         }
         $timing_last=$step;
         _log_worker_events($status,\$last_activity_sequence);
@@ -931,7 +942,7 @@ sub _wait_worker {
         _update_run(sub {
             my ($run) = @_;
             $run->{worker_status} = _worker_summary($status);
-            $run->{worker_timing}={started_at=>$timing_started,start_step=>$timing_base,kind=>$ACTIVE_WORKER,stage=>$ACTIVE_STAGE,series_key=>$ACTIVE_SERIES_KEY||''};
+            $run->{worker_timing}={started_at=>$timing_started,start_step=>$timing_base,kind=>$ACTIVE_WORKER,stage=>$ACTIVE_STAGE,series_key=>$ACTIVE_SERIES_KEY||'',recent_point_seconds=>[@point_seconds]};
             $run->{active_stage} = $ACTIVE_STAGE;
             my $active_item = _active_item_number();
             $run->{active_item} = $active_item if defined($active_item);
@@ -1710,7 +1721,7 @@ sub _set_dv_map {
     return 1 if _signal($item) ne 'dv';
     my $current = _api('GET', '/api/config', undef);
     return 1 if "$current->{dv_map_mode}" eq "$mode";
-    _log_action('Switching Dolby Vision map to '.($mode eq '1'?'Absolute':$mode));
+    _log_action('Switching Dolby Vision map to '.($mode eq '1'?'Absolute':'Relative'));
     my $result = _api('POST', '/api/config', { dv_map_mode => "$mode", signal_mode => 'dv' });
     return 0 if !$result || ($result->{status} || '') ne 'ok';
     my $deadline = time() + 30;
@@ -1723,7 +1734,15 @@ sub _set_dv_map {
                 signal_mode => 'dv',
                 max_luma => $item->{max_luma} || 1000,
             });
-            if (($pattern->{status} || '') eq 'ok') { _log_action('Dolby Vision map ready'); return 1; }
+            if (($pattern->{status} || '') eq 'ok') {
+                # A renderer ping proves the Pi is ready, not that the TV has
+                # reacquired Dolby Vision after the HDMI restart. Keep this
+                # short transition wait cancellable; it is not panel warm-up.
+                _log_action('Dolby Vision output restored; allowing 8 s for TV signal acquisition');
+                return 0 if !_sleep_controlled(8);
+                _log_action('Dolby Vision map ready');
+                return 1;
+            }
         }
         _sleep_controlled(1) or return 0;
     }
