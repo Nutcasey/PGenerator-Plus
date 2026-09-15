@@ -14,7 +14,7 @@ local *main::diag_log_append=sub {push @logs,[@_]};
 local *main::lg_current_picture_mode=sub {$reads++;$mode};
 local *main::lg_calibration_request=sub {push @commands,$_[2];die 'Unexpected retry' unless @replies;shift @replies};
 local *main::lg_authenticated_session=sub {{status=>'ok',session=>{}}};
-local *main::lg_generation_info=sub {{platform_year=>2023}};
+local *main::lg_generation_info=sub {{platform_year=>2023,platform_model=>'HE_DTV_W23O_AFABATAA'}};
 local *main::websocket_close=sub {$closed++};
 sub fixture {
  @replies=@_;@commands=();@logs=();$reads=0;$closed=0;$mode='dolbyHdrCinema';

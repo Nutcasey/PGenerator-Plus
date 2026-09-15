@@ -11,6 +11,7 @@ local *main::_log=sub {push @logs,$_[0]};
 local *main::_append_setting_check=sub {push @checks,$_[2];1};
 local *main::_api=sub {push @writes,$_[2] if $_[1]=~/\/set$/; $response};
 local *main::_select_item_picture_mode=sub {1};
+local *main::_verify_live_capability_profile=sub {1}; # admitted-job gamma semantics
 sub item {
  return {signal_format=>'sdr',picture_mode=>'filmMaker',settings=>{gamma=>'high2',brightness=>50},stages=>{calibration=>1},
   checkpoints=>[{name=>'greyscale-done',status=>'done',verified=>1}]};
@@ -57,7 +58,7 @@ for my $override (
  {picture_settings=>{pictureMode=>'filmMaker',brightness=>50}},
  {picture_settings=>{pictureMode=>'filmMaker',gamma=>'unknown',brightness=>50}},
 ) {is(check(item(),'c6',$override)->{verified},0,'LUT ownership cannot hide failed reads, wrong mode, missing/unknown values or brightness drift');}
-is(check(item(),'c6',{unsupported_picture_keys=>{gamma=>1}})->{verified},'unverifiable','unsupported readback remains explicitly unverified');
+is(check(item(),'c6',{unsupported_picture_keys=>{gamma=>1}})->{verified},0,'unsupported readback without matrix permission blocks progression');
 check(item(),'c6');@writes=();
 ok(main::_apply_and_verify(0,item(),'c6-recovery',1),'settings recovery succeeds with verified 1D ownership');
 is_deeply([map {sort keys %{$_->{settings}}} @writes],['brightness'],'recovery never rewrites bypassed Gamma');

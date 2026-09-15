@@ -10,7 +10,7 @@ ok(defined $rc,'LG helper loads') or BAIL_OUT($@);
  my ($writes,$closed)=(0,0);
  my $mode='hdr_cinema_bright';
  local *main::lg_authenticated_session=sub {{status=>'ok',session=>{}}};
- local *main::lg_generation_info=sub {{platform_year=>2023}};
+ local *main::lg_generation_info=sub {{platform_year=>2023,platform_model=>'HE_DTV_W23O_AFABATAA'}};
  local *main::lg_3d_lut_resolve_mode=sub {($_[2],$mode)};
  local *main::websocket_close=sub {$closed++};
  local *main::lg_calibration_request=sub {

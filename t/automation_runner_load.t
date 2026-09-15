@@ -20,7 +20,38 @@ make_path(PGAutomation::run_dir($run_id) . '/items');
  die "runner failed to load: $@" if $@;
 }
 ok(defined(&main::_main), 'runner subs are loaded');
+{
+ no warnings qw(redefine once);
+ my $live={status=>'ok',current_input=>'hdmi1',generation_profile=>{capability_profile_hash=>'profile-a'}};
+ my $writes=0;
+ local *main::_api=sub {die 'unexpected write' if $_[0] ne 'POST' || $_[1] ne '/api/lg/picture-settings'; return $live};
+ local *main::_log_action=sub {};
+ local *main::_begin_run=sub {$writes++;return {status=>'ok'}};
+ my $item={capability_profile=>{hash=>'profile-a'},tv_input=>'hdmi1',signal_format=>'sdr',picture_mode=>'filmMaker'};
+ ok(main::_verify_live_capability_profile($item),'matching fresh compatibility signature permits AutoCal');
+ $live->{current_input}='hdmi2';
+ ok(!main::_verify_live_capability_profile($item),'input change blocks AutoCal even when TV identity matches');
+ $live->{current_input}='hdmi1';
+ $live->{generation_profile}{capability_profile_hash}='profile-b';
+ ok(!main::_reset_for_calibration(0,$item),'changed identity blocks calibration reset');
+ is($writes,0,'identity mismatch is detected before opening a calibration session');
+ delete $live->{generation_profile};
+ ok(!main::_verify_live_capability_profile($item),'missing live signature cannot waive a saved compatibility signature');
+ ok(!main::_verify_live_capability_profile({stages=>{calibration=>1}}),'calibration cannot bypass admission with no frozen signature');
+}
 ok(!defined(&main::_shell_quote), 'unused and incorrect _shell_quote is gone');
+{
+ no warnings qw(redefine once);
+ local *main::_log=sub {};
+ my $reply={status=>'ok',verification_state=>'acknowledged_unverified'};
+ local *main::_api=sub {$reply};
+ my $item={hazard_restore=>{autoPowerOff=>{value=>'off',category=>'power'}}};
+ is(scalar @{main::_restore_hazards($item)},1,'acknowledged-only hazard restoration is a cleanup failure');
+ delete $reply->{verification_state};
+ is(scalar @{main::_restore_hazards($item)},1,'missing hazard verification cannot be treated as restored');
+ $reply->{verification_state}='verified';
+ is(scalar @{main::_restore_hazards($item)},0,'verified hazard restoration succeeds');
+}
 ok(!defined(&main::_quality_value), 'dead duplicate _quality_value is gone (PGAutomation::quality_summary is the live path)');
 
 ok(main::_ping_ok({ok=>1}), 'daemon ping {ok:1} is healthy');
@@ -84,7 +115,7 @@ like(main::_settings_failure_message('c1',{values=>{
  is($brightness->{error_code},'lg-read-timeout','read failure preserves driver code');
  @checks=();
  local *main::_apply_one_setting=sub {return {status=>'error',message=>'TV rejected this setting',error_code=>'rejected'}};
- ok(!main::_apply_and_verify(0,{settings=>{brightness=>50}},'c4'),'failed setting write stops apply stage');
+ ok(!main::_apply_and_verify(0,{stages=>{calibration=>0},settings=>{brightness=>50}},'c4'),'failed setting write stops apply stage');
  is($checks[0]{result},'apply-failed','failed write is distinct from readback mismatch');
  is($checks[0]{reason},'TV rejected this setting','write failure saves driver reason');
 }
@@ -135,7 +166,7 @@ like(main::_settings_failure_message('c1',{values=>{
  local *main::_sleep_controlled=sub {1};
  local *main::_append_setting_check=sub {1};
  local *main::_api=sub {{status=>'ok',picture_settings=>{pictureMode=>'filmMaker',brightness=>50,energySaving=>'off'}}};
- ok(main::_apply_and_verify(0,{signal_format=>'sdr',picture_mode=>'filmMaker',settle_seconds=>8,settings=>{brightness=>50}},'settings-applied'),'settings application still succeeds with logging');
+ ok(main::_apply_and_verify(0,{stages=>{calibration=>0},signal_format=>'sdr',picture_mode=>'filmMaker',settle_seconds=>8,settings=>{brightness=>50}},'settings-applied'),'settings application still succeeds with logging');
  like(join("\n",@logs),qr/write accepted; allowing 8 s.*\n.*Applying \d+ queued TV settings.*\n.*Reading back.*\n.*matched/s,'log distinguishes acceptance, settling, application and actual verification');
 }
 {
@@ -152,5 +183,58 @@ like(main::_settings_failure_message('c1',{values=>{
  local *main::_api=sub {{status=>'ok'}};
  main::_read_white({signal_format=>'sdr'});
  like($logs[-1],qr/no reading/,'empty success response is explicitly visible without claiming a white reading');
+}
+{
+ no warnings 'redefine';
+ local *main::_log=sub {};
+ local *main::_verify_live_capability_profile=sub {1};
+ my @checks;my @writes;
+ local *main::_append_setting_check=sub {push @checks,$_[2];1};
+ my $identity={model_name=>'OLED65C1PUB',platform_model=>'W21O'};
+ my $matrix=PGLGCapabilities::lg_setting_contracts($identity,category=>'picture',signal_mode=>'sdr',picture_mode=>'filmMaker',tv_input=>'hdmi1',keys=>[qw(brightness noiseReduction)]);
+ my $reply={status=>'ok',current_input=>'hdmi1',virtual_picture_settings=>1,
+  generation_profile=>{capability_library_valid=>1,capability_platform_profile_applied=>1,picturemode_readable=>0},
+  picture_settings=>{brightness=>50,pictureMode=>'filmMaker'},supported_picture_keys=>['brightness'],
+  unsupported_picture_keys=>{noiseReduction=>'Some keys are not allowed'},setting_contracts=>$matrix->{contracts}};
+ my $item={settings=>{brightness=>50,noiseReduction=>'off'},signal_format=>'sdr',picture_mode=>'filmMaker',tv_input=>'hdmi1',
+  capability_profile=>{hash=>$matrix->{capability_profile_hash}}};
+ $item->{best_available_settings}=PGLGCapabilities::lg_best_settings_plan($identity,$item->{settings},$reply,
+  category=>'picture',signal_mode=>'sdr',picture_mode=>'filmMaker',tv_input=>'hdmi1');
+ local *main::_api=sub {$reply};
+ is_deeply(main::_item_settings($item),{brightness=>50},'shared runner policy excludes manual values from automatic writes');
+ is_deeply(main::_three_d_payload($item)->{automation_processing_settings},{},'3D worker cannot reapply manual processing settings');
+ is($item->{settings}{noiseReduction},'off','original requested manual value stays in job audit');
+ my $check=main::_read_and_verify_settings(0,$item,'c1');
+ is($check->{verified},'unverifiable','manual requirements prevent an overall verified claim');
+ ok($check->{values}{brightness}{matched},'native brightness can verify despite virtual picture-mode response');
+ ok($check->{values}{noiseReduction}{manual_required},'checkpoint preserves manual setting evidence');
+ $reply->{picture_settings}{brightness}=49;
+ ok(!main::_read_and_verify_settings(0,$item,'c1')->{verified},'virtual mode cannot hide a real native mismatch');
+ $reply->{picture_settings}{brightness}=50;
+ $item->{settings}{noiseReduction}='low';
+ ok(exists(main::_item_settings($item)->{noiseReduction}),'changed requested value invalidates its saved manual exclusion');
+ $item->{settings}{noiseReduction}='off';
+ $item->{tv_input}='hdmi2';
+ ok(exists(main::_item_settings($item)->{noiseReduction}),'changed input invalidates saved manual exclusions');
+ $item->{tv_input}='hdmi1';
+ delete $reply->{picture_settings}{brightness};
+ $reply->{supported_picture_keys}=[];
+ $reply->{unsupported_picture_keys}{brightness}='Some keys are not allowed';
+ local *main::_apply_one_setting=sub {
+  push @writes,$_[1];
+  return {status=>'ok',verification_state=>'acknowledged_unverified',setting_contracts=>$matrix->{contracts},
+   setting_verification=>{brightness=>{status=>'acknowledged_unverified',expected=>50}}};
+ };
+ is(main::_apply_and_verify(0,$item,'c1',1),'unverifiable','accepted matrix write-only setting proceeds with honest checkpoint');
+ is_deeply(\@writes,['brightness'],'manual setting is never sent to the TV');
+ ok($item->{best_available_write_ack}{brightness},'runner stores current per-key acknowledgement');
+ $reply->{unsupported_picture_keys}{brightness}='Permission denied: setting unavailable';
+ ok(!main::_read_and_verify_settings(0,$item,'c1')->{verified},'accepted write cannot waive a later authentication failure');
+ $reply->{unsupported_picture_keys}{brightness}='Some keys are not allowed';
+ local *main::_apply_one_setting=sub {{status=>'ok',verification_state=>'acknowledged_unverified'}};
+ ok(!main::_apply_and_verify(0,$item,'c1',1),'missing per-key contract cannot reuse previous acknowledgement');
+ ok(!exists($item->{best_available_write_ack}{brightness}),'failed new attempt clears previous acknowledgement');
+ local *main::_append_setting_check=sub {0};
+ ok(!main::_read_and_verify_settings(0,$item,'c1')->{verified},'unpersisted manual evidence fails closed');
 }
 done_testing();

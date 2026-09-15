@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "c1-user-run-20260915": {
+      "title": "User-supplied OLED65C1PUB automation attempt log, 15 September 2026",
+      "url": "local:t/fixtures/lg-capabilities/c1-run-2026-09-15.json",
+      "license": "user-provided",
+      "use": "Reported five-key successful queue configuration and 13 refused read/capability keys. Not proof that the refused keys cannot be written; webOS release 6.5.3 is not an exact firmware version."
+    },
+    "bscpylgtv-platform-table": {
+      "title": "bscpylgtv calibration platform table",
+      "url": "https://github.com/chros73/bscpylgtv/blob/master/bscpylgtv/webos_client.py",
+      "license": "MIT",
+      "version": "0.5.4",
+      "retrieved_at": "2026-09-15",
+      "use": "Internal platform token to 3D LUT size and Dolby Vision configuration generation."
+    },
+    "bscpylgtv-firmware-catalogues": {
+      "title": "bscpylgtv firmware settings catalogues",
+      "url": "https://github.com/chros73/bscpylgtv/tree/master/docs",
+      "license": "MIT",
+      "local_snapshot_revision": "008ebbb605e60a66de7d4f0d6d2217e966888731",
+      "retrieved_at": "2026-09-15",
+      "use": "Firmware-scoped inputs, modes, defaults, and separate public get/set allowlists."
+    },
+    "lg-settings-service": {
+      "title": "LG webOS TV Settings service",
+      "url": "https://webostv.developer.lge.com/develop/references/settings-service",
+      "license": "documentation",
+      "retrieved_at": "2026-09-15",
+      "use": "Official public settings request shapes."
+    },
+    "portrait-lg-autocal": {
+      "title": "Calibrating LG TVs with Calman",
+      "url": "https://www.portrait.com/resource-center/calibrating-lg-tvs-with-calman/",
+      "license": "documentation",
+      "published_at": "2025-11-10",
+      "retrieved_at": "2026-09-15",
+      "use": "Model-year and processor-family AutoCal support inventory."
+    },
+    "portrait-lg-2023-guide": {
+      "title": "Calman 2023 LG OLED calibration guide",
+      "url": "https://www.portrait.com/resource-center/lg-2023-oled-calibration-and-user-settings-no-matter-what/",
+      "license": "documentation",
+      "retrieved_at": "2026-09-15",
+      "use": "Signal-specific calibration preparation values."
+    },
+    "portrait-lg-2024-guide": {
+      "title": "2024 LG AutoCal guide",
+      "url": "https://www.portrait.com/resource-center/2024-lg-autocal-guide/",
+      "license": "documentation",
+      "retrieved_at": "2026-09-15",
+      "use": "Signal-specific calibration preparation values and TV setup guidance."
+    },
+    "pgenerator-existing-behaviour": {
+      "title": "PGenerator LG calibration implementation",
+      "url": "local:usr/sbin/pgenerator-lg",
+      "license": "project",
+      "use": "Existing reset, readback and calibration transport behaviour retained during migration."
+    }
+  }
+}

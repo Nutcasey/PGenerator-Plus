@@ -110,8 +110,8 @@ for my $case (qw(read-error missing-mode flapping write-failure repair-drift mis
  like($::LAST_ERROR,qr/TV socket timeout/,'failed read retains the transport cause') if $case eq 'read-error';
 }
 
-reset_fixture();@reads=(response({}, {unsupported_picture_keys=>{smoothGradation=>1}}));
-is(main::_calibration_settings_boundary(0,item(),'c6')->{verified},'unverifiable','unsupported controls remain explicit and are not rewritten');
+reset_fixture();@reads=map {response({}, {unsupported_picture_keys=>{smoothGradation=>1}})} 1..2;
+ok(!main::_calibration_settings_boundary(0,item(),'c6'),'unsupported controls without matrix permission pause the run');
 is(scalar @writes,0,'no writes for unsupported readback');
 
 # DV profile upload closes calibration internally. Only fresh post-measurement

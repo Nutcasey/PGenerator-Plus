@@ -24,6 +24,7 @@ use PGCalibrationMath qw(
 );
 use PGMeterReading qw(reading_xyz);
 use PGSignalCode qw(signal_code_policy signal_percent_to_code);
+use PGLGCapabilities qw(lg_recipe lg_setting_values_agree lg_scoped_request_payload lg_setting_write_accepted);
 
 our $PGAC_LOADED = 0;
 eval { require '/usr/share/PGenerator/PGAutoCalRun.pm'; $PGAC_LOADED = 1; 1 };
@@ -246,11 +247,12 @@ sub api_json {
  $timeout ||= 30;
  $timeout=1 if($timeout < 1);
  my $request_payload=$payload;
+ $request_payload=lg_scoped_request_payload($path,$request_payload,$LG_AUTOCAL_CONFIG);
  if($method ne "GET" && ref($payload) eq "HASH"
     && ref($LG_AUTOCAL_CONFIG) eq "HASH"
     && defined($LG_AUTOCAL_CONFIG->{automation_token})
     && $LG_AUTOCAL_CONFIG->{automation_token}=~/^[A-Za-z0-9_.:-]{8,200}$/) {
-  $request_payload={%{$payload},automation_token=>$LG_AUTOCAL_CONFIG->{automation_token}};
+  $request_payload={%{$request_payload},automation_token=>$LG_AUTOCAL_CONFIG->{automation_token}};
  }
  my $body = defined($request_payload) ? $json->encode($request_payload) : "";
  my $deadline=time()+$timeout;
@@ -357,6 +359,13 @@ sub lg_clients {
  return decode_json_safe(read_file("/var/lib/PGenerator/lg/clients.json"),{});
 }
 
+sub lg_helper_setting_context {
+ my ($config)=@_;
+ $config=$LG_AUTOCAL_CONFIG if(ref($config) ne "HASH");
+ $config={} if(ref($config) ne "HASH");
+ return %{lg_scoped_request_payload('/api/lg/picture-settings/set',{category=>'picture'},$config)};
+}
+
 sub lg_helper_picture_set {
 	 my ($settings,$picture_mode,$calibration_mode_active,$verify_ddc_upload,$keep_calibration_mode)=@_;
 	 $keep_calibration_mode=1 if(!defined($keep_calibration_mode));
@@ -366,6 +375,7 @@ sub lg_helper_picture_set {
  return undef if($ip eq "" || $client_key eq "");
  return lg_helper_json({
   action => "picture_set",
+  lg_helper_setting_context(),
 	  ip => $ip,
 	  client_key => $client_key,
 	  settings => $settings,
@@ -388,6 +398,8 @@ sub lg_helper_picture_get {
  return undef if($ip eq "" || $client_key eq "");
  return lg_helper_json({
   action => "picture_get",
+  lg_helper_setting_context(),
+  include_current_input=>JSON::PP::true,
   ip => $ip,
 	  client_key => $client_key,
 	  keys => $keys,
@@ -12920,6 +12932,7 @@ sub set_picture_values {
 	 for(my $attempt=1;$attempt<=$attempts;$attempt++) {
 			 my $response=lg_helper_picture_set($settings,$picture_mode || ($picture->{"pictureMode"}||""),$calibration_mode_active,$verify_ddc_upload,$keep_calibration_mode);
 		 $response=api_json("POST","/api/lg/picture-settings/set",{
+		  lg_helper_setting_context(),
 		  settings => $settings,
 		  picture_mode => $picture_mode || ($picture->{"pictureMode"}||""),
 			  keep_calibration_mode => $keep_calibration_mode ? JSON::PP::true : JSON::PP::false,
@@ -12935,6 +12948,7 @@ sub set_picture_values {
 	  }
 	  if(ref($state) eq "HASH") {
 	   $state->{"ddc_1d_lut"}=JSON::PP::true if($response->{"ddc_1d_lut"});
+	   $state->{"setting_verification_state"}=$response->{"verification_state"}||"acknowledged_unverified";
 	   $state->{"ddc_upload_verified"}=$response->{"ddc_upload_verified"} ? JSON::PP::true : JSON::PP::false
 	    if(exists($response->{"ddc_upload_verified"}) || $verify_ddc_upload);
 	   $state->{"ddc_upload_verify_contract"}=$response->{"ddc_upload_verify_contract"}||""
@@ -21665,6 +21679,8 @@ sub read_initial_picture_settings {
    write_state($state);
   }
   my $picture_response=api_json("POST","/api/lg/picture-settings",{
+	   lg_helper_setting_context($config),
+	   include_current_input=>JSON::PP::true,
 	   keys=>$keys,
 	   picture_mode=>$picture_mode,
 	   force_ddc_white_balance=>JSON::PP::true,
@@ -21702,12 +21718,17 @@ sub restore_factory_levels_for_autocal {
  my $signal_mode=lc($config->{"signal_mode"}||"sdr");
  return undef if($signal_mode ne "" && $signal_mode ne "sdr");
  my $picture_mode=$config->{"picture_mode"}||"";
- my $contrast=defined($config->{"factory_contrast"}) ? int($config->{"factory_contrast"}) : 85;
- my $brightness=defined($config->{"factory_brightness"}) ? int($config->{"factory_brightness"}) : 50;
- $contrast=0 if($contrast < 0);
- $contrast=100 if($contrast > 100);
- $brightness=0 if($brightness < 0);
- $brightness=100 if($brightness > 100);
+ my $recipe=lg_recipe($signal_mode||"sdr");
+ return "The reviewed LG AutoCal settings recipe is unavailable" if(ref($recipe) ne "HASH");
+ my %levels=map {$_->{wire_key}=>$_->{value}} @{$recipe->{settings}||[]};
+ my ($contrast,$brightness)=@levels{qw(contrast brightness)};
+ return "The reviewed LG AutoCal recipe is missing brightness or contrast" if(!defined($contrast) || !defined($brightness));
+ foreach my $key (qw(contrast brightness)) {
+  return "The requested factory_$key conflicts with the reviewed LG AutoCal recipe"
+   if(defined($config->{"factory_$key"}) && !lg_setting_values_agree(
+    {verify=>{comparator=>'numeric',tolerance=>0}},$config->{"factory_$key"},$levels{$key}));
+ }
+ $state->{"calibration_settings_recipe"}=$recipe->{recipe_id} if(ref($state) eq "HASH");
  my $last_message="Unable to restore LG factory brightness/contrast";
  for(my $attempt=1;$attempt<=3;$attempt++) {
   if(ref($state) eq "HASH") {
@@ -21722,14 +21743,34 @@ sub restore_factory_levels_for_autocal {
     brightness => $brightness,
    },
    picture_mode => $picture_mode,
+   signal_mode => $signal_mode,
    helper_timeout => 90,
    readback_keys => ["pictureMode","contrast","brightness"],
   },120);
   if(ref($response) eq "HASH" && ($response->{"status"}||"") eq "ok") {
    my $pic=$response->{"picture_settings"};
-   my $actual_contrast=(ref($pic) eq "HASH" && defined($pic->{"contrast"})) ? int($pic->{"contrast"}) : $contrast;
-   my $actual_brightness=(ref($pic) eq "HASH" && defined($pic->{"brightness"})) ? int($pic->{"brightness"}) : $brightness;
-   return undef if($actual_contrast == $contrast && $actual_brightness == $brightness);
+   my $actual_contrast=(ref($pic) eq "HASH" && defined($pic->{"contrast"})) ? 0+$pic->{"contrast"} : undef;
+   my $actual_brightness=(ref($pic) eq "HASH" && defined($pic->{"brightness"})) ? 0+$pic->{"brightness"} : undef;
+   return undef if(defined($actual_contrast) && defined($actual_brightness) && $actual_contrast == $contrast && $actual_brightness == $brightness);
+   my $accepted=1;
+   for my $key (qw(contrast brightness)) {
+    my $actual=ref($pic) eq 'HASH' ? $pic->{$key} : undef;
+    $accepted=0 if(defined($actual)
+     ? !lg_setting_values_agree({verify=>{comparator=>'numeric',tolerance=>0}},$levels{$key},$actual)
+     : !lg_setting_write_accepted($response,$key,$levels{$key}));
+   }
+   if($accepted) {
+    my $warning='Factory brightness/contrast writes were accepted, but not all values could be read back under this TV matrix. Settings remain unverified.';
+    if(ref($state) eq 'HASH') {
+     $state->{factory_levels_verification_state}='acknowledged_unverified';
+     $state->{factory_levels_warning}=$warning;
+     write_state($state);
+    }
+    log_line($warning);
+    return undef;
+   }
+   $actual_contrast="unavailable" if(!defined($actual_contrast));
+   $actual_brightness="unavailable" if(!defined($actual_brightness));
    $last_message="LG reported contrast $actual_contrast and brightness $actual_brightness after factory-level restore";
   } else {
    $last_message=(ref($response) eq "HASH") ? ($response->{"message"}||$last_message) : $last_message;

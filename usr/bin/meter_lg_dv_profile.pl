@@ -17,6 +17,7 @@ BEGIN {
  unshift @INC,"$script_dir/../share/PGenerator";
 }
 use PGSignalCode qw(signal_code_policy signal_percent_to_code);
+use PGLGCapabilities qw(lg_scoped_request_payload);
 
 my ($config_file,$state_file,$stop_file)=@ARGV;
 die "Usage: $0 <config.json> <state.json> <stop-file>\n" if(!defined($config_file) || !defined($state_file) || !defined($stop_file));
@@ -61,9 +62,10 @@ sub api_json {
  $timeout||=30;
  $timeout=1 if($timeout < 1);
  my $request_payload=$payload;
+ $request_payload=lg_scoped_request_payload($path,$request_payload,$config);
  if($method ne "GET" && ref($payload) eq "HASH"
     && $automation_token=~/^[A-Za-z0-9_.:-]{8,200}$/) {
-  $request_payload={%{$payload},automation_token=>$automation_token};
+  $request_payload={%{$request_payload},automation_token=>$automation_token};
  }
  my $body=defined($request_payload) ? $json->encode($request_payload) : "";
  my $deadline=time()+$timeout;

@@ -23,6 +23,7 @@ use PGAutomation ();
 use PGAutomationETA ();
 use PGMath ();
 use PGSignalCode ();
+use PGLGCapabilities qw(lg_setting_values_agree lg_scoped_request_payload lg_setting_write_accepted lg_readback_unavailable_reason);
 
 my ($RUN_ID, $TOKEN) = @ARGV;
 die "usage: pgen_automation_runner.pl RUN_ID TOKEN\n"
@@ -233,6 +234,7 @@ sub _sleep_controlled {
 
 sub _api_once {
     my ($method, $path, $payload, $allow_stop) = @_;
+    $payload=lg_scoped_request_payload($path,$payload,$ACTIVE_ITEM);
     my $url = 'http://127.0.0.1' . $path;
     my %options = (
         headers => {
@@ -674,7 +676,9 @@ sub _grey_payload {
         setup_luminance_reference => ($signal eq 'sdr' ? 0 + ($cal->{setup_luminance_reference} || $item->{target_luminance} || 100) : undef),
         headroom_target_luminance => ($signal eq 'sdr' ? 0 + ($cal->{headroom_target_luminance} || 0) : undef),
         picture_mode => _picture_mode($item),
+        tv_input => $item->{tv_input}||'',
         force_ddc_white_balance => JSON::PP::true,
+        preflight_generation_profile => $item->{generation_profile},
         lg_autocal_sdr_1d_dpg_upload_enabled => JSON::PP::true,
         lg_autocal_26 => JSON::PP::true,
         lg_greyscale_21 => JSON::PP::false,
@@ -737,6 +741,7 @@ sub _lattice_patches {
 
 sub _three_d_payload {
     my ($item, $run, $item_number) = @_;
+    my $automatic_settings=_item_settings($item);
     my $signal = _signal($item);
     my $cal = ref($item->{calibration}) eq 'HASH' ? $item->{calibration} : {};
     my $method = lc($cal->{method} || $item->{method} || ($signal eq 'hdr10' ? 'matrix' : 'hybrid'));
@@ -767,11 +772,12 @@ sub _three_d_payload {
         target_gamma => $signal eq 'hdr10' ? 'st2084' : ($cal->{target_gamma} || $item->{target_gamma} || 'bt1886'),
         target_gamut => $signal eq 'hdr10' ? ($item->{target_gamut} || 'p3d65') : ($cal->{target_gamut} || $item->{target_gamut} || 'bt709'),
         picture_mode => _picture_mode($item),
+        tv_input => $item->{tv_input}||'',
         upload => JSON::PP::true,
         full_workflow => JSON::PP::true,
         full_autocal_run_id => $RUN_ID,
         full_autocal_phase => '3d-lut',
-        automation_processing_settings => {map {$_=>$item->{settings}{$_}} grep {_processing_setting($_)} keys %{$item->{settings}||{}}},
+        automation_processing_settings => {map {$_=>$automatic_settings->{$_}} grep {_processing_setting($_)} keys %$automatic_settings},
         lattice_patches => ($method =~ /^(?:lattice|skeleton|hybrid)$/ ? _lattice_patches($item) : undef),
         solve_matrix_only => $cal->{lattice_residuals} ? JSON::PP::false : JSON::PP::true,
         solve_cube_size => int($cal->{solve_cube_size} || 17),
@@ -779,6 +785,7 @@ sub _three_d_payload {
         require_device_ready => JSON::PP::false,
         post_check => JSON::PP::false,
         preflight_lg_generation => $item->{lg_generation},
+        preflight_generation_profile => $item->{generation_profile},
         lg_autocal_hdr20_postcal_shadow_enable => $cal->{shadow_fix} ? 1 : 0,
         low_light => ref($item->{low_light}) eq 'HASH' ? $item->{low_light} : {},
     };
@@ -814,6 +821,7 @@ sub _dv_payload {
         signal_range => $range,
         transport_signal_range => $range,
         picture_mode => _picture_mode($item),
+        tv_input => $item->{tv_input}||'',
         patch_size => int($item->{patch_size} || 10),
         refresh_rate => $item->{refresh_rate} || '',
         upload => JSON::PP::false,
@@ -822,6 +830,7 @@ sub _dv_payload {
         full_autocal_run_id => $RUN_ID,
         require_device_ready => JSON::PP::false,
         max_luma => 1000,
+        preflight_generation_profile => $item->{generation_profile},
     };
 }
 
@@ -1169,6 +1178,21 @@ sub _append_setting_check {
     return PGAutomation::append_line_locked($path, PGAutomation::encode_json($record) . "\n");
 }
 
+sub _best_available_manual {
+    my ($item)=@_;
+    my $plan=$item->{best_available_settings}||{};
+    my $context=$plan->{context}||{};
+    return {} if !$plan->{active} || !($plan->{capability_profile_hash}||'')
+        || ($plan->{capability_profile_hash}||'') ne ($item->{capability_profile}{hash}||'')
+        || ($context->{tv_input}||'') ne ($item->{tv_input}||'')
+        || ($context->{picture_mode}||'') ne lc(_picture_mode($item))
+        || ($context->{signal_mode}||'') ne _signal($item);
+    return {} if ref($plan->{manual}) ne 'HASH';
+    return {map {$_=>$plan->{manual}{$_}} grep {
+        exists($item->{settings}{$_}) && _value_agrees($item->{settings}{$_},$plan->{manual}{$_}{value},$_)
+    } keys %{$plan->{manual}}};
+}
+
 sub _item_settings {
     my ($item) = @_;
     my $settings = ref($item->{settings}) eq 'HASH' ? PGAutomation::clone($item->{settings}) : {};
@@ -1192,6 +1216,7 @@ sub _item_settings {
         $settings->{$hazard->{key}} = $hazard->{disabled_value}
             if exists($hazard->{disabled_value});
     }
+    delete @$settings{keys %{_best_available_manual($item)}};
     return $settings;
 }
 
@@ -1216,6 +1241,7 @@ sub _apply_one_setting {
         settings => { $key => $value },
         readback_keys => [$key, 'pictureMode'],
         picture_mode => _picture_mode($item),
+        tv_input => $item->{tv_input}||'',
         signal_mode => _signal($item),
         category => $category,
         keep_calibration_mode => $calibration_active ? JSON::PP::true : JSON::PP::false,
@@ -1269,10 +1295,14 @@ sub _read_and_verify_settings {
         my $response = _api('POST', '/api/lg/picture-settings', {
             keys => $by_category{$category},
             picture_mode => _picture_mode($item),
+            tv_input => $item->{tv_input}||'',
             signal_mode => _signal($item),
-            include_current_input => JSON::PP::false,
+            include_current_input => JSON::PP::true,
             category => $category,
         });
+        if(($item->{tv_input}||'') ne '' && (ref($response) ne 'HASH' || ($response->{current_input}||'') ne $item->{tv_input})) {
+            $response={status=>'error',error_code=>'lg-input-context-changed',message=>'The active LG input changed or could not be confirmed against job readiness.'};
+        }
         push @responses, { category => $category, response => $response };
         my $category_observed = _observed_settings($response);
         foreach my $key (keys %$category_observed) {
@@ -1283,13 +1313,21 @@ sub _read_and_verify_settings {
             || $response->{picture_mode_read_forbidden});
         my $unsupported = ref($response) eq 'HASH' && ref($response->{unsupported_picture_keys}) eq 'HASH'
             ? $response->{unsupported_picture_keys} : {};
+        my %native=map {$_=>1} @{$response->{supported_picture_keys}||[]};
         foreach my $key (@{$by_category{$category}}) {
             $meta{$key} = {
-                unverifiable => $unverifiable ? 1 : 0,
+                unverifiable => $unverifiable && !$native{$key} ? 1 : 0,
                 unsupported => exists($unsupported->{$key}) ? 1 : 0,
+                unavailable_reason => exists($unsupported->{$key}) ? $unsupported->{$key} : 'No value returned by TV',
                 error => (ref($response) ne 'HASH' || ($response->{status} || '') eq 'error') ? 1 : 0,
                 reason => ref($response) eq 'HASH' ? ($response->{message} || $response->{error} || '') : 'TV returned no settings response',
                 error_code => ref($response) eq 'HASH' ? ($response->{error_code} || '') : '',
+                contract => ref($response->{setting_contracts}) eq 'HASH' ? $response->{setting_contracts}{$key} : undef,
+                mode_readback_unavailable => $key eq 'pictureMode' && $unverifiable
+                    && $response->{generation_profile}{capability_library_valid}
+                    && $response->{generation_profile}{capability_platform_profile_applied}
+                    && exists($response->{generation_profile}{picturemode_readable})
+                    && !$response->{generation_profile}{picturemode_readable},
             };
         }
     }
@@ -1309,7 +1347,15 @@ sub _read_and_verify_settings {
         my $has = exists($observed{$key});
         my $ok = $has ? _value_agrees($expected{$key}, $observed{$key}, $key) : 0;
         my $meta = $meta{$key} || {};
-        my $can_be_unverifiable = !$meta->{error} && ($meta->{unsupported} || $meta->{unverifiable});
+        $ok = lg_setting_values_agree($meta->{contract}, $expected{$key}, $observed{$key})
+            if $has && $key ne 'pictureMode' && ref($meta->{contract}) eq 'HASH';
+        my $ack=$item->{best_available_write_ack}{$key};
+        my $ack_missing=!$has && $meta->{contract}{allow_unverified_readback} && ref($ack) eq 'HASH'
+            && lg_readback_unavailable_reason($meta->{unavailable_reason})
+            && ($ack->{profile_hash}||'') eq ($item->{capability_profile}{hash}||'')
+            && _value_agrees($expected{$key},$ack->{expected},$key);
+        my $can_be_unverifiable = !$meta->{error} && ($meta->{unsupported} || $meta->{unverifiable} || $ack_missing);
+        my $unverifiable_permitted=$meta->{mode_readback_unavailable} || $ack_missing;
         my $expected_transition = $mode_verified && $has && !$meta->{error} && !$can_be_unverifiable
             && _expected_calibration_gamut_state($item, $key, $point)
             && _lg_gamut_readback_warning($key, $expected{$key}, $observed{$key});
@@ -1336,6 +1382,7 @@ sub _read_and_verify_settings {
         $all = 0 if !$ok && !$managed;
         $any_unverifiable = 1 if $can_be_unverifiable || $warning;
         $hard_failure = 1 if !$ok && !$can_be_unverifiable && !$managed && !$warning;
+        $hard_failure = 1 if $can_be_unverifiable && !$unverifiable_permitted;
         push @readback_warnings, $warning_reason if $warning;
         my $check_saved = _append_setting_check($item_number, $point, {
             key => $key,
@@ -1357,8 +1404,21 @@ sub _read_and_verify_settings {
                 : 'TV-reported value differs from the requested value',
             error_code => $meta->{error_code},
             operation => 'readback',
+            capability_profile_id => ref($meta->{contract}) eq 'HASH' ? $meta->{contract}{capability_profile_id} : undef,
+            capability_profile_hash => ref($meta->{contract}) eq 'HASH' ? $meta->{contract}{capability_profile_hash} : undef,
         });
         $storage_failure = 1 if !$check_saved;
+    }
+    my $manual=_best_available_manual($item);
+    for my $key (sort keys %$manual) {
+        my $entry=$manual->{$key};
+        $values{$key}={expected=>$entry->{value},observed=>undef,matched=>JSON::PP::false,
+            unverifiable=>JSON::PP::true,manual_required=>JSON::PP::true,reason=>$entry->{message}};
+        $storage_failure=1 if !_append_setting_check($item_number,$point,{
+            key=>$key,expected=>$entry->{value},result=>'manual-required',verified=>JSON::PP::false,
+            operation=>'manual',category=>'picture',reason=>$entry->{message},
+        });
+        $all=0;$any_unverifiable=1;
     }
     if ($storage_failure) {
         $::LAST_ERROR = 'Unable to persist LG settings verification evidence';
@@ -1606,6 +1666,7 @@ sub _select_item_picture_mode {
 
 sub _apply_and_verify {
     my ($item_number, $item, $point, $mode_selected, $calibration_active) = @_;
+    return 0 if !_verify_live_capability_profile($item);
     my $settings = _item_settings($item);
     my @keys = sort grep { !_calibration_manages_setting($item, $_, $point)
         && !_expected_calibration_gamut_state($item, $_, $point) } keys %$settings;
@@ -1618,12 +1679,34 @@ sub _apply_and_verify {
         my $applied=0;
         my $next_setting_log=time()+15;
         foreach my $key (@keys) {
+            delete $item->{best_available_write_ack}{$key};
             my $category = _setting_category($item, $key);
             my $result = _apply_one_setting($item, $key, $settings->{$key}, $category, $calibration_active);
             if (!$result || (($result->{status} || '') ne 'ok' && ($result->{status} || '') ne 'started')) {
                 _append_setting_check($item_number, $point, {key=>$key, category=>$category, expected=>$settings->{$key}, result=>'apply-failed', operation=>'write', reason=>$result->{message} || 'TV did not accept the setting write', error_code=>$result->{error_code}});
                 $::LAST_ERROR = $result->{message} || "Unable to set LG picture key $key";
                 return 0;
+            }
+            if (exists($result->{verification_state}) && ($result->{verification_state} || '') ne 'verified') {
+                my $reason = $result->{message} || "LG accepted $key but did not return a verified readback";
+                my $saved=_append_setting_check($item_number, $point, {
+                    key=>$key, category=>$category, expected=>$settings->{$key}, result=>'unverified',
+                    operation=>'write', reason=>$reason, verification_state=>$result->{verification_state}||'unknown',
+                    setting_verification=>$result->{setting_verification},
+                });
+                if(!$saved) {
+                    $::LAST_ERROR='Unable to persist LG write acknowledgement evidence';
+                    return 0;
+                }
+                if(lg_setting_write_accepted($result,$key,$settings->{$key})) {
+                    $item->{best_available_write_ack}{$key}={expected=>$settings->{$key},profile_hash=>$item->{capability_profile}{hash}||''};
+                    _log_action("Warning: $key write accepted without readback under the TV matrix; not verified");
+                    push @{$item->{warnings}},"$key write accepted without readback; verify in the TV menu"
+                        if !grep {$_ eq "$key write accepted without readback; verify in the TV menu"} @{$item->{warnings}||[]};
+                } else {
+                    $::LAST_ERROR = $reason;
+                    return 0;
+                }
             }
             $applied++;
             if (time()>=$next_setting_log && $applied<@keys) {
@@ -1696,6 +1779,7 @@ sub _apply_signal {
                 my $tv = _api('POST', '/api/lg/picture-settings', {
                     keys => ['pictureMode'],
                     picture_mode => _picture_mode($item),
+                    tv_input => $item->{tv_input}||'',
                     signal_mode => $signal,
                     include_current_input => JSON::PP::true,
                     category => 'picture',
@@ -1758,6 +1842,7 @@ sub _begin_run {
         config => {
             signal_mode => _signal($item),
             picture_mode => _picture_mode($item),
+            tv_input => $item->{tv_input}||'',
             target_gamma => $item->{target_gamma} || '',
             target_gamut => $item->{target_gamut} || '',
             luminance_target => $item->{target_luminance} || undef,
@@ -1766,8 +1851,42 @@ sub _begin_run {
     return $result;
 }
 
+sub _verify_live_capability_profile {
+    my ($item) = @_;
+    my $expected = ref($item->{capability_profile}) eq 'HASH'
+        ? ($item->{capability_profile}{hash} || '') : '';
+    $expected ||= ref($item->{generation_profile}) eq 'HASH'
+        ? ($item->{generation_profile}{capability_profile_hash} || '') : '';
+    # Legacy manifests have no signature to compare. New readiness always
+    # supplies one; an absent live signature must not waive its protection.
+    if($expected eq '') {
+        return 1 if !_stages($item)->{calibration};
+        $::LAST_ERROR='Calibration has no frozen LG compatibility signature. Run job readiness before changing TV calibration data.';
+        return 0;
+    }
+    if(_stages($item)->{calibration} && ($item->{tv_input}||'') !~ /^hdmi[1-4](?:_pc)?$/) {
+        $::LAST_ERROR='Calibration has no confirmed HDMI input. Run job readiness before changing TV calibration data.';
+        return 0;
+    }
+    my $live = _api('POST', '/api/lg/picture-settings', {
+        keys => ['pictureMode'], picture_mode => _picture_mode($item),
+        signal_mode => _signal($item), include_current_input => JSON::PP::true,
+        tv_input => $item->{tv_input}||'',
+    });
+    my $actual = ref($live) eq 'HASH' && ref($live->{generation_profile}) eq 'HASH'
+        ? ($live->{generation_profile}{capability_profile_hash} || '') : '';
+    if (ref($live) ne 'HASH' || ($live->{status} || '') ne 'ok' || $actual eq '' || $actual ne $expected
+        || (($item->{tv_input}||'') ne '' && ($live->{current_input}||'') ne $item->{tv_input})) {
+        $::LAST_ERROR = 'The LG compatibility signature changed or could not be confirmed after readiness. Refresh readiness before changing TV settings or calibration data.';
+        _log_action($::LAST_ERROR);
+        return 0;
+    }
+    return 1;
+}
+
 sub _reset_for_calibration {
     my ($item_number, $item) = @_;
+    return 0 if !_verify_live_capability_profile($item);
     my $signal = _signal($item);
     my $mode = _picture_mode($item);
     _log_action('Opening TV calibration session for '.$mode);
@@ -1860,10 +1979,37 @@ sub _reset_for_calibration {
             return 0;
         }
     }
+    # Carry the exact TV signature selected by the reset helper into the
+    # worker. The 3D worker resolves payload geometry from this data and will
+    # fail closed if it is absent or unknown.
+    my $preflight_profile_hash = ref($item->{capability_profile}) eq 'HASH'
+        ? ($item->{capability_profile}{hash} || '') : '';
+    $preflight_profile_hash ||= ref($item->{generation_profile}) eq 'HASH'
+        ? ($item->{generation_profile}{capability_profile_hash} || '') : '';
+    foreach my $envelope (reverse @responses) {
+        next if ref($envelope) ne 'HASH';
+        foreach my $response (values %$envelope) {
+            next if ref($response) ne 'HASH';
+            my $live_profile_hash = ref($response->{generation_profile}) eq 'HASH'
+                ? ($response->{generation_profile}{capability_profile_hash} || '') : '';
+            if ($preflight_profile_hash ne '' && $live_profile_hash ne ''
+                && $preflight_profile_hash ne $live_profile_hash) {
+                $::LAST_ERROR = 'The connected LG TV or firmware changed during calibration reset; calibration was stopped before measurement and generated LUT upload.';
+                _log_action($::LAST_ERROR);
+                return 0;
+            }
+            $item->{lg_generation} = $response->{lg_generation}
+                if ref($response->{lg_generation}) eq 'HASH';
+            $item->{generation_profile} = $response->{generation_profile}
+                if ref($response->{generation_profile}) eq 'HASH';
+        }
+    }
     _log_action('Calibration resets complete; queued TV settings will be reapplied next');
     return 0 if !_write_artifact(PGAutomation::item_dir($RUN_ID, $item_number) . '/calibration/reset.json', {
         completed_at => time(),
         responses => \@responses,
+        lg_generation => $item->{lg_generation},
+        generation_profile => $item->{generation_profile},
         calibration_session_unconfirmed => scalar(grep {
             my $response = $_;
             grep { ref($_) eq 'HASH' && $_->{calibration_session_unconfirmed} } values %$response
@@ -2229,6 +2375,7 @@ sub _calibration_volume_stage {
         _log_action('Uploading measured Dolby Vision profile; TV calibration mode currently '.($proof->{calibration_mode} ? 'on' : 'off'));
         my $upload = _api('POST', '/api/lg/dv-profile/upload', {
             picture_mode => _picture_mode($item),
+            tv_input => $item->{tv_input}||'',
             signal_mode => 'dv',
             measurements => $measurements,
             keep_calibration_mode => JSON::PP::false,
@@ -2332,6 +2479,7 @@ sub _close_calibration {
         $off = _api('POST', '/api/lg/calibration-mode', {
             enabled => JSON::PP::false,
             picture_mode => _picture_mode($item),
+            tv_input => $item->{tv_input}||'',
             signal_mode => _signal($item),
         });
         $status = _api('GET', '/api/lg/status', undef);
@@ -2357,6 +2505,7 @@ sub _ensure_calibration_mode_off {
         my $off = _api('POST', '/api/lg/calibration-mode', {
             enabled => JSON::PP::false,
             picture_mode => _picture_mode($item),
+            tv_input => $item->{tv_input}||'',
             signal_mode => _signal($item),
         });
         my $status = _api('GET', '/api/lg/status', undef);
@@ -2434,6 +2583,7 @@ sub _apply_all {
     return 0 if !$check && $check ne 'unverifiable';
     my $response = _api('POST', '/api/lg/picture-settings/apply-all-inputs', {
         picture_mode => _picture_mode($item),
+        tv_input => $item->{tv_input}||'',
         signal_mode => _signal($item),
     });
     my $outcome = 'failed';
@@ -2775,8 +2925,8 @@ sub _restore_hazards {
             settings => { $key => $value }, category => $category,
             picture_mode => _picture_mode($item), signal_mode => _signal($item),
         }, 1, 0);
-        if (!_response_ok($result)) {
-            my $message = (ref($result) eq 'HASH' && $result->{message}) || 'no response';
+        if (!_response_ok($result) || ($result->{verification_state} || '') ne 'verified') {
+            my $message = (ref($result) eq 'HASH' && $result->{message}) || 'restoration was not verified';
             _log("Hazard restoration failed for $key: $message");
             push @failed, { key => $key, value => $value, message => $message };
         }
@@ -3018,6 +3168,21 @@ sub _require_job_ready {
     return $result;
 }
 
+sub _freeze_job_lg_context {
+    my ($item)=@_;
+    my $live=_api('POST','/api/lg/picture-settings',{keys=>['pictureMode'],include_current_input=>JSON::PP::true,signal_mode=>_signal($item)});
+    my $profile=ref($live->{generation_profile}) eq 'HASH' ? $live->{generation_profile} : {};
+    my $input=$live->{current_input}||'';
+    die 'Unable to confirm LG input and compatibility profile before selecting picture mode'
+        if (($live->{status}||'') ne 'ok' || $input!~/^hdmi[1-4](?:_pc)?$/ || ($profile->{capability_profile_hash}||'')!~/^[0-9a-f]{64}$/);
+    die 'No reviewed LG platform is available for calibration'
+        if ($item->{stages}{calibration} && (!$profile->{capability_library_valid} || !$profile->{capability_platform_profile_applied}));
+    $item->{tv_input}=$input;
+    $item->{generation_profile}=$profile;
+    $item->{capability_profile}={id=>$profile->{capability_profile_id},hash=>$profile->{capability_profile_hash}};
+    return 1;
+}
+
 sub _prepare_job_context {
     my ($number,$item)=@_;
     $ACTIVE_STAGE='job-readiness';
@@ -3028,6 +3193,7 @@ sub _prepare_job_context {
     _log_action('Checking TV, meter and calibration mode for '.($item->{name}||'this job'));
     _require_job_ready($number,$item,'batch');
     die($::LAST_ERROR||'Unable to activate job signal') if !_apply_signal($item);
+    _freeze_job_lg_context($item);
     die($::LAST_ERROR||'Unable to select job picture mode') if !_select_item_picture_mode($number,$item,'job-start');
     _log_action('Signal and picture mode selected; checking this job\'s TV controls');
     my $ready=_require_job_ready($number,$item,'job');

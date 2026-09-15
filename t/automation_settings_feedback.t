@@ -8,6 +8,7 @@ use Test::More;
 local $ENV{PGEN_AUTOMATION_DIR}=tempdir(CLEANUP=>1);
 {local @ARGV=('feedback-test','test-token');do "$Bin/../usr/bin/pgen_automation_runner.pl";die $@ if $@;}
 my (@calls,@checks,@logs,$mode,$gamut,$read_error,$write_error);
+local *main::_verify_live_capability_profile=sub {1}; # admitted-job feedback ordering
 local *main::_log=sub {push @logs,$_[0]};
 local *main::_sleep_controlled=sub {push @calls,'settle';1};
 local *main::_append_setting_check=sub {push @checks,{%{$_[2]},checkpoint=>$_[1]};1};

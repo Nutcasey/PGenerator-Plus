@@ -24,6 +24,7 @@ use PGCalibrationMath qw(
 use PGSignalCode qw(
  signal_code_nominal_range signal_code_policy signal_percent_to_code
 );
+use PGLGCapabilities qw(lg_recipe lg_setting_contracts lg_setting_values_agree lg_normalize_setting_value lg_operation_contract lg_best_settings_plan);
 use Fcntl qw(O_NONBLOCK O_WRONLY LOCK_EX LOCK_UN);
 use File::Path qw(make_path);
 use JSON::PP ();
@@ -6432,6 +6433,30 @@ sub webui_lg_autocal_dv_map_mode_error (@) {
   .$seen.". Set the DV map mode to Relative before starting the run, as the Web UI does.";
 }
 
+sub webui_lg_freeze_calibration_context (@) {
+ my ($body)=@_;
+ my $config=PGAutomation::decode_json($body);
+ return (undef,'Invalid LG calibration payload') if(ref($config) ne 'HASH');
+ my $request={keys=>['pictureMode'],include_current_input=>JSON::PP::true,
+  signal_mode=>$config->{signal_mode}||$config->{signal_format}||'sdr'};
+ my $live=PGAutomation::decode_json(eval { &webui_lg_picture_settings(PGAutomation::encode_json($request)) }||'')||{};
+ my $profile=ref($live->{generation_profile}) eq 'HASH' ? $live->{generation_profile} : {};
+ my $input=$live->{current_input}||'';
+ return (undef,'Unable to confirm a reviewed LG platform and active HDMI input before calibration')
+  if(($live->{status}||'') ne 'ok' || $input!~/^hdmi[1-4](?:_pc)?$/
+   || !$profile->{capability_library_valid} || !$profile->{capability_platform_profile_applied}
+   || ($profile->{capability_profile_id}||'') eq '' || ($profile->{capability_profile_hash}||'')!~/^[0-9a-f]{64}$/);
+ for my $key (qw(generation_profile preflight_generation_profile)) {
+  my $expected=ref($config->{$key}) eq 'HASH' ? $config->{$key}{capability_profile_hash}||'' : '';
+  return (undef,'LG compatibility profile changed since calibration readiness') if($expected ne '' && $expected ne $profile->{capability_profile_hash});
+ }
+ return (undef,'LG input changed since calibration readiness') if(($config->{tv_input}||'') ne '' && $config->{tv_input} ne $input);
+ $config->{tv_input}=$input;
+ $config->{preflight_generation_profile}=$profile;
+ $config->{generation_profile}=$profile;
+ return (PGAutomation::encode_json($config),undef);
+}
+
 sub webui_meter_lg_autocal_start (@) {
  my ($body)=@_;
  my $automation_guard=&lg_automation_guard_json($body);
@@ -6468,6 +6493,9 @@ sub webui_meter_lg_autocal_start (@) {
    return '{"status":"error","message":"'.$escaped.'"}';
   }
  }
+ my ($scoped_body,$scope_error)=&webui_lg_freeze_calibration_context($body);
+ return PGAutomation::encode_json({status=>'error',message=>$scope_error}) if($scope_error);
+ $body=$scoped_body;
  # Final server-side power gate immediately before any meter/session teardown
  # or worker launch. Block a definite CEC off state, but fail open when CEC is
  # unknown or remains powering-on. Older adapters can keep those advisory
@@ -6938,6 +6966,9 @@ sub webui_meter_lg_3d_autocal_start (@) {
   # browser's adoption probe).
   return '{"status":"error","retryable":false,"message":"LG 3D LUT AutoCal is already running"}';
  }
+ my ($scoped_body,$scope_error)=&webui_lg_freeze_calibration_context($body);
+ return PGAutomation::encode_json({status=>'error',message=>$scope_error}) if($scope_error);
+ $body=$scoped_body;
  $body=&webui_meter_lg_3d_autocal_complete_full_workflow_dpg($body);
  &webui_meter_stop();
  system("mkdir -p /var/lib/PGenerator/lg/luts 2>/dev/null");
@@ -13362,15 +13393,10 @@ sub webui_automation_write_locked (@) {
 sub webui_automation_apply_all_support (@) {
  my ($generation)=@_;
  return -1 if(ref($generation) ne "HASH");
- my $year=int($generation->{platform_year}||0);
- return 1 if($year>=2021);
- return 0 if($year>0 && $year<2021);
- my $series=uc($generation->{series}||"");
- return 1 if($series=~/^[A-Z][1-7]$/);
- return 0 if($series=~/^[A-Z](?:8|9|X)$/);
- my $webos=int($generation->{webos_major}||0);
- return 1 if($webos>=6);
- return 0 if($webos>0 && $webos<6);
+ my $operation=lg_operation_contract($generation,"apply_all_inputs");
+ my $state=$operation->{support_state}||"unknown";
+ return 1 if($state =~ /^(?:inventory|supported|verified)$/);
+ return 0 if($state eq "unsupported");
  return -1;
 }
 
@@ -13465,6 +13491,7 @@ sub webui_automation_normalize_item (@) {
  delete $item->{readiness};
  delete $item->{settings_recovery};
  delete $item->{profile_baseline_needs_restore};
+ delete @$item{qw(setting_contracts generation_profile capability_profile calibration_settings_recipe device_identity best_available_settings best_available_write_ack)};
  $item->{id}=PGAutomation::new_id() if(!defined($item->{id}) || !PGAutomation::safe_component($item->{id}));
  $item->{name}=substr(($item->{name}||$item->{title}||"Automation item"),0,120);
  $item->{signal_format}=lc($item->{signal_format}||$item->{signal_mode}||"sdr");
@@ -13473,7 +13500,8 @@ sub webui_automation_normalize_item (@) {
  $item->{picture_mode}=$item->{picture_mode}||$item->{pictureMode}||($item->{signal_format} eq "dv" ? "dolbyVisionCinemaBright" : $item->{signal_format} eq "sdr" ? "cinema" : "hdrCinema");
  $item->{settings}={} if(ref($item->{settings}) ne "HASH");
  # Upgrade only the known reference pin, never discard arbitrary user settings.
- # The G3 rejects both motion-control aliases. Keep this as a visible manual check.
+ # Migrate the old template pin to its explicit manual check; this is a
+ # template-version migration, not a model-specific capability decision.
  if(($item->{template_id}||"") =~ /^(?:reference-settings-v[123]|colourstrue-six-modes-v1)$/) {
   delete $item->{settings}{truMotionMode} if(($item->{settings}{truMotionMode}||"") eq "off");
   $item->{manual_checks}=["TruMotion: verify Off in the TV menu; this control is not available through the API."];
@@ -13802,6 +13830,44 @@ sub webui_automation_readiness_data (@) {
     if($item->{stages}{$phase."_readings"});
   }
   my $settings=ref($item->{settings}) eq "HASH" ? $item->{settings} : {};
+  my $calibration_recipe;
+  if($item->{stages}{calibration}) {
+   $calibration_recipe=lg_recipe($signal);
+   $check->(ref($calibration_recipe) eq "HASH","item-$index-settings-recipe",
+    ref($calibration_recipe) eq "HASH"
+     ? "Resolved reviewed LG AutoCal settings recipe ".($calibration_recipe->{recipe_id}||"")
+     : "No reviewed LG AutoCal settings recipe exists for $signal",$index);
+   if(ref($calibration_recipe) eq "HASH") {
+    # Batch-time semantic comparison uses common schemas only. The actual
+    # connected TV's value contracts are validated during job readiness below.
+    my $recipe_contracts=lg_setting_contracts({},signal_mode=>$signal)->{contracts};
+    my %recipe_settings;
+    foreach my $recipe_setting (@{$calibration_recipe->{settings}||[]}) {
+     next if(ref($recipe_setting) ne "HASH" || !$recipe_setting->{essential});
+     my $key=$recipe_setting->{wire_key}||"";
+     next if($key eq "");
+     my $expected=$recipe_setting->{value};
+     $recipe_settings{$key}=$expected;
+     if(exists($settings->{$key})) {
+      my $actual_json=eval { JSON::PP->new->canonical(1)->encode($settings->{$key}) }||"";
+      my $expected_json=eval { JSON::PP->new->canonical(1)->encode($expected) }||"";
+      my $matches=lg_setting_values_agree($recipe_contracts->{$key},$expected,$settings->{$key});
+      $check->($matches,"item-$index-recipe-$key",
+       $matches
+        ? "$key matches the reviewed AutoCal recipe"
+        : "$key conflicts with the reviewed AutoCal recipe: expected $expected_json, job contains $actual_json",$index);
+     } else {
+      $settings->{$key}=$expected;
+     }
+    }
+    $item->{calibration_settings_recipe}={
+     recipe_id=>$calibration_recipe->{recipe_id}||"",
+     signal=>$calibration_recipe->{signal}||$signal,
+     essential_settings=>\%recipe_settings,
+    };
+   }
+  }
+  $item->{settings}=$settings;
   my @keys=sort keys %$settings;
   push @keys,"pictureMode" if($item->{picture_mode} ne "");
   my $panel_key=$item->{panel_light}{key}||"";
@@ -13861,10 +13927,64 @@ sub webui_automation_readiness_data (@) {
    generation_id=>$generation->{generation_id}||"",
    webos_release=>$webos_release,
   };
+  my $contracts=ref($read_response->{setting_contracts}) eq "HASH" ? $read_response->{setting_contracts} : {};
+  $item->{setting_contracts}=$contracts;
+  my $generation_profile=ref($read_response->{generation_profile}) eq "HASH" ? $read_response->{generation_profile} : {};
+  if($item->{stages}{calibration}) {
+   my $reviewed=$generation_profile->{capability_library_valid} && $generation_profile->{capability_platform_profile_applied}
+    && ($generation_profile->{capability_profile_id}||'') ne '' && ($generation_profile->{capability_profile_hash}||'') =~ /^[0-9a-f]{64}$/;
+   $check->($reviewed,"item-$index-calibration-profile",
+    $reviewed ? "Calibration uses a reviewed internal LG platform contract"
+     : "No reviewed internal LG platform contract is available; calibration writes are blocked",$index);
+  }
+  my $settings_matrix=ref($read_response->{settings_matrix}) eq "HASH" ? $read_response->{settings_matrix} : {};
+  $item->{generation_profile}=$generation_profile if(%{$generation_profile});
+  $item->{capability_profile}={
+   id=>$settings_matrix->{capability_profile_id}||$generation_profile->{capability_profile_id}||"",
+   hash=>$settings_matrix->{capability_profile_hash}||$generation_profile->{capability_profile_hash}||"",
+   context=>$settings_matrix->{context}||{},
+  };
+  $item->{tv_input}=$read_response->{current_input}||'';
+  $check->($item->{tv_input}=~/^hdmi[1-4](?:_pc)?$/,"item-$index-input-context",
+   $item->{tv_input} ne '' ? "LG input confirmed: $item->{tv_input}" : "LG input could not be confirmed for calibration",$index)
+   if($item->{stages}{calibration});
+  my $best=lg_best_settings_plan($generation,$settings,$read_response,
+   category=>'picture',signal_mode=>$signal,picture_mode=>$item->{picture_mode},tv_input=>$item->{tv_input});
+  $item->{best_available_settings}=$best;
+  $check->(0,"item-$index-picture-context",$best->{context_error},$index) if($best->{context_error});
   foreach my $key (@keys) {
    my $key_ok=$supported{$key} || exists($observed_settings->{$key});
+   my $contract=ref($contracts->{$key}) eq "HASH" ? $contracts->{$key} : {};
+   my $read_decision=$contract->{read_decision}||"probe_required";
+   my $write_decision=$contract->{write_decision}||"preflight_and_verified_readback_required";
+   $key_ok=0 if($read_decision eq "blocked" || $read_decision eq "not_applicable"
+                || $write_decision eq "blocked" || $write_decision eq "not_applicable");
    my $reason=ref($read_response->{unsupported_picture_keys}) eq "HASH" ? $read_response->{unsupported_picture_keys}{$key} : "";
-   $check->($key_ok,"item-$index-key-$key",$key_ok ? "$key is supported" : "$key is not supported by the LG TV".($reason ? ": $reason" : "").". Configure this job to remove or replace that setting; check the TV menu manually if needed.",$index);
+   $key_ok=0 if($reason);
+   my $matrix_note=ref($contract) eq "HASH" && %{$contract}
+    ? " (matrix: read $read_decision, write $write_decision)" : "";
+   if($best->{active} && $key eq 'pictureMode' && !$supported{$key}
+      && ($read_response->{virtual_picture_settings} || $read_response->{picture_mode_read_forbidden})) {
+    $check->(0,"item-$index-key-$key","TV matrix permits unavailable picture-mode readback; the selected mode is not independently verified. Confirm it in the TV menu.",$index,'warning');
+    next;
+   }
+   my $needs_panel_read=$key eq $panel_key && ($item->{panel_light}{policy}||'') eq 'target';
+   if($best->{active} && exists($best->{manual}{$key}) && !$needs_panel_read) {
+    $check->(0,"item-$index-key-$key",$best->{manual}{$key}{message}." Best-available mode: this control will not be written automatically.",$index,'warning');
+    next;
+   }
+   if($best->{active} && $best->{unavailable}{$key} && !$best->{blocked}{$key} && !$needs_panel_read && $contract->{allow_unverified_readback}
+      && $write_decision ne 'blocked' && $write_decision ne 'not_applicable') {
+    $check->(0,"item-$index-key-$key","$key: matrix permits an accepted write without readback; it will be labelled unverified if no value is returned.",$index,'warning') if(!$key_ok);
+    $key_ok=1;
+   }
+   $key_ok=0 if($needs_panel_read && (!defined($observed_settings->{$key})
+    || ($read_response->{virtual_picture_settings} && !$supported{$key})));
+   $check->($key_ok,"item-$index-key-$key",$key_ok ? "$key is supported$matrix_note" : "$key is not supported by the LG TV".($reason ? ": $reason" : "").$matrix_note.". Configure this job to remove or replace that setting; check the TV menu manually if needed.",$index);
+   if(exists($settings->{$key}) && %{$contract}) {
+    my ($valid,$normalized,$error)=lg_normalize_setting_value($contract,$settings->{$key},$observed_settings->{$key});
+    $check->($valid,"item-$index-value-$key",$valid ? "$key value is valid for this TV" : "$key value is invalid for this TV: $error",$index);
+   }
   }
   my $apply_support=&webui_automation_apply_all_support($generation);
   $item->{lg_generation}=$generation if(%$generation);

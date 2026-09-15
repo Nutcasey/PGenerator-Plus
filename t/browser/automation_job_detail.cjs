@@ -65,6 +65,37 @@ const root=path.resolve(__dirname,'../..');
   assert.match(await page.evaluate(()=>pgAutomationIssueText('greyscale-settings-verified-unverified')),/Checking TV settings after 1D calibration: verification incomplete.*recorded checks/,'internal warning codes are explained in plain language');
   const realMismatch=await page.evaluate(()=>pgAutomationSettingsEvidence([{key:'colorGamut',expected:'auto',observed:'wide',result:'lut-managed'},{key:'brightness',expected:50,observed:55,verified:false,result:'mismatch'}],{}));
   assert.match(realMismatch,/brightness · Readback mismatch/,'LUT ownership cannot hide another control mismatch');
+  await page.evaluate(async()=>{
+   const state=pgAutomation.jobViews.live;state.showBefore=true;state.showAfter=true;
+   state.graphGroup='3d'; // A selection left over from an older UI cannot hide data.
+   state.data={item:{signal_format:'sdr'},snapshots:[
+    {key:'saturations-24',phase:'post',snapshot:{readings:[{Y:30}]}},
+    {key:'3d',phase:'calibration',snapshot:{readings:[{Y:20}]}},
+    {key:'greyscale-21',phase:'pre',snapshot:{readings:[{Y:9}]}},
+    {key:'colors-24',phase:'pre',snapshot:{readings:[{Y:25}]}},
+    {key:'grey',phase:'calibration',snapshot:{readings:[{Y:10}]}},
+    {key:'colors-24',phase:'post',snapshot:{readings:[{Y:26}]}}
+   ],live:{key:'3d',phase:'calibration',snapshot:{readings:[{Y:21}]}}};
+   await pgAutomationRenderJobGraphs('live',state);
+  });
+  assert.deepEqual(await page.evaluate(()=>entries.map(e=>e.snapshot.readings[0].Y)),[9,10,21,25,26,30],'all measurement families appear together, ordered with before/latest pairs and no duplicate live profile');
+  assert.equal(await page.$('[data-job-graph-select]'),null,'no measurement dropdown is needed');
+  assert.equal((await page.$eval('#pgAutomationLiveDetail [data-job-graphs]',e=>getComputedStyle(e).gridTemplateColumns)).split(' ').length,1,'results remain a continuous single column on desktop');
+  await page.evaluate(()=>pgAutomationGraphToggle('live','showBefore',false));
+  await page.waitForFunction(()=>entries.length===4);
+  assert.deepEqual(await page.evaluate(()=>entries.map(e=>e.snapshot.readings[0].Y)),[10,21,26,30],'before toggle applies across every measurement family');
+  await page.evaluate(()=>pgAutomationGraphToggle('live','showAfter',false));
+  await page.waitForFunction(()=>document.querySelector('#pgAutomationLiveDetail [data-job-graphs]').textContent.includes('Select a comparison'));
+  await page.evaluate(async()=>{
+   const state=pgAutomation.jobViews.live;state.showAfter=true;
+   state.data={item:{signal_format:'dv'},snapshots:[
+    {key:'dv-profile',phase:'calibration',snapshot:{steps:[{name:'white',luminance:500,x:.3127,y:.329}]}},
+    {key:'grey',phase:'calibration',snapshot:{readings:[{Y:100}]}},
+    {key:'greyscale-21',phase:'post',snapshot:{readings:[{Y:101}]}}
+   ]};
+   await pgAutomationRenderJobGraphs('live',state);
+  });
+  assert.deepEqual(await page.evaluate(()=>entries.map(e=>e.snapshot.readings[0].Y??e.snapshot.readings[0].luminance)),[101,500],'post greyscale replaces calibration greyscale without hiding the native DV profile');
   const desktop=await page.$eval('#pgAutomationTabLive .auto-job-layout',e=>getComputedStyle(e).gridTemplateColumns);
   assert.equal(desktop.split(' ').length,2,'desktop has side-by-side panel');
   await page.setViewport({width:390,height:844});

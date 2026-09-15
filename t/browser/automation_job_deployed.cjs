@@ -40,12 +40,11 @@ const preview=process.argv.includes('--local-charts');
   dimensions.forEach(d=>assert.ok(d.width/d.height>2,`${d.title} is landscape, not a stretched sidebar snapshot: ${JSON.stringify(d)}`));
   assert.ok(await page.evaluate(()=>document.body.classList.contains('layout-desktop')&&!document.body.classList.contains('pg-automation-report-render')&&getComputedStyle(document.getElementById('chartsGreyscaleFullWrap')).display==='grid'),'snapshot sizing is scoped; normal desktop chart grid is restored');
   const controls=await page.evaluate(()=>['meterTargetGamut','meterDeltaEForm','meterColorDeltaEForm','meterCustomD65Enabled','meterTargetWhiteX','meterTargetWhiteY'].map(id=>({id,value:document.getElementById(id).value,checked:document.getElementById(id).checked})));
-  await page.evaluate(()=>pgAutomationGraphToggle('history','graphGroup','colors'));
-  await page.waitForFunction(()=>!pgAutomation.reportBusy&&document.querySelector('#pgAutomationHistoryJobDetail [data-job-graphs]').textContent.includes('ColorChecker'),{timeout:30000});
+  assert.equal(await page.$('#pgAutomationHistoryJobDetail select[aria-label="Measurement graphs"]'),null,'all measurement families share one continuous page');
+  await page.evaluate(()=>{const state=pgAutomation.jobViews.history;state.graphSignature=null;return pgAutomationRenderJobGraphs('history',state);});
+  await page.waitForFunction(()=>!pgAutomation.reportBusy,{timeout:30000});
   const after=await page.evaluate(()=>['meterTargetGamut','meterDeltaEForm','meterColorDeltaEForm','meterCustomD65Enabled','meterTargetWhiteX','meterTargetWhiteY'].map(id=>({id,value:document.getElementById(id).value,checked:document.getElementById(id).checked})));
   assert.deepEqual(after,controls,'report restores operator target selectors');
-  await page.evaluate(()=>pgAutomationGraphToggle('history','graphGroup','greyscale'));
-  await page.waitForFunction(()=>!pgAutomation.reportBusy,{timeout:30000});
   await page.screenshot({path:path.join(evidence,'deployed-desktop.png')});
   for(const title of ['EOTF','Luminance']){
    const cards=await page.$$('#pgAutomationHistoryJobDetail .report-chart-card');

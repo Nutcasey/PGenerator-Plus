@@ -24,6 +24,11 @@ local *main::_prepare_resume=sub {push @calls,'resume';ok($_[2],'resume uses alr
 local *main::_pause_after_checkpoint=sub {0};
 local *main::_api=sub {
  my ($method,$path,$payload)=@_;
+ if($path eq '/api/lg/picture-settings') {
+  push @calls,'freeze';
+  ok($payload->{include_current_input},'initial context uses a live input probe');
+  return {status=>'ok',current_input=>'hdmi1',generation_profile=>{capability_profile_hash=>'a'x64,capability_profile_id=>'test',capability_library_valid=>1,capability_platform_profile_applied=>1}};
+ }
  is($path,'/api/automation/readiness','job setup only calls the scoped readiness endpoint');
  push @calls,$payload->{scope};
  is(scalar @{$payload->{items}},1,'job checks cannot query later queue entries');
@@ -43,7 +48,7 @@ for my $signal (qw(sdr hdr10 dv)) {
  @calls=();
  my $item={name=>'Job',signal_format=>$signal,picture_mode=>'mode-'.$signal,settings=>{},checkpoints=>[{name=>'item-started',status=>'done',verified=>1}],hazard_restore=>{autoPowerOff=>{value=>'preserved'}}};
  main::_run_item(2,$item);
- is_deeply(\@calls,['batch','signal:'.$signal,'mode:mode-'.$signal,'job','resume','apply'],'fresh health -> signal -> mode -> current-job controls -> resume -> apply');
+ is_deeply(\@calls,['batch','signal:'.$signal,'freeze','mode:mode-'.$signal,'job','resume','apply'],'fresh health -> signal -> frozen context -> mode -> current-job controls -> resume -> apply');
  is($item->{checkpoints}[0]{name},'item-started','existing checkpoints preserved without skipping fresh readiness');
  is($item->{readiness}{checks}[0]{item_number},2,'job readiness uses global queue index in saved results');
  is($item->{hazard_restore}{autoPowerOff}{value},'preserved','item hazard restoration survives preparation');
@@ -58,6 +63,6 @@ like($missing->{failure}{message},qr/Physical meter disconnected/,'job failure i
 @calls=();$healthy=1;$supported=0;
 my $bad={name=>'Unsupported control',signal_format=>'dv',picture_mode=>'dolbyVisionCinema'};
 ok(!main::_run_item(2,$bad),'unsupported current-mode control stops this job');
-is_deeply(\@calls,['batch','signal:dv','mode:dolbyVisionCinema','job'],'unsupported setting prevents application and baseline measurements');
+is_deeply(\@calls,['batch','signal:dv','freeze','mode:dolbyVisionCinema','job'],'unsupported setting prevents application and baseline measurements');
 like($bad->{failure}{message},qr/contrast unsupported/,'mode-specific error is retained on the job');
 done_testing();

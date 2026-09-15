@@ -48,6 +48,13 @@ const root=path.resolve(__dirname,'../..');
   await page.evaluate(async()=>{data.live.snapshot.readings=[{Y:200}];await pgAutomationFetchJob('calibration',pgAutomation.jobViews.calibration);});
   assert.match(await page.evaluate(()=>rendered[0].title),/Live calibration · 3D LUT/,'3D stage automatically selects profile charts');
   assert.equal(await page.evaluate(()=>rendered[0].snapshot.type),'colors','profile uses shared colour chart renderer');
+  await page.evaluate(async()=>{
+   data.snapshots.push({key:'grey',phase:'calibration',snapshot:{readings:[{Y:115}]}});
+   await pgAutomationFetchJob('calibration',pgAutomation.jobViews.calibration);
+  });
+  assert.deepEqual(await page.evaluate(()=>rendered.map(e=>e.title)),['Saved calibration · 1D LUT','Live calibration · 3D LUT'],'earlier calibration remains visible above the live profile with truthful labels');
+  assert.equal(await page.$('#pgAutomationCalibrationDetail [data-job-graph-select]'),null,'observer shows both sections without a selector');
+  await page.evaluate(()=>{data.snapshots=data.snapshots.filter(s=>s.phase==='pre');});
   await page.evaluate(()=>{
    pgAutomation.current.run.active_stage='post-readings-done';data.active_stage='post-readings-done';data.live={key:'saturations-24',phase:'post',snapshot:{readings:[{Y:300}]}};
    pgAutomationSyncCalibrationView(pgAutomation.current.run);
@@ -93,6 +100,11 @@ const root=path.resolve(__dirname,'../..');
   });
   await ready();
   assert.match(await page.$eval('#pgAutomationCalibrationDetail [data-job-graphs]',el=>el.textContent),/After.*500/,'terminal state retains final results');
+  await page.evaluate(async()=>{
+   data.snapshots.push({key:'dv-profile',phase:'calibration',snapshot:{steps:[{name:'white',luminance:510,x:.3127,y:.329}]}});
+   await pgAutomationFetchJob('calibration',pgAutomation.jobViews.calibration);
+  });
+  assert.deepEqual(await page.evaluate(()=>rendered.map(e=>e.title)),['After · Greyscale','Saved calibration · Dolby Vision profile'],'final greyscale sweep does not hide the saved volume result');
   assert.equal(await page.$eval('#pgAutomationCalibrationBadge',el=>el.textContent),'Automation complete · Read-only','finished results are not labelled as active automation');
   await page.evaluate(()=>{pgAutomation.current.run.status='complete-with-warnings';data.run_status='complete-with-warnings';pgAutomationSyncCalibrationView(pgAutomation.current.run);});
   await ready();

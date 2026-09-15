@@ -313,13 +313,10 @@
  #automationCard .auto-job-detail img{max-width:100%;height:auto}
  #automationCard .auto-job-detail .report-section{margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
  #automationCard .auto-job-detail .report-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
- #automationCard [data-job-graphs]{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:16px}
+ #automationCard [data-job-graphs]{display:grid;grid-template-columns:minmax(0,1fr);gap:16px}
  #automationCard [data-job-graphs]>.report-section{min-width:0}
  #automationCard [data-job-toggles]{display:flex;flex-wrap:wrap;gap:14px;margin:14px 0}
  #automationCard [data-job-toggles] label{display:flex;align-items:center;gap:6px}
- #automationCard [data-job-graph-select]{margin:12px 0}
- #automationCard [data-job-graph-select] label{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
- #automationCard [data-job-graph-select] select{padding:8px 12px;background:var(--surface-field);color:var(--text);border:1px solid var(--border);border-radius:6px;font:inherit;max-width:100%}
  #automationCard .auto-job-detail .report-section-title{font-weight:700}
  #automationCard .auto-job-detail .report-section-meta{font-size:.8rem;color:var(--text2);margin:5px 0 12px}
  #automationCard .auto-job-detail .report-table-wrap,#automationCard .auto-settings-table{overflow:auto}
@@ -390,9 +387,6 @@
  #pgAutomationCalibrationCard .report-chart-title{font-size:.8rem;font-weight:600;margin:12px 0 8px}
  #pgAutomationCalibrationCard [data-job-settings],#pgAutomationCalibrationCard [data-job-toggles],#pgAutomationCalibrationCard [data-job-nav]{display:none}
  #pgAutomationCalibrationCard [data-job-error]{color:var(--orange)}
- #pgAutomationCalibrationCard [data-job-graph-select]{margin:16px 0}
- #pgAutomationCalibrationCard [data-job-graph-select] label{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:.75rem;color:var(--text2)}
- #pgAutomationCalibrationCard [data-job-graph-select] select{padding:7px 10px;background:var(--surface-field);color:var(--text);border:1px solid var(--border);border-radius:6px;font:inherit;font-size:.78rem;text-transform:none;letter-spacing:normal;max-width:100%}
  @media(max-width:700px){#pgAutomationCalibrationCard .auto-observer-overview{align-items:flex-start;flex-direction:column;gap:14px;padding:14px}#pgAutomationCalibrationCard .auto-observer-actions{justify-content:flex-start;max-width:none}#pgAutomationCalibrationCard .report-summary{grid-template-columns:repeat(2,minmax(0,1fr))}#pgAutomationCalibrationCard .auto-observer-title{font-size:1rem}}
  @media(prefers-reduced-motion:reduce){:is(#automationCard,#pgAutomationCalibrationCard) .btn{transition:none;transform:none}}
  :is(#automationCard,#pgAutomationCalibrationCard) .auto-pin-summary{margin-top:12px}

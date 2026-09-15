@@ -1220,15 +1220,16 @@ function pgAutomationGraphSnapshot(entry,item){
 function pgAutomationCalibrationSnapshots(data){
  const snapshots=data.snapshots||[];
  if(['complete','complete-with-warnings','failed','stopped'].includes(data.run_status)){
-  const post=snapshots.filter(s=>s.phase==='post');
-  return post.length?post:snapshots.filter(s=>s.phase==='calibration');
+  return snapshots.filter(s=>s.phase==='post'||s.phase==='calibration');
  }
  const stage=data.active_stage,phase=stage==='pre-readings-done'?'pre':stage==='post-readings-done'?'post':stage==='greyscale-done'||stage==='volume-done'?'calibration':null;
  const key=stage==='greyscale-done'?'grey':stage==='volume-done'?(data.item?.signal_format==='dv'?'dv-profile':'3d'):null;
- if(!phase)return [];
- if(data.live?.phase===phase&&(!key||data.live.key===key))return [{...data.live,isLive:true}];
- // Do not substitute pre-readings when a worker has not produced data yet.
- return key?snapshots.filter(s=>s.phase===phase&&s.key===key):[];
+ const live=phase&&data.live?.phase===phase&&(!key||data.live.key===key)?{...data.live,isLive:true}:null;
+ // Keep earlier results on the page as saved measurements, never as live data.
+ // A pre-sweep belongs here only while it is the active measurement.
+ const saved=snapshots.filter(s=>s.phase==='post'||s.phase==='calibration');
+ const hasLive=live&&pgAutomationGraphSnapshot(live,data.item).readings?.length;
+ return [...saved.filter(s=>!(hasLive&&s.phase===live.phase&&s.key===live.key)),...(hasLive?[live]:[])];
 }
 async function pgAutomationRenderJobGraphs(view,state){
  if(!state.data)return;
@@ -1239,16 +1240,14 @@ async function pgAutomationRenderJobGraphs(view,state){
  const live=data.live?{...data.live,snapshot:pgAutomationGraphSnapshot(data.live,item),isLive:true}:null;
  const sources=observer?pgAutomationCalibrationSnapshots(data):(data.snapshots||[]).filter(s=>!(live?.snapshot?.readings?.length&&s.key===live.key&&s.phase===live.phase));
  if(!observer&&live?.snapshot?.readings?.length)sources.push(live);
- const snapshots=sources.map(s=>({...s,snapshot:pgAutomationGraphSnapshot(s,item)}));
- const groups=[...new Set(snapshots.filter(s=>s.snapshot?.readings?.length).map(s=>pgAutomationGraphGroup(s.key)))];
- if(observer&&snapshots.some(s=>s.isLive))state.graphGroup=pgAutomationGraphGroup(snapshots.find(s=>s.isLive).key);
- if(!groups.includes(state.graphGroup))state.graphGroup=groups.includes('greyscale')?'greyscale':groups[0];
- let select=pgAutomationJobTarget(view).querySelector('[data-job-graph-select]');
- if(!select){select=document.createElement('div');select.dataset.jobGraphSelect='';target.before(select);}
- select.innerHTML=groups.length?'<label>Measurements <select aria-label="Measurement graphs" onchange="pgAutomationGraphToggle(\''+view+'\',\'graphGroup\',this.value)">'+groups.map(key=>'<option value="'+pgAutomationEscape(key)+'" '+(key===state.graphGroup?'selected':'')+'>'+pgAutomationEscape(({greyscale:'Greyscale',colors:'ColorChecker',saturations:'Saturation','3d':'3D LUT','dv-profile':'Dolby Vision profile'})[key]||key)+'</option>').join('')+'</select></label>':'';
+ const groupOrder={greyscale:0,'3d':1,'dv-profile':1,colors:2,saturations:3};
+ const phaseOrder={pre:0,calibration:1,post:2};
+ const snapshots=sources.map(s=>({...s,snapshot:pgAutomationGraphSnapshot(s,item)})).sort((a,b)=>
+  ((groupOrder[pgAutomationGraphGroup(a.key)]??4)-(groupOrder[pgAutomationGraphGroup(b.key)]??4))||
+  (String(pgAutomationGraphGroup(a.key)).localeCompare(String(pgAutomationGraphGroup(b.key))))||
+  ((phaseOrder[a.phase]??3)-(phaseOrder[b.phase]??3))||String(a.key).localeCompare(String(b.key)));
  const hasAfterGrey=snapshots.some(s=>s.phase==='post'&&pgAutomationGraphGroup(s.key)==='greyscale'&&s.snapshot?.readings?.length);
  snapshots.forEach(s=>{
-  if(pgAutomationGraphGroup(s.key)!==state.graphGroup)return;
   if(hasAfterGrey&&s.phase==='calibration'&&s.key==='grey')return;
   if(!s.snapshot?.readings?.length||(s.phase==='pre'?!state.showBefore:!state.showAfter))return;
   const snap=s.snapshot;
@@ -1269,6 +1268,7 @@ async function pgAutomationRenderJobGraphs(view,state){
   const html=await meterFullAutoCalBuildSnapshotReportSections(entries);
   if(pgAutomation.jobViews[view]===state&&state.data===data){
    target.innerHTML=html;state.graphSignature=signature;
+   target.querySelectorAll('.report-section-title').forEach(title=>{title.setAttribute('role','heading');title.setAttribute('aria-level','4');});
    target.querySelectorAll('.report-table-wrap').forEach(table=>{const detail=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Measured values';table.before(detail);detail.append(summary,table);});
   }
  }catch(e){if(pgAutomation.jobViews[view]===state)target.textContent='Unable to draw measurements: '+e.message;}

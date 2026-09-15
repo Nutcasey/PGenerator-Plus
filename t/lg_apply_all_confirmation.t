@@ -4,6 +4,9 @@ use FindBin qw($Bin);
 use Test::More;
 do "$Bin/../usr/sbin/pgenerator-lg";die $@ if $@;
 my $unsupported='500 Application error: Some keys are not allowed for the request. ( applyToAllInput )';
+is(lg_apply_all_inputs_generation_support({platform_model=>'W20O'}),0,'2020 operation exclusion comes from the matrix');
+is(lg_apply_all_inputs_generation_support({platform_model=>'W23O'}),1,'G3 platform resolves the reviewed apply-all operation');
+is(lg_apply_all_inputs_generation_support({}),-1,'unknown TV cannot inherit a newer apply-all operation');
 ok(lg_apply_all_inputs_readback_unavailable($unsupported),'recognises exact LG confirmation capability rejection');
 for my $error (undef,'','timeout','connection lost','Permission denied','Some keys are not allowed for the request. ( brightness )','Some keys are not allowed for the request. ( applyToAllInputs )') {
  ok(!lg_apply_all_inputs_readback_unavailable($error),'unrelated failures and plural-key mistakes are not excused');

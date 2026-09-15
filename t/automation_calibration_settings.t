@@ -12,6 +12,9 @@ local *main::_log=sub {push @logs,$_[0]};
 local *main::_append_setting_check=sub {push @checks,$_[2];1};
 local *main::_api=sub {$response};
 local *main::_select_item_picture_mode=sub {1};
+# Identity admission is covered in automation_runner_load.t; this fixture
+# isolates post-LUT settings semantics after admission.
+local *main::_verify_live_capability_profile=sub {1};
 local *main::_apply_one_setting=sub {push @writes,$_[1];{status=>'ok'}};
 sub item {
  return {signal_format=>'sdr',picture_mode=>'filmMaker',stages=>{calibration=>1},settings=>{colorGamut=>'auto',brightness=>50},checkpoints=>[{name=>'volume-done',status=>'done',verified=>JSON::PP::true,evidence=>{terminal_commit_verified=>JSON::PP::true}}]};
@@ -92,7 +95,7 @@ for my $override (
 ) {
  is(check(after_grey_item(),'c6',$override)->{verified},0,'expected transition never hides real failures');
 }
-is(check(after_grey_item(),'c6',{unsupported_picture_keys=>{colorGamut=>1}})->{verified},'unverifiable','unsupported readback remains unverified after 1D');
+is(check(after_grey_item(),'c6',{unsupported_picture_keys=>{colorGamut=>1}})->{verified},0,'unsupported readback without matrix permission blocks after 1D');
 is((grep {$_->{key} eq 'colorGamut'} @checks)[0]{result},'unverifiable','unsupported control not reclassified');
 check(after_grey_item(),'c6');@writes=();
 ok(main::_apply_and_verify(0,after_grey_item(),'c6-recovery',1),'recovery after 1D accepts expected state');
@@ -148,7 +151,7 @@ for my $case (
  is(check(item(),'c8',$case->[1])->{verified},0,$case->[0].' remains an error');
 }
 my $r=check(item(),'c8',{unsupported_picture_keys=>{colorGamut=>1}});
-is($r->{verified},'unverifiable','unsupported readback remains explicitly unverified');
+is($r->{verified},0,'unsupported readback without matrix permission blocks progression');
 is((grep {$_->{key} eq 'colorGamut'} @checks)[0]{result},'unverifiable','unsupported readback is not relabelled LUT-managed');
 check(item(),'c8');@writes=();
 ok(main::_apply_and_verify(0,item(),'c8-recovery',1),'genuine recovery can reapply other controls');

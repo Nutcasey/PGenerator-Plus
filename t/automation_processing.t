@@ -55,4 +55,27 @@ for my $case (qw(matched repair read-failed unsupported missing-value wrong-mode
 my $called=0;
 ok(PGAutomationProcessing::enforce({}, {}, 0, sub {$called++},sub{}),'standalone run with no queue contract unchanged');
 is($called,0,'standalone path does not introduce TV requests');
+{
+ my $identity={model_name=>'OLED65C1PUB',platform_model=>'W21O'};
+ my $profile=PGLGCapabilities::resolve_lg_capabilities($identity);
+ my $config={picture_mode=>'filmMaker',signal_mode=>'sdr',tv_input=>'hdmi1',
+  preflight_generation_profile=>{capability_profile_hash=>$profile->{capability_profile_hash}},
+  automation_processing_settings=>{noiseReduction=>'off'}};
+ my $mismatch=0;my $writes=0;my $state={};
+ my $api=sub {
+  return {status=>'ok',calibration_mode=>0} if $_[1] eq '/api/lg/status';
+  if($_[1] eq '/api/lg/picture-settings/set') {$writes++;die 'Unexpected write'}
+  return {status=>'ok',current_input=>'hdmi1',lg_generation=>$identity,virtual_picture_settings=>1,
+   supported_picture_keys=>['noiseReduction'],picture_settings=>{pictureMode=>'filmMaker',noiseReduction=>$mismatch?'low':'off'}};
+ };
+ ok(PGAutomationProcessing::enforce($config,$state,1,$api,sub {}),'legacy native processing reads remain usable despite unreadable mode');
+ my ($mode)=grep {$_->{key} eq 'pictureMode'} @{$state->{automation_processing_checks}};
+ is($mode->{result},'unverifiable','worker does not relabel the legacy mode verified');
+ is(scalar @{$state->{automation_processing_warnings}},1,'mode uncertainty remains visible in worker evidence');
+ $mismatch=1;
+ ok(!eval {PGAutomationProcessing::enforce($config,{},2,$api,sub {})},'processing mismatch with unconfirmed mode blocks rather than repairing blindly');
+ is($writes,0,'legacy mode uncertainty never authorizes speculative processing rewrites');
+ $mismatch=0;$config->{preflight_generation_profile}{capability_profile_hash}='changed';
+ ok(!eval {PGAutomationProcessing::enforce($config,{},3,$api,sub {})},'changed frozen profile prevents the legacy processing exception');
+}
 done_testing();
