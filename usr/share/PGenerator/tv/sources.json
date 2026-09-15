@@ -1,6 +1,18 @@
 {
   "schema_version": 1,
   "sources": {
+    "colourstrue-g3-mode-banks": {
+      "title": "ColoursTrue LG G3 picture-mode catalogue and calibration-bank separation",
+      "url": "local:ColoursTrue/Wiki/concepts/lg-g3-picture-mode-catalogue.md",
+      "retrieved_at": "2026-09-15",
+      "use": "Catalogue updated 2026-08-02, referencing r98 bank probes and r100/r101 mode selection evidence. HDR Cinema Home (hdrCinemaBright) is selectable but has no proved externalpq bank; HDR Cinema is a distinct calibrated preset. Generic workflow admission retains PGenerator's established supported families, not proof of every TV's support."
+    },
+    "c1-pr14-all-signals-20260915": {
+      "title": "Dizzy C1 hardware follow-up: five accepted picture controls across SDR, HDR10 and Dolby Vision",
+      "url": "https://github.com/oldgithubman/PGenerator-Plus/pull/14#issuecomment-5679735312",
+      "retrieved_at": "2026-09-15",
+      "use": "OLED65C1PUB / W21O, reported webOS 6.5.3 and firmware 53.45. Five-key accepted-write evidence, not verified readback or permission to ignore refusals, mismatches or connection errors."
+    },
     "c1-user-run-20260915": {
       "title": "User-supplied OLED65C1PUB automation attempt log, 15 September 2026",
       "url": "local:t/fixtures/lg-capabilities/c1-run-2026-09-15.json",

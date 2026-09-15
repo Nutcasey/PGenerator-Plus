@@ -10,6 +10,7 @@
       },
       "data": {
         "settings": {
+          "logical_controls": {"panel_light": {"preferred_wire_key": "backlight"}},
           "policy": {
             "unknown_read": "probe_individually",
             "unknown_write": "require_preflight_read_and_verified_readback",

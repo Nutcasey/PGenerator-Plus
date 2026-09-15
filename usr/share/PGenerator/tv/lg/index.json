@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
   "vendor": "lg",
-  "library_version": "2026.09.15.2",
+  "library_version": "2026.09.15.5",
   "base": "base/conservative.json",
   "profile_files": [
+    "picture-modes/catalogue.json",
     "settings/webos-2020-common.json",
     "settings/context-operations.json",
     "settings/legacy-best-available.json",

@@ -37,4 +37,13 @@ ok(!defined(main::webui_automation_artifact($id,'run.json')),'run manifest (carr
 ok(!defined(main::webui_automation_artifact($id,'control.json')),'control file is not served as an artifact');
 my $clean = main::webui_automation_normalize_item({name=>'Injected',status=>'complete',checkpoints=>[{name=>'greyscale-done',status=>'done'}],failure=>{message=>'x'},warnings=>['w'],recheck=>1});
 ok(!exists($clean->{$_}),"normalised item drops client-supplied $_") for qw(status checkpoints failure warnings recheck);
+my $before_recovery=PGAutomation::read_raw($path);
+$response=PGAutomation::decode_json(main::webui_automation_api('/api/automation/runs/'.$id.'/queue','GET',''));
+is($response->{queue}{items}[0]{settings}{backlight},80,'recovery endpoint returns full job settings, not display summaries');
+is($response->{queue}{items}[1]{name},'Updated','recovery includes saved pending edits');
+ok(!exists($response->{queue}{items}[0]{checkpoints}),'recovered queue cannot skip stages using old checkpoints');
+is(PGAutomation::read_raw($path),$before_recovery,'recovery never mutates the saved run');
+my $summary=main::webui_automation_item_summary({failure=>{stage=>'job-readiness'},readiness=>{checks=>[{name=>'key-gamma',ok=>0}],automation_token=>'secret'}});
+is($summary->{readiness}{checks}[0]{name},'key-gamma','public run exposes structured readiness issues');
+ok(!exists($summary->{readiness}{automation_token}),'public readiness excludes private runtime fields');
 done_testing();

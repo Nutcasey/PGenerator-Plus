@@ -40,7 +40,25 @@ my $contracts=lg_setting_contracts($identity,%context,keys=>[keys %requested])->
 ok($contracts->{brightness}{allow_unverified_readback},'matrix explicitly permits native brightness acknowledgement');
 ok($contracts->{brightness}{require_readback},'even a write-only candidate must attempt post-write readback');
 ok(!$contracts->{gamma}{allow_unverified_readback},'other controls do not inherit the waiver');
-ok(!lg_setting_contracts($identity,%context,signal_mode=>'hdr10',keys=>['brightness'])->{contracts}{brightness}{allow_unverified_readback},'SDR report does not authorize unverified HDR writes');
+for my $case (['sdr','filmMaker'],['hdr10','hdrFilmMaker'],['dv','dolbyVisionFilmMaker']) {
+ my ($signal,$mode)=@$case;
+ my $keys=[qw(backlight brightness color contrast energySaving noiseReduction)];
+ my $c=lg_setting_contracts($identity,%context,signal_mode=>$signal,picture_mode=>$mode,keys=>$keys)->{contracts};
+ for my $key(qw(backlight brightness color contrast energySaving)) {
+  ok($c->{$key}{allow_unverified_readback},"C1 $signal $key uses the reported native-write allowance");
+  ok($c->{$key}{require_readback},"C1 $signal $key still attempts readback");
+ }
+ ok(!$c->{noiseReduction}{allow_unverified_readback},"$signal does not extend the allowance to a sixth control");
+ my $requested={brightness=>50,noiseReduction=>'off'};
+ my $r={%$response,picture_settings=>{},supported_picture_keys=>[],unsupported_picture_keys=>{brightness=>$fixture->{refusal},noiseReduction=>$fixture->{refusal}}};
+ my $p=lg_best_settings_plan($identity,$requested,$r,%context,signal_mode=>$signal,picture_mode=>$mode);
+ ok(exists($p->{automatic}{brightness})&&exists($p->{manual}{noiseReduction}),"$signal keeps native-write candidate automatic and unreadable extra control manual");
+ my $ack={status=>'ok',verification_state=>'acknowledged_unverified',setting_contracts=>$c,setting_verification=>{brightness=>{status=>'acknowledged_unverified',expected=>50}}};
+ ok(lg_setting_write_accepted($ack,'brightness',50),"$signal accepts an explicitly acknowledged, unverified native write");
+ ok(!lg_setting_write_accepted({%$ack,status=>'error'},'brightness',50),"$signal never waives write refusal");
+ ok(!lg_setting_write_accepted({%$ack,picture_settings=>{brightness=>49}},'brightness',50),"$signal never waives observed mismatch");
+}
+ok(!lg_setting_contracts($identity,%context,signal_mode=>'hlg',keys=>['brightness'])->{contracts}{brightness}{allow_unverified_readback},'report does not authorize unverified HLG writes');
 my $denied={%$response,picture_settings=>{},supported_picture_keys=>[],unsupported_picture_keys=>{brightness=>$fixture->{refusal}}};
 $plan=lg_best_settings_plan($identity,{brightness=>50},$denied,%context);
 ok($plan->{unavailable}{brightness} && exists($plan->{automatic}{brightness}),'known write candidate remains automatic after an explicit read refusal');

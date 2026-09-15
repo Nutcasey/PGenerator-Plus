@@ -19,7 +19,7 @@ my $root="$Bin/../usr/share/PGenerator/tv";
 my $validation=validate_lg_library($root);
 ok($validation->{ok},'the shipped LG capability library validates')
  or diag(join("\n",@{$validation->{errors}||[]}));
-is($validation->{version},'2026.09.15.2','library version is explicit');
+is($validation->{version},'2026.09.15.5','library version is explicit');
 is(lg_platform_token('HE_DTV_W23O_AFABATAA'),'W23O','internal platform token is extracted');
 is(lg_platform_token('W26G'),'W26G','bare platform token is accepted');
 

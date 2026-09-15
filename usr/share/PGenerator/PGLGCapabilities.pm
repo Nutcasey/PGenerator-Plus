@@ -24,6 +24,10 @@ our @EXPORT_OK = qw(
  lg_operation_contract
  lg_scoped_request_payload
  lg_panel_light_binding
+ lg_settings_selection_plan
+ lg_calibration_mode_contract
+ lg_picture_mode_catalogue
+ lg_picture_mode_record
  lg_best_settings_plan
  lg_setting_write_accepted
  lg_readback_unavailable_reason
@@ -122,6 +126,42 @@ sub _validate_profile {
   push(@{$errors},"invalid platform token $token for $id") if($token !~ /^W\d{2}[A-Z]$/);
  }
  my $settings=ref($profile->{'data'}) eq 'HASH' ? $profile->{'data'}{'settings'} : undef;
+ my $modes=$profile->{data}{picture_modes};
+ if(defined($modes)) {
+  if(ref($modes) ne 'HASH') {push(@$errors,"picture_modes must be an object for $id");}
+  else {for my $signal(keys %$modes) {
+   if($signal !~ /^(?:sdr|hdr10|dv|hlg)$/ || ref($modes->{$signal}) ne 'HASH') {push(@$errors,"invalid picture-mode signal $signal for $id");next;}
+   for my $name(keys %{$modes->{$signal}}) {
+    my $row=$modes->{$signal}{$name};
+    if(ref($row) ne 'HASH') {push(@$errors,"invalid picture-mode record $name for $id");next;}
+    if(exists($row->{value})) {
+     push(@$errors,"picture-mode record $name missing $_ in $id") for grep {!exists($row->{$_})} qw(label settings_key settings_value aliases offered selection readback calibration source_ids);
+     push(@$errors,"picture-mode key and value differ for $name in $id") if(($row->{value}||'') ne $name);
+    }
+    for my $field(qw(value label settings_key settings_value)) {
+     push(@$errors,"invalid picture-mode $field for $name in $id") if(exists($row->{$field}) && (!defined($row->{$field}) || ref($row->{$field}) || $row->{$field} eq ''));
+    }
+    push(@$errors,"invalid picture-mode aliases for $name in $id") if(exists($row->{aliases}) && !_array_of_strings($row->{aliases}));
+    push(@$errors,"invalid picture-mode offered flag for $name in $id") if(exists($row->{offered}) && !JSON::PP::is_bool($row->{offered}));
+    for my $operation(qw(selection readback calibration)) {
+     next if(!exists($row->{$operation}));
+     my $op=$row->{$operation};
+     if(ref($op) ne 'HASH') {push(@$errors,"invalid picture-mode $operation for $name in $id");next;}
+     push(@$errors,"invalid picture-mode $operation state for $name in $id") if(exists($op->{support_state}) && ($op->{support_state}||'') !~ /^(?:unknown|unsupported|inventory|supported|verified)$/);
+     for my $field(qw(bank internal_mode)) {push(@$errors,"invalid picture-mode $field for $name in $id") if(exists($op->{$field}) && ref($op->{$field}));}
+     push(@$errors,"calibratable picture mode requires a bank for $name in $id") if($operation eq 'calibration' && ($op->{support_state}||'') =~ /^(?:inventory|supported|verified)$/ && (!$op->{bank} || !$op->{internal_mode}));
+     if($operation eq 'calibration' && $op->{bank} && $op->{internal_mode} && !ref($op->{bank}) && !ref($op->{internal_mode})) {
+      (my $wire=$op->{internal_mode})=~s/^dolby_hdr_/dolby_/;
+      push(@$errors,"inconsistent calibration wire namespace for $name in $id") if($wire ne $op->{bank});
+     }
+    }
+    if(exists($row->{source_ids})) {
+     if(!_array_of_strings($row->{source_ids})) {push(@$errors,"invalid picture-mode sources for $name in $id");}
+     else {push(@$errors,"unknown picture-mode source $_ for $name in $id") for grep {!$source_ids->{$_}} @{$row->{source_ids}};}
+    }
+   }
+  }}
+ }
  my $operations=ref($profile->{data}) eq 'HASH' ? $profile->{data}{operations} : undef;
  if(defined($operations)) {
   if(ref($operations) ne 'HASH') {push(@$errors,"operations must be an object for $id")}
@@ -235,6 +275,19 @@ sub load_lg_library {
   }
  }
  my @recipes;
+ my %declared_modes;
+ for my $profile (@profiles) {
+  my $signals=$profile->{data}{picture_modes};next if(ref($signals) ne 'HASH');
+  for my $signal(keys %$signals) {next if(ref($signals->{$signal}) ne 'HASH');for my $name(keys %{$signals->{$signal}}) {
+   $declared_modes{"$signal/$name"}=1 if(ref($signals->{$signal}{$name}) eq 'HASH' && exists($signals->{$signal}{$name}{value}));
+  }}
+ }
+ for my $profile (@profiles) {
+  my $signals=$profile->{data}{picture_modes};next if(ref($signals) ne 'HASH');
+  for my $signal(keys %$signals) {next if(ref($signals->{$signal}) ne 'HASH');for my $name(keys %{$signals->{$signal}}) {
+   push(@errors,"picture-mode patch has no complete declaration: $signal/$name") if(!$declared_modes{"$signal/$name"});
+  }}
+ }
  my %recipe_ids;
  my %recipe_controls;
  foreach my $profile (sort {($a->{priority}||0)<=>($b->{priority}||0)} grep {ref($_) eq 'HASH'} @profiles) {
@@ -446,6 +499,104 @@ sub lg_panel_light_binding {
  return {id=>'panel_light',label=>$oled?'OLED Pixel Brightness':'Panel brightness',wire_key=>$key,
   aliases=>\@aliases,readable=>$key ne '' ? JSON::PP::true : JSON::PP::false,
   writable=>@writable ? JSON::PP::true : JSON::PP::false};
+}
+
+# Editor planning uses the same contracts as runtime writes. Reference values
+# are targets, not copies of the TV's current settings or proof of a write.
+sub _mode_token {my $s=lc($_[0]||'');$s=~s/[\s_-]+//g;return $s;}
+sub _mode_aliases {
+ my ($row)=@_;
+ return grep {defined($_) && $_ ne ''} ($row->{value},$row->{settings_value},@{$row->{aliases}||[]},$row->{calibration}{bank},$row->{calibration}{internal_mode});
+}
+sub lg_picture_mode_catalogue {
+ my ($identity,%options)=@_;
+ my $profile=resolve_lg_capabilities($identity,(defined($options{root})?(root=>$options{root}):()));
+ return {} if(!$profile->{library_valid});
+ return _clone($profile->{data}{picture_modes}||{});
+}
+sub lg_picture_mode_record {
+ my ($identity,%options)=@_;
+ my $mode=$options{picture_mode}||'';
+ my $signal=_signal_name($options{signal_mode}||($mode=~/^dolby/i?'dv':$mode=~/^hdr/i?'hdr10':'sdr'));
+ my $rows=lg_picture_mode_catalogue($identity,%options)->{$signal}||{};
+ return _find_picture_mode_record($rows,$mode);
+}
+sub _find_picture_mode_record {
+ my ($rows,$mode)=@_;
+ my @matches=grep {my $row=$_;grep {$_ eq $mode} _mode_aliases($row)} values %$rows;
+ @matches=grep {my $row=$_;grep {_mode_token($_) eq _mode_token($mode)} _mode_aliases($row)} values %$rows if(!@matches);
+ # A hidden legacy application token can share a native selector with a real
+ # menu row. Exact internal tokens retain their identity; native reads prefer
+ # the offered row. Two offered matches are ambiguous and fail closed.
+ @matches=grep {$_->{offered}} @matches if(@matches>1);
+ return @matches == 1 ? $matches[0] : undef; # Ambiguous aliases must never select a bank.
+}
+sub lg_calibration_mode_contract {
+ my ($identity,%options)=@_;
+ my $profile=resolve_lg_capabilities($identity,(defined($options{root})?(root=>$options{root}):()));
+ my $mode=$options{picture_mode}||'';
+ my $signal=_signal_name($options{signal_mode}||($mode=~/^dolby/i?'dv':$mode=~/^hdr/i?'hdr10':'sdr'));
+ my $rows=$profile->{library_valid}?($profile->{data}{picture_modes}{$signal}||{}):{};
+ my @eligible=grep {($_->{calibration}{support_state}||'') =~ /^(?:inventory|supported|verified)$/ && $_->{calibration}{bank}} values %$rows;
+ my $record=_find_picture_mode_record($rows,$mode);
+ my $allowed=$record && grep {$_->{value} eq $record->{value}} @eligible;
+ my $alternatives=join(', ',map {$_->{label}} sort {$a->{label} cmp $b->{label}} grep {$_->{offered}} @eligible) || 'a reviewed SDR, HDR10 or Dolby Vision calibration mode';
+ return {allowed=>$allowed?JSON::PP::true:JSON::PP::false,signal_mode=>$signal,picture_mode=>$mode,
+  allowed_modes=>[map {_mode_aliases($_)} @eligible],alternatives=>$alternatives,
+  catalogue=>[map {$rows->{$_}} sort keys %$rows],mode=>$record,
+  message=>$allowed?'This mode is eligible for AutoCal; TV and settings support are checked before calibration.'
+   :"No reviewed AutoCal calibration bank is available for this picture mode. Choose $alternatives, or turn AutoCal off and enable readings. The selected picture mode has not been changed.",
+  capability_profile_hash=>$profile->{capability_profile_hash}};
+}
+
+sub lg_settings_selection_plan {
+ my ($identity,$requested,$live,%context)=@_;
+ $identity={} if(ref($identity) ne 'HASH');
+ $requested={} if(ref($requested) ne 'HASH');
+ $live={} if(ref($live) ne 'HASH');
+ my $profile=resolve_lg_capabilities($identity,(defined($context{root})?(root=>$context{root}):()));
+ my @aliases=qw(backlight oledLight oledPixelBrightness);
+ my $matrix=lg_setting_contracts($identity,%context,keys=>[keys %$requested,@aliases]);
+ my $known=$profile->{library_valid} && $profile->{platform_profile_applied};
+ my (%automatic,%manual,%blocked);
+ for my $key (sort keys %$requested) {
+  next if(grep {$_ eq $key} @aliases);
+  my $c=$matrix->{contracts}{$key}||{};
+  my ($valid,$value,$error)=lg_normalize_setting_value($c,$requested->{$key});
+  my $reason=!$known?'TV compatibility has not been identified':!$c->{declared}?'No declared TV setting contract':!$valid?$error:
+   ($c->{write_decision}||'') =~ /^(?:blocked|not_applicable)$/?'Not writable in this signal or picture mode':
+   ($c->{write_state}||'') eq 'mismatch_in_context'?'Previous write did not match readback':
+   (!$c->{allow_unverified_readback} && (($c->{read_state}||'') eq 'unsupported_in_context' || ($c->{read_decision}||'') eq 'blocked' || lg_readback_unavailable_reason($live->{unsupported_picture_keys}{$key}||'')))?'Automatic readback is unavailable':undef;
+  if(defined($reason)) {
+   my $entry={value=>$requested->{$key},reason=>$reason};
+   if($known && (!$valid || ($c->{write_decision}||'') =~ /^(?:blocked|not_applicable)$/)) {$blocked{$key}=$entry;}
+   else {$manual{$key}=$entry;}
+  } else {$automatic{$key}=$value;}
+ }
+ my $values=$live->{picture_settings}||{};
+ my %native=map {$_=>1} @{$live->{supported_picture_keys}||[]};
+ my %panel_values=map {$_=>$values->{$_}} grep {defined($values->{$_}) && (!$live->{virtual_picture_settings} || $native{$_}) && !exists($live->{unsupported_picture_keys}{$_})} @aliases;
+ my $panel=lg_panel_light_binding($identity,\%panel_values,$matrix->{contracts});
+ $panel->{wire_key}='' if(!$known);
+ if(!$panel->{wire_key} && $known) {
+  my $key=$profile->{data}{settings}{logical_controls}{panel_light}{preferred_wire_key}||'';
+  my $c=$matrix->{contracts}{$key}||{};
+  if($key && $c->{declared} && ($c->{write_decision}||'') !~ /^(?:blocked|not_applicable)$/) {
+   $panel->{wire_key}=$key;$panel->{writable}=JSON::PP::true;$panel->{source}='tv_matrix';
+  }
+ }
+ $panel->{source}||=$panel->{wire_key}?'native_readback':'unresolved';
+ $panel->{target_available}=$panel->{wire_key} && $panel->{writable}
+  && ($matrix->{contracts}{$panel->{wire_key}}{read_state}||'') ne 'unsupported_in_context'
+  && !lg_readback_unavailable_reason($live->{unsupported_picture_keys}{$panel->{wire_key}}||'')
+  && ($matrix->{contracts}{$panel->{wire_key}}{read_decision}||'') ne 'blocked' ? JSON::PP::true : JSON::PP::false;
+ $panel->{writable}=JSON::PP::false if(!$known || (!$panel->{target_available} && !$matrix->{contracts}{$panel->{wire_key}}{allow_unverified_readback})
+  || ($matrix->{contracts}{$panel->{wire_key}}{write_state}||'') eq 'mismatch_in_context');
+ $panel->{target_available}=JSON::PP::false if(!$panel->{writable});
+ return {known=>$known?JSON::PP::true:JSON::PP::false,model_name=>$identity->{model_name}||'',
+  automatic=>\%automatic,manual=>\%manual,blocked=>\%blocked,panel_light=>$panel,
+  calibration_mode=>lg_calibration_mode_contract($identity,%context),
+  setting_contracts=>$matrix->{contracts},context=>$matrix->{context},capability_profile_hash=>$matrix->{capability_profile_hash}};
 }
 
 sub lg_scoped_request_payload {

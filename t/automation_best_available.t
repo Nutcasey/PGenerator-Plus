@@ -24,9 +24,9 @@ my $refusal='Some keys are not allowed for the request';
 my $missing_brightness=0;
 local *main::webui_lg_picture_settings=sub {
  my $req=PGAutomation::decode_json($_[0]);
- my $matrix=lg_setting_contracts($identity,category=>'picture',signal_mode=>'sdr',picture_mode=>'filmMaker',tv_input=>'hdmi1',keys=>$req->{keys});
+ my $matrix=lg_setting_contracts($identity,category=>'picture',signal_mode=>$req->{signal_mode}||'sdr',picture_mode=>$req->{picture_mode}||'filmMaker',tv_input=>'hdmi1',keys=>$req->{keys});
  my $profile=resolve_lg_capabilities($identity);
- my %read=(pictureMode=>'filmMaker',brightness=>50,contrast=>85,backlight=>50,color=>50,energySaving=>'off');
+ my %read=(pictureMode=>$req->{picture_mode}||'filmMaker',brightness=>50,contrast=>85,backlight=>50,color=>50,energySaving=>'off');
  delete $read{brightness} if $missing_brightness;
  my @native=grep {exists($read{$_}) && $_ ne 'pictureMode'} @{$req->{keys}};
  return PGAutomation::encode_json({status=>'ok',current_input=>'hdmi1',lg_generation=>$identity,
@@ -72,6 +72,14 @@ $job->{panel_light}={policy=>'target',key=>'backlight'};
  ok(!$run->()->{ready},'target-luminance readiness cannot waive panel readback');
 }
 delete $job->{panel_light};
+for my $case (['hdr10','hdrFilmMaker'],['dv','dolbyVisionFilmMaker']) {
+ local $job->{signal_format}=$case->[0];local $job->{picture_mode}=$case->[1];
+ local $job->{settings}={brightness=>50,noiseReduction=>'off'};
+ my $result=$run->();
+ ok($result->{ready},"C1 $case->[0] job readiness accepts the five-key policy with missing readback") or diag(PGAutomation::encode_json($result->{checks}));
+ ok($result->{items}[0]{best_available_settings}{manual}{noiseReduction},"$case->[0] readiness retains manual instructions for other settings");
+ ok(grep({$_->{level} eq 'warning' && $_->{message}=~/brightness.*labelled unverified/} @{$result->{checks}}),"$case->[0] accepted-only path is never presented as verified");
+}
 $identity={model_name=>'OLED55G36LA',series=>'G3',platform_model=>'W23O',platform_year=>2023,generation_id=>'lg2022plus_oled',software_version=>'23.25.55'};
 ok(!$run->()->{ready},'modern TV still blocks these missing controls under its own matrix');
 done_testing();

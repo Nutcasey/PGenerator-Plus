@@ -82,6 +82,16 @@
  #automationCard .auto-luminance-control input[type=range]{flex:1;min-width:80px}
  #automationCard .auto-luminance-control input[type=number]{width:90px}
  #automationCard .auto-section-title{display:flex;align-items:center;justify-content:space-between;gap:12px}
+ #automationCard .auto-compatibility{--compatibility-color:var(--status-warning);display:flex;align-items:center;flex-wrap:wrap;gap:12px 18px;margin:16px 0;padding:14px 16px;border:1px solid var(--border);border-inline-start:4px solid var(--compatibility-color);border-radius:8px;background:var(--surface-inset)}
+ #automationCard .auto-compatibility[data-state=checking]{--compatibility-color:var(--accent)}
+ #automationCard .auto-compatibility[data-state=checked]{--compatibility-color:var(--status-success)}
+ #automationCard .auto-compatibility[data-state=error]{--compatibility-color:var(--status-error)}
+ #automationCard .auto-compatibility-copy{flex:1 1 330px;min-width:0}
+ #automationCard .auto-compatibility-heading{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 12px;margin-bottom:6px}
+ #automationCard .auto-compatibility-heading h3{margin:0}
+ #automationCard .auto-compatibility-state{font-weight:600;color:var(--compatibility-color)}
+ #automationCard .auto-compatibility p{margin:0;line-height:1.5}
+ #automationCard .auto-compatibility .btn{min-height:36px;white-space:normal}
  #automationCard .auto-editor-actions{position:sticky;bottom:-20px;padding:14px 0;margin-bottom:0;background:var(--surface-modal);border-top:1px solid var(--border);z-index:2}
  #automationCard details{margin:12px 0}
  #automationCard summary{cursor:pointer;font-weight:600;padding:8px 0}
@@ -150,6 +160,9 @@
    <button class="btn btn-sm btn-secondary" id="pgAutomationReadinessButton" type="button" onclick="pgAutomationReadiness()">Check Readiness</button>
    <button class="btn btn-sm btn-primary" id="pgAutomationSavePendingButton" type="button" style="display:none" onclick="pgAutomationEditActiveQueue()">Save Pending Changes</button>
   </div>
+  <div id="pgAutomationActionBlocker" class="auto-muted" role="status" hidden></div>
+  <div id="pgAutomationReadiness" aria-live="polite"></div>
+  <p class="auto-muted">Check Readiness validates the queue and checks the first job’s TV controls in the current signal and picture mode. It does not switch the TV. Other jobs are checked when they start.</p>
   <div class="auto-queue-header">
    <div><h3 id="pgAutomationJobsHeading">Jobs</h3><span id="pgAutomationQueueSaveState" class="auto-muted" aria-live="polite"></span></div>
    <div class="auto-actions">
@@ -174,7 +187,6 @@
    </div></details>
   </div>
   <p class="auto-muted">Later items in the same picture mode replace its settings and calibration. Earlier results stay in history.</p>
-  <div id="pgAutomationReadiness" aria-live="polite"></div>
  </div>
  <dialog id="pgAutomationQueueDialog" aria-labelledby="pgAutomationQueueDialogTitle" oncancel="if(pgAutomationEl('QueueDialogSave').disabled)event.preventDefault()">
   <form onsubmit="event.preventDefault();pgAutomationSubmitQueueName()">
@@ -195,8 +207,15 @@
   <div class="auto-editor-section auto-fields">
    <div class="field"><label for="pgAutomationRecipeName">Item name</label><input id="pgAutomationRecipeName" maxlength="120"></div>
    <div class="field"><label for="pgAutomationSignal">Signal format</label><select id="pgAutomationSignal" onchange="pgAutomationModesChanged();pgAutomationSignalDefaults()"><option value="sdr">SDR</option><option value="hdr10">HDR10</option><option value="hlg">HLG</option><option value="dv">Dolby Vision</option></select></div>
-   <div class="field"><label for="pgAutomationPictureMode">Picture mode</label><select id="pgAutomationPictureMode" onchange="pgAutomationModeChanged()"></select></div>
+   <div class="field"><label for="pgAutomationPictureMode">Picture mode</label><select id="pgAutomationPictureMode" aria-describedby="pgAutomationModeEligibility" onchange="pgAutomationModeChanged()"></select><span id="pgAutomationModeEligibility" class="auto-muted" role="status"></span></div>
   </div>
+  <section id="pgAutomationCompatibility" class="auto-compatibility" data-state="required" aria-labelledby="pgAutomationCompatibilityTitle">
+   <div class="auto-compatibility-copy" role="status" aria-live="polite" aria-atomic="true">
+    <div class="auto-compatibility-heading"><h3 id="pgAutomationCompatibilityTitle">TV compatibility</h3><span id="pgAutomationCompatibilityState" class="auto-compatibility-state">Check required</span></div>
+    <p id="pgAutomationCompatibilityDetail">Required before saving. Connect your TV, then check which controls this job can use.</p>
+   </div>
+   <button id="pgAutomationCompatibilityButton" class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationResolveSettingsPlan()">Check TV compatibility</button>
+  </section>
   <div class="auto-editor-section auto-step">
    <h3>Workflow</h3>
    <p id="pgAutomationWorkflowHelp" class="auto-muted"></p>
@@ -249,17 +268,18 @@
   <div class="auto-editor-section auto-step">
    <h3 id="pgAutomationPanelHeading">TV Settings and 100% White Luminance</h3>
    <p class="auto-muted">Pin the controls this item should enforce. Values are checked before readings and reapplied after calibration resets. Energy saving and AI picture are disabled where supported unless pinned otherwise.</p>
-   <p class="auto-muted">New jobs start with reference picture settings for the selected signal and mode. These are LG OLED starting values, not confirmed TV values. Edit them below, or use the TV's settings to replace readable values. Unavailable controls keep their prepared values.</p>
+   <p class="auto-muted">New jobs start with reference defaults for this picture mode, filtered by your TV’s compatibility matrix. Settings that cannot be controlled safely are listed as manual checks. Use TV Settings copies current readable values instead. Support is checked again before calibration.</p>
    <div class="auto-toolbar"><button class="btn btn-sm btn-secondary" id="pgAutomationKeysButton" type="button" onclick="pgAutomationLoadSupportedKeys()">Use TV Settings</button><button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationResetPictureDefaults()">Restore Reference Defaults</button><span id="pgAutomationSettingsStatus" class="auto-muted"></span></div>
    <details><summary>Picture Controls — Defaults and Overrides</summary><div class="auto-toolbar"><button class="btn btn-sm btn-secondary" id="pgAutomationSelectAllSettings" type="button" onclick="pgAutomationSelectSettings(true)">Select All</button><button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationSelectSettings(false)">Clear Selection</button><span class="auto-muted">Only ticked controls are applied. Select All uses configured values, not blank controls. Panel light follows the policy below.</span></div><div id="pgAutomationSettingsEditor" class="auto-settings"></div></details>
    <textarea id="pgAutomationSettings" style="display:none">{}</textarea>
+   <p id="pgAutomationManualSettings" class="auto-muted" role="status"></p>
    <select id="pgAutomationPanelPolicy" hidden aria-hidden="true" tabindex="-1"><option value="fixed">fixed</option><option value="target">target</option></select>
    <div id="pgAutomationPanelChoices" class="auto-fields" style="margin-top:14px" role="group" aria-label="Panel brightness policy">
     <label class="auto-choice"><strong><input id="pgAutomationPanelFixed" name="pgAutomationPanelPolicyChoice" type="radio" value="fixed" onchange="pgAutomationSetPanelPolicy('fixed')">Fixed Backlight / OLED Brightness</strong><span class="auto-muted">Set a control value (0–100). Measure its 100% white at run time and use that luminance for 1D AutoCal.</span></label>
     <label class="auto-choice" id="pgAutomationPanelTargetChoice"><strong><input id="pgAutomationPanelTargetRadio" name="pgAutomationPanelPolicyChoice" type="radio" value="target" onchange="pgAutomationSetPanelPolicy('target')">Target 100% White Luminance</strong><span class="auto-muted">Automatically adjust the panel-light control to reach your setup luminance before SDR AutoCal.</span></label>
    </div>
    <div class="auto-fields" style="margin-top:14px">
-    <div class="field"><label for="pgAutomationPanelKey">Panel-light control</label><select id="pgAutomationPanelKey"></select></div>
+    <div class="field"><span>TV-selected panel control</span><input id="pgAutomationPanelKey" type="hidden"><strong id="pgAutomationPanelBinding" role="status">Identifying TV…</strong><span id="pgAutomationPanelBindingHelp" class="auto-muted"></span></div>
     <div class="field" id="pgAutomationPanelFixedField"><label for="pgAutomationPanelValue">Fixed backlight / OLED brightness (0–100)</label><div class="auto-luminance-control"><input id="pgAutomationPanelSlider" type="range" min="0" max="100" step="1" aria-label="Fixed panel brightness" oninput="pgAutomationEl('PanelValue').value=this.value"><input id="pgAutomationPanelValue" type="number" min="0" max="100" step="1" oninput="pgAutomationEl('PanelSlider').value=this.value"></div></div>
     <div class="field" id="pgAutomationPanelTargetField"><label for="pgAutomationPanelTarget">Setup 100% white luminance (cd/m² / nits)</label><input id="pgAutomationPanelTarget" type="number" min="1" value="100"></div>
    </div>

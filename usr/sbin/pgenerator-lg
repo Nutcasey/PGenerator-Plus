@@ -23,6 +23,9 @@ use PGLGCapabilities qw(
  lg_recipe
  lg_readback_unavailable_reason
  lg_panel_light_binding
+ lg_picture_mode_catalogue
+ lg_picture_mode_record
+ lg_calibration_mode_contract
  lg_operation_contract
  lg_normalize_setting_value
  lg_record_setting_observation
@@ -47,6 +50,7 @@ $SIG{PIPE}="IGNORE";
 sub map_picture_mode_label_to_ddc_name (@) {
  my $label=shift;
  my $signal_mode=shift;
+ my $generation=shift;
  $label="" if(!defined($label));
  $label=~s/^\s+//;
  $label=~s/\s+$//;
@@ -57,6 +61,9 @@ sub map_picture_mode_label_to_ddc_name (@) {
  my $token=lc($label);
  $token =~ s/[\s_\-]+//g;
  return "" if($token eq "");
+ my $catalogue_mode=lg_picture_mode_record($generation||{},picture_mode=>$label,signal_mode=>$signal_mode);
+ return "" if($catalogue_mode && ($catalogue_mode->{selection}{support_state}||'') eq 'unsupported');
+ return $catalogue_mode->{settings_value} if($catalogue_mode);
  # Remember the original token; we must not mutate the canonical
  # lookup key (e.g. "hdrcinema" must not become "cinema" just because
  # the prefix-stripper also matches "hdr" as a substring).
@@ -673,11 +680,13 @@ sub websocket_connect_candidate (@) {
  my $session;
  if($scheme eq "wss") {
   my ($reader,$writer);
-  # socat's -T is an INACTIVITY timeout, not a connect timeout; on its own it
-  # does nothing for a TV that never answers the SYN. connect-timeout is the
-  # address option that actually bounds the connect phase.
+  # Bound connection establishment, not inactivity between TV requests.
+  # Matrix resolution and LUT preparation on the Pi can exceed this budget
+  # while a healthy authenticated socket is idle. A socat -T timer killed
+  # that socket before reset began. Reads have their own deadlines and
+  # websocket_close reaps this child with a bounded TERM/KILL escalation.
   my $ctimeout=&connect_timeout_for($timeout);
-  my $pid=eval { IPC::Open2::open2($reader,$writer,"sh","-c","exec socat -T $timeout - OPENSSL:$host:$port,verify=0,connect-timeout=$ctimeout 2>/dev/null"); };
+  my $pid=eval { IPC::Open2::open2($reader,$writer,"sh","-c","exec socat - OPENSSL:$host:$port,verify=0,connect-timeout=$ctimeout 2>/dev/null"); };
   return undef if(!$pid);
   binmode($reader);
   binmode($writer);
@@ -1810,7 +1819,7 @@ sub lg_picture_factory_default_values (@) {
     my $payload={ category => "picture", key => $key };
     $payload->{"dimension"}=$dimension if(ref($dimension) eq "HASH" && %{$dimension});
     my $response=&lg_request($session,"get_factory_default_$key",$uri,$payload,$timeout);
-    my ($failed,$message)=&response_is_app_failure($response);
+    my ($failed,$message)=&response_is_app_failure_or_missing($response);
     push(@attempts,{ path => $uri, key => $key, payload => $payload, response => $response, failed => &json_bool($failed), message => $message });
     next if($failed || ref($response) ne "HASH" || ref($response->{"payload"}) ne "HASH" || ref($response->{"payload"}{"settings"}) ne "HASH");
     if(exists($response->{"payload"}{"settings"}{$key})) {
@@ -1864,7 +1873,7 @@ sub lg_picture_apply_factory_defaults (@) {
   my $response=$attempt->{"luna"}
    ? &lg_luna_request($session,"apply_factory_defaults_luna",$path,$payload,$timeout)
    : &lg_request($session,"apply_factory_defaults",$path,$payload,$timeout);
-  my ($failed,$message)=&response_is_app_failure($response);
+  my ($failed,$message)=&response_is_app_failure_or_missing($response);
   my $entry={ path => $path, payload => $payload, response => $response, failed => &json_bool($failed), message => $message };
   $entry->{"key"}=$key if(defined($key) && $key ne "");
   push(@attempts,$entry);
@@ -1967,7 +1976,7 @@ sub lg_picture_delete_settings_reset (@) {
   my $response=$path_info->{"luna"}
    ? &lg_luna_request($session,"delete_picture_settings_luna",$path,$payload,$timeout)
    : &lg_request($session,"delete_picture_settings",$path,$payload,$timeout);
-  my ($failed,$message)=&response_is_app_failure($response);
+  my ($failed,$message)=&response_is_app_failure_or_missing($response);
   my $entry={ path => $path, payload => $payload, response => $response, failed => &json_bool($failed), message => $message };
   $entry->{"key"}=$key if(defined($key) && $key ne "");
   push(@attempts,$entry);
@@ -2149,7 +2158,7 @@ sub lg_picture_reset_workflow (@) {
 	 my $response=$use_luna
 	  ? &lg_luna_request($session,"reset_picture_settings_luna",$path,$payload,$connect_timeout + 3)
 	  : &lg_request($session,"reset_picture_settings",$path,$payload,$connect_timeout + 3);
-	 my ($failed,$message)=&response_is_app_failure($response);
+	 my ($failed,$message)=&response_is_app_failure_or_missing($response);
 	 my $entry={ path => $path, payload => $payload, response => $response, failed => &json_bool($failed), message => $message };
 	 $entry->{"key"}=$key if(defined($key) && $key ne "");
 	 push(@reset_attempts,$entry);
@@ -2220,7 +2229,7 @@ sub lg_picture_reset_workflow (@) {
   my $response=$use_luna
    ? &lg_luna_request($session,"reset_picture_white_balance_luna",$path,$payload,$connect_timeout + 3)
    : &lg_request($session,"reset_picture_white_balance",$path,$payload,$connect_timeout + 3);
-  my ($failed,$message)=&response_is_app_failure($response);
+  my ($failed,$message)=&response_is_app_failure_or_missing($response);
   my $entry={ path => $path, payload => $payload, response => $response, failed => &json_bool($failed), message => $message };
   $entry->{"key"}=$key if(defined($key) && $key ne "");
   push(@white_balance_reset_attempts,$entry);
@@ -2261,7 +2270,7 @@ sub lg_picture_reset_workflow (@) {
   my $response=$use_luna
    ? &lg_luna_request($session,"reset_picture_panel_light_luna","com.webos.settingsservice/resetSystemSettings",$payload,$connect_timeout + 3)
    : &lg_request($session,"reset_picture_panel_light","settings/resetSystemSettings",$payload,$connect_timeout + 3);
-  my ($failed,$message)=&response_is_app_failure($response);
+  my ($failed,$message)=&response_is_app_failure_or_missing($response);
   push(@panel_reset_attempts,{ path => $path, payload => $payload, response => $response, failed => &json_bool($failed), message => $message });
   $panel_reset_ok=1 if(!$failed && ref($response) eq "HASH");
   return $failed ? 0 : 1;
@@ -2317,7 +2326,7 @@ foreach my $attempt (@panel_payloads) {
 	 };
 	 my $ui_data_start=($signal_mode eq "" || $signal_mode eq "sdr") && ($reset_allowed{brightness} || $reset_allowed{contrast})
 	  ? &lg_calibration_request($session,"picture_reset_ui_data_cal_start","CAL_START",$ui_data_cal_payload,1,$active_picture_mode,$connect_timeout + 4) : undef;
-	 my ($ui_data_start_failed,$ui_data_start_message)=&response_is_app_failure($ui_data_start);
+	 my ($ui_data_start_failed,$ui_data_start_message)=&response_is_app_failure_or_missing($ui_data_start);
 	 push(@{$ui_data_reset_attempts},{ command => "CAL_START", response => $ui_data_start, failed => &json_bool($ui_data_start_failed), message => $ui_data_start_message||"" });
 	 if(!$ui_data_start_failed && ref($ui_data_start) eq "HASH") {
 	  foreach my $ui_item (
@@ -2940,8 +2949,10 @@ sub lg_ddc_baseline_path (@) {
 }
 
 sub lg_picture_mode_for_calibration (@) {
- my $picture_mode=shift;
+ my ($picture_mode,$generation,$signal_mode)=@_;
  $picture_mode="" if(!defined($picture_mode));
+ my $catalogue_mode=lg_picture_mode_record($generation||{},picture_mode=>$picture_mode,signal_mode=>$signal_mode);
+ return $catalogue_mode->{calibration}{internal_mode}||"" if($catalogue_mode);
  my $mode_lc=lc($picture_mode);
  # These selectable picture controls are not calibration targets until their
  # external-PQ namespaces and persistence have been validated on hardware.
@@ -3678,22 +3689,9 @@ sub lg_3d_lut_resolve_mode (@) {
  my $active_picture_mode=$picture_mode||"";
  $active_picture_mode=&lg_current_picture_mode($session,$timeout) if($active_picture_mode eq "");
  $active_picture_mode=&lg_resolve_ddc_picture_mode($ip,$picture_mode,$signal_mode) if($active_picture_mode eq "" && ref($generation) eq "HASH" && $generation->{"ddc_only_white_balance"});
- # The generic DDC fallback calls the dark reference mode dolbyVisionCinema.
- # On 2019-2021 LG OLEDs (including C9/CX/C1) its menu label is Cinema, but
- # the calibration wire mode is Cinema Dark, represented internally by
- # dolbyVisionFilmMaker. Newer sets expose the same dark reference preset as
- # Filmmaker, so only the pre-2022 generations need this canonical remap.
- my $generation_id=(ref($generation) eq "HASH") ? ($generation->{"generation_id"}||"") : "";
- my $platform_year=(ref($generation) eq "HASH") ? int($generation->{"platform_year"}||0) : 0;
- my $pre2022_dv_cinema=($platform_year >= 2019 && $platform_year <= 2021)
-  || $generation_id =~ /^lg(?:2019|2020|2021|pre2022)_oled$/;
- my $token=lc($active_picture_mode||"");
- $token =~ s/[\s_-]+//g;
- my $dv_mode=(lc($signal_mode||"") eq "dv" || $token =~ /^dolby(?:vision|hdr)/) ? 1 : 0;
- if($pre2022_dv_cinema && $dv_mode) {
-  $active_picture_mode="dolbyVisionFilmMaker" if($token eq "dolbyvisioncinema" || $token eq "dolbyhdrcinema");
- }
- return ($active_picture_mode,&lg_picture_mode_for_calibration($active_picture_mode));
+ # Menu aliases and generation-specific banks are resolved by the catalogue;
+ # preserve the user's selection in receipts rather than silently rename it.
+ return ($active_picture_mode,&lg_picture_mode_for_calibration($active_picture_mode,$generation,$signal_mode));
 }
 
 sub lg_3d_lut_probe_workflow (@) {
@@ -4353,17 +4351,17 @@ sub lg_hdr_calman_reset_workflow (@) {
   return &json_error("This LG TV does not match a reviewed 2020-or-newer 3D LUT geometry profile. No HDR calibration reset was attempted.",{ ip => $ip, lg_generation => $generation, generation_profile => &lg_generation_profile($generation) });
  }
  my ($active_picture_mode,$cal_mode)=&lg_3d_lut_resolve_mode($session,$ip,$picture_mode,$generation,$connect_timeout + 2,"hdr10");
+ my $admission=lg_calibration_mode_contract($generation,picture_mode=>$active_picture_mode,signal_mode=>'hdr10');
+ if(!$admission->{allowed}) {
+  &websocket_close($session);
+  return &json_error($admission->{message}." No calibration reset was sent.",{
+   ip=>$ip,active_picture_mode=>$active_picture_mode,calibration_picture_mode=>$cal_mode,
+   error_code=>"lg-calibration-mode-unsupported",calibration_mode_contract=>$admission,
+  });
+ }
  if($cal_mode eq "" || $cal_mode !~ /^hdr_/) {
   &websocket_close($session);
   return &json_error("HDR reset requires an active HDR picture mode.",{ ip => $ip, active_picture_mode => $active_picture_mode, calibration_picture_mode => $cal_mode });
- }
- if($cal_mode eq "hdr_cinema_bright") {
-  &websocket_close($session);
-  return &json_error("HDR Cinema Home is not a supported LG AutoCal mode. Select HDR Cinema, Filmmaker or Game explicitly, or use readings only. No calibration reset was sent.",{
-   ip => $ip, active_picture_mode => $active_picture_mode,
-   calibration_picture_mode => $cal_mode,
-   error_code => "lg-calibration-mode-unsupported",
-  });
  }
  # HDR10 Full Auto Cal makes no picture-mode reset call, so this workflow is
  # where the preflight guard's evidence has to come from: same probe, same
@@ -6129,6 +6127,9 @@ sub lg_generation_profile (@) {
   capability_library_valid => exists($resolved->{"library_valid"}) ? $resolved->{"library_valid"} : &json_false(),
   capability_applied_profiles => ref($resolved->{"applied_profiles"}) eq "ARRAY" ? $resolved->{"applied_profiles"} : [],
   calibration_capabilities => $calibration,
+  # Reuse this resolution: resolving the full library a second time here
+  # adds seconds of local work between requests on the appliance.
+  picture_mode_catalogue => ($resolved->{"library_valid"} && ref($data->{"picture_modes"}) eq "HASH") ? $data->{"picture_modes"} : {},
   settings_capabilities => ref($data->{"settings"}) eq "HASH" ? $data->{"settings"} : {},
   capability_warnings => ref($resolved->{"warnings"}) eq "ARRAY" ? $resolved->{"warnings"} : [],
  };
@@ -6632,7 +6633,7 @@ sub lg_picture_set_workflow (@) {
  # current PGenerator signal mode, refuse the request if the resolved
  # canonical name is not valid in that signal mode (LG WebOS exposes
  # different picture-mode namespaces for SDR / HDR10 / HLG / DV).
- my $mapped_caller_picture_mode=($caller_picture_mode ne "") ? &map_picture_mode_label_to_ddc_name($caller_picture_mode,$signal_mode) : "";
+ my $mapped_caller_picture_mode=($caller_picture_mode ne "") ? &map_picture_mode_label_to_ddc_name($caller_picture_mode,$signal_mode,$generation) : "";
  if($caller_picture_mode ne "" && $mapped_caller_picture_mode eq "") {
   &websocket_close($session);
   &diag_log_append("picture_set:invalid-label",{ ip => $ip, requested_picture_mode => $caller_picture_mode, signal_mode => $signal_mode });
@@ -7667,7 +7668,7 @@ sub lg_remote_control_workflow (@) {
 # token or a failed probe is not evidence of a disagreement, and callers use
 # this to decide whether to stop a calibration.
 sub lg_picture_mode_tokens_agree (@) {
- my ($a,$b,$signal_mode)=@_;
+ my ($a,$b,$signal_mode,$generation)=@_;
  $a="" if(!defined($a));
  $b="" if(!defined($b));
  return 1 if($a eq "" || $b eq "");
@@ -7677,8 +7678,8 @@ sub lg_picture_mode_tokens_agree (@) {
  # is the fail-safe direction (a spurious stop, never a silent wrong-mode
  # run), but it means the "unknown is not a disagreement" contract above holds
  # only when at least one side is empty, not when a side is merely unmapped.
- my $want=&map_picture_mode_label_to_ddc_name($a,$signal_mode) || $a;
- my $have=&map_picture_mode_label_to_ddc_name($b,$signal_mode) || $b;
+ my $want=&map_picture_mode_label_to_ddc_name($a,$signal_mode,$generation) || $a;
+ my $have=&map_picture_mode_label_to_ddc_name($b,$signal_mode,$generation) || $b;
  return (lc($want) eq lc($have)) ? 1 : 0;
 }
 
@@ -7731,9 +7732,9 @@ sub lg_picture_mode_probe (@) {
  return (
   tv_picture_mode => $tv_picture_mode,
   picture_mode_readable => $picture_mode_readable ? &json_true() : &json_false(),
-  tv_picture_mode_matches => &lg_picture_mode_tokens_agree($wanted_picture_mode,$tv_picture_mode,$signal_mode) ? &json_true() : &json_false(),
+  tv_picture_mode_matches => &lg_picture_mode_tokens_agree($wanted_picture_mode,$tv_picture_mode,$signal_mode,$generation) ? &json_true() : &json_false(),
   last_written_picture_mode => $last_written_picture_mode,
-  last_written_picture_mode_matches => &lg_picture_mode_tokens_agree($wanted_picture_mode,$last_written_picture_mode,$signal_mode) ? &json_true() : &json_false(),
+  last_written_picture_mode_matches => &lg_picture_mode_tokens_agree($wanted_picture_mode,$last_written_picture_mode,$signal_mode,$generation) ? &json_true() : &json_false(),
  );
 }
 
@@ -8115,15 +8116,21 @@ our $CALIBRATION_START_RETRY_DELAY=2;
 # closed. A successful CAL_START response remains mandatory.
 sub lg_calibration_start_with_retry (@) {
  my ($session,$cal_mode,$timeout)=@_;
+ # Legacy resolvers can supply the wire name (dolby_cinema_dark), while
+ # native readback maps to the internal dolby_hdr_cinema_dark spelling.
+ # Normalize only retry eligibility; do not broaden other workflows' rules
+ # for tolerating a rejected command or change the mode sent on the wire.
+ my $retry_mode=$cal_mode||'';
+ $retry_mode=~s/^dolby_(?!hdr_)/dolby_hdr_/;
  my ($response,$observed);
  my $attempt=0;
  while(++$attempt<=3) {
   $response=&lg_calibration_request($session,"calibration_mode_start_$attempt","CAL_START",undef,1,$cal_mode,$timeout);
   last if(&lg_calibration_start_confirmed($response) || $attempt==3);
   my ($failed,$message)=&response_is_app_failure($response);
-  last if(!$failed || !&lg_dv_calibration_session_rejection_is_tolerable($response,$message,$cal_mode));
+  last if(!$failed || !&lg_dv_calibration_session_rejection_is_tolerable($response,$message,$retry_mode));
   $observed=&lg_current_picture_mode($session,$timeout,"calibration_retry_picture_mode_$attempt");
-  last if($observed eq "" || &lg_picture_mode_for_calibration($observed) ne $cal_mode);
+  last if($observed eq "" || &lg_wire_pic_mode(&lg_picture_mode_for_calibration($observed)) ne &lg_wire_pic_mode($cal_mode));
   &diag_log_append("calibration_mode:start-retry",{
    attempt => $attempt, next_attempt => $attempt+1, picture_mode => $observed,
    calibration_picture_mode => $cal_mode, message => $message,

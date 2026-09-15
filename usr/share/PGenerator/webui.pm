@@ -24,7 +24,7 @@ use PGCalibrationMath qw(
 use PGSignalCode qw(
  signal_code_nominal_range signal_code_policy signal_percent_to_code
 );
-use PGLGCapabilities qw(lg_recipe lg_setting_contracts lg_setting_values_agree lg_normalize_setting_value lg_operation_contract lg_best_settings_plan);
+use PGLGCapabilities qw(lg_recipe lg_setting_contracts lg_setting_values_agree lg_normalize_setting_value lg_operation_contract lg_best_settings_plan lg_settings_selection_plan lg_calibration_mode_contract);
 use Fcntl qw(O_NONBLOCK O_WRONLY LOCK_EX LOCK_UN);
 use File::Path qw(make_path);
 use JSON::PP ();
@@ -13046,6 +13046,8 @@ sub webui_automation_item_summary (@) {
   status=>$item->{status}||"queued",
  };
  $summary->{failure}=PGAutomation::clone($item->{failure}) if(ref($item->{failure}) eq "HASH");
+ $summary->{readiness}={checks=>&webui_automation_scrub_credentials($item->{readiness}{checks})}
+  if(ref($item->{readiness}) eq 'HASH' && ref($item->{readiness}{checks}) eq 'ARRAY');
  $summary->{warnings}=PGAutomation::clone($item->{warnings}) if(ref($item->{warnings}) eq "ARRAY" && @{$item->{warnings}});
  $summary->{active_stage}=$item->{active_stage} if($item->{active_stage});
  return $summary;
@@ -13470,13 +13472,8 @@ sub webui_automation_dv_supported (@) {
 }
 
 sub webui_automation_calibration_mode_ok (@) {
- my $mode=lc(shift||"");
- $mode=~s/[\s_-]+//g;
- # Selecting a picture preset does not imply that it has an AutoCal memory.
- # HDR Cinema Home rejects CAL_START on the G3; unlike Dolby Vision Home,
- # it is not among Portrait's documented LG HDR AutoCal modes.
- return 0 if($mode=~/^hdrcinema(?:home|bright)$/);
- return $mode=~/^(?:expert1|expert2|isfexpert1|isfexpert2|technicolor|technicolorexpert|filmmaker|filmmakermode|cinema|cinemahome|game|hdrcinema|hdrcinemabright|hdrfilmmaker|hdrgame|hdrtechnicolor|hdrtechnicolorexpert|dolbyvisioncinema|dolbyvisioncinemahome|dolbyvisioncinemabright|dolbyvisiongame|dolbyvisionvivid|dolbyvisionfilmmaker|dolbyvisionstandard|dolbyhdr[a-z]+)$/ ? 1 : 0;
+ my ($mode,$signal,$identity)=@_;
+ return lg_calibration_mode_contract($identity||{},picture_mode=>$mode,signal_mode=>$signal)->{allowed}?1:0;
 }
 
 sub webui_automation_normalize_item (@) {
@@ -13504,7 +13501,7 @@ sub webui_automation_normalize_item (@) {
  # template-version migration, not a model-specific capability decision.
  if(($item->{template_id}||"") =~ /^(?:reference-settings-v[123]|colourstrue-six-modes-v1)$/) {
   delete $item->{settings}{truMotionMode} if(($item->{settings}{truMotionMode}||"") eq "off");
-  $item->{manual_checks}=["TruMotion: verify Off in the TV menu; this control is not available through the API."];
+  $item->{manual_checks}=["TruMotion: verify Off in the TV menu; this control is not available through the API.",@{$item->{reference_manual_checks}||[]}];
   $item->{settings}{hdrDynamicToneMapping}="off" if($item->{signal_format} eq "hdr10" && !exists($item->{settings}{hdrDynamicToneMapping}));
   $item->{template_id}="reference-settings-v3";
  }
@@ -13609,6 +13606,46 @@ sub webui_automation_normalize_queue (@) {
  return $queue;
 }
 
+sub webui_automation_settings_plan (@) {
+ my ($payload)=@_;
+ my $guard=&lg_automation_guard_json('{}');
+ return PGAutomation::decode_json($guard) if($guard ne '');
+ my $settings=ref($payload->{settings}) eq 'HASH' ? $payload->{settings} : {};
+ my $signal=$payload->{signal_mode}||'sdr';
+ my $mode=$payload->{picture_mode}||'';
+ return {status=>'error',message=>'Invalid settings context'} if($signal !~ /^(?:sdr|hdr10|dv|hlg)$/ || $mode !~ /^[a-zA-Z0-9_]+$/ || keys(%$settings)>100);
+ my $active=&webui_pattern_signal_mode('{}');
+ # Resolve identity from the TV, never from an editor-provided model/profile.
+ # First read only the actual mode; do not probe an inactive signal context.
+ my $read=sub {
+  my ($keys)=@_;
+  return PGAutomation::decode_json(eval { &webui_lg_picture_settings(&webui_automation_json({
+   keys=>$keys,signal_mode=>$active,include_current_input=>JSON::PP::true,
+   ignore_calibration_picture_mode=>JSON::PP::true,
+  })) }||'')||{};
+ };
+ my $live=$read->(['pictureMode']);
+ return {status=>'error',message=>$live->{message}||'Connect the TV to identify its settings'} if(($live->{status}||'') ne 'ok');
+ my $identity=$live->{lg_generation}||{};
+ my $input=$live->{current_input}||'';
+ $input=$input->{id}||'' if(ref($input) eq 'HASH');
+ my $actual=$live->{picture_settings}{pictureMode}||'';
+ my $matched=$active eq $signal && !$live->{virtual_picture_settings} && $actual ne ''
+  && lg_setting_values_agree({verify=>{comparator=>'picture_mode_semantic'}},$mode,$actual);
+ if($matched) {
+  my $values=$read->([sort keys(%$settings),qw(backlight oledLight oledPixelBrightness pictureMode)]);
+  return {status=>'error',message=>$values->{message}||'TV read failed; prepared values were kept'} if(($values->{status}||'') ne 'ok');
+  my $after_input=$values->{current_input}||'';
+  $after_input=$after_input->{id}||'' if(ref($after_input) eq 'HASH');
+  return {status=>'error',message=>'TV context changed; reopen the editor'} if(($values->{lg_generation}{model_name}||'') ne ($identity->{model_name}||'')
+   || $after_input ne $input || &webui_pattern_signal_mode('{}') ne $active || $values->{virtual_picture_settings}
+   || !lg_setting_values_agree({verify=>{comparator=>'picture_mode_semantic'}},$actual,$values->{picture_settings}{pictureMode}||''));
+  $live=$values;
+ }
+ my $plan=lg_settings_selection_plan($identity,$settings,$matched?$live:{},category=>'picture',signal_mode=>$signal,picture_mode=>$mode,tv_input=>$input);
+ return {status=>'ok',%$plan,live_context_matches=>$matched?JSON::PP::true:JSON::PP::false};
+}
+
 sub webui_automation_probe_hazard (@) {
  my ($item,$key,$category,$token)=@_;
  my $body=&webui_automation_json({
@@ -13657,6 +13694,28 @@ sub webui_automation_preflight_event (@) {
  return if(($last->{message}||"") eq $message && ($last->{item_number}//-1)==($item_number//-1) && ($last->{level}||"info") eq ($level||"info"));
  push @$events,{time=>PGAutomation::now(),message=>$message,item_number=>$item_number,level=>$level||"info"};
  splice(@$events,0,@$events-200) if(@$events>200);
+}
+
+# Dismissing a completed check is presentation state, never an execution
+# unlock. Keep the original checks/events and match the exact attempt so a
+# late click cannot hide a newer check in another browser.
+sub webui_automation_dismiss_readiness (@) {
+ my ($payload)=@_;
+ my ($locked,$result,$error)=&webui_automation_lock(sub {
+  my $state=PGAutomation::read_json_file(PGAutomation::base_dir().'/preflight.json');
+  return {status=>'error',message=>'Readiness has changed. Refresh before dismissing it.',error_code=>'readiness-changed'}
+   if(ref($state) ne 'HASH' || !$payload->{request_id} || ($state->{id}||'') ne $payload->{request_id});
+  my $execution=&webui_automation_read_execution();
+  return {status=>'error',message=>'Active checks or calibration cannot be dismissed. Use Live Run for active work.',error_code=>'automation-active'}
+   if(($state->{status}||'') !~ /^(?:ready|blocked|failed|interrupted)$/
+    || (ref($execution) eq 'HASH' && &webui_automation_active_status($execution->{status})));
+  my $marker={id=>$state->{id},started_at=>$state->{started_at}||0,completed_at=>$state->{completed_at}||0};
+  return {status=>'error',message=>'Could not save the dismissal. Please retry.',error_code=>'write-failed'}
+   if(!PGAutomation::write_json_atomic(PGAutomation::base_dir().'/preflight-dismissed.json',$marker,0664));
+  return {status=>'ok',dismissed=>$state->{id},message=>'Previous readiness result dismissed. No calibration or TV settings were changed.'};
+ });
+ return &webui_automation_json($result) if($locked && ref($result) eq 'HASH');
+ return &webui_automation_error($error||'Unable to dismiss readiness','lock-failed');
 }
 
 sub webui_automation_preflight_finish (@) {
@@ -13739,6 +13798,7 @@ sub webui_automation_readiness_data (@) {
  my ($payload)=@_;
  $payload={} if(ref($payload) ne "HASH");
  my $job_checks=($payload->{scope}||"") eq "job";
+ my $preview=($payload->{scope}||"") eq "preview";
  my $items=$payload->{items};
  $items=$payload->{queue}{items} if(ref($items) ne "ARRAY" && ref($payload->{queue}) eq "HASH");
  $items=[] if(ref($items) ne "ARRAY");
@@ -13768,6 +13828,7 @@ sub webui_automation_readiness_data (@) {
  my $owns_session=ref($execution) eq "HASH" && ($payload->{automation_token}||"") ne ""
   && ($payload->{automation_token}||"") eq ($execution->{token}||"");
  my $busy=$guided_busy || ($session_alive && !$owns_session) ? 1 : 0;
+ $busy=1 if(ref($execution) eq 'HASH' && &webui_automation_active_status($execution->{status}) && !$owns_session);
  my $meter_message=$busy ? "Stop the active meter operation before starting automation" : ($session_alive ? "Meter session is reusable" : "Meter is idle");
  $check->(!$busy,"meter-idle",$meter_message);
  my $connection_message=$lg_connected ? "LG TV is paired and connected" : $lg->{paired} ? "LG TV is paired but disconnected. Connect it in LG Display, or retry after resolving the meter checks." : "Pair the LG TV in LG Display before starting automation.";
@@ -13875,23 +13936,40 @@ sub webui_automation_readiness_data (@) {
    "item-$index-panel-key","Panel-light control must be backlight, OLED light or OLED pixel brightness",$index);
   push @keys,$panel_key if($panel_key ne "" && !grep { $_ eq $panel_key } @keys);
   if($item->{stages}{calibration}) {
-   my $cal_mode_ok=&webui_automation_calibration_mode_ok($item->{picture_mode});
+   my $admission=lg_calibration_mode_contract({},picture_mode=>$item->{picture_mode},signal_mode=>$signal);
+   my $cal_mode_ok=$admission->{allowed};
    $check->($cal_mode_ok,"item-$index-calibration-mode",$cal_mode_ok
-    ? "$item->{picture_mode} is a writable calibration picture mode"
-    : "$item->{picture_mode} is not a supported LG AutoCal picture mode. Configure this job to select a supported mode (HDR Cinema, Filmmaker or Game for HDR10), or disable calibration for readings only. No alternative picture mode will be selected automatically.",$index);
+    ? $admission->{message}
+    : "$item->{picture_mode} is not a supported LG AutoCal picture mode. $admission->{message} No alternative picture mode will be selected automatically.",$index);
   }
   if($item->{panel_light}{policy} eq "target") {
    $check->($panel_key ne "","item-$index-panel-light-key","Target panel-light policy requires a panel-light key",$index);
-   $check->($signal eq "sdr","item-$index-panel-light-signal","target luminance not supported for this format",$index);
+   $check->($signal eq "sdr","item-$index-panel-light-signal","Target luminance is SDR-only. For HDR10 or Dolby Vision, choose fixed panel brightness (panel_light.policy: fixed); calibration measures the native peak luminance.",$index);
    $check->($item->{stages}{calibration},"item-$index-panel-light-calibration","Target panel light requires a calibration stage",$index);
    $item->{target_luminance}=$item->{panel_light}{target_luminance};
   }
-  if(!$job_checks) {
+  if(!$job_checks && !($preview && $index==0)) {
    # Do not interrogate other signal paths while the current path is active.
    # Hardware support/hazard queries belong to the job after mode selection.
    push @prepared,$item;
    $progress->($index,"Validated queue configuration for ".$item->{name}."; TV settings will be checked when this job starts");
    next;
+  }
+  if($preview) {
+   my $active_signal=&webui_pattern_signal_mode('{}');
+   if($active_signal ne $signal) {
+    $check->(0,"item-$index-preview-signal","First-job settings were not checked: generator output is $active_signal. Select $signal in Display Settings and $item->{picture_mode} on the TV, then check again. No signal or picture mode was changed.",$index);
+    push @prepared,$item;next;
+   }
+   # Read actual context without supplying a requested mode that an older TV
+   # could echo as a virtual value. Never probe controls on the wrong mode.
+   my $context=PGAutomation::decode_json(eval { &webui_lg_picture_settings(&webui_automation_json({keys=>['pictureMode'],signal_mode=>$signal,include_current_input=>JSON::PP::true})) }||'')||{};
+   my $actual=$context->{picture_settings}{pictureMode}||$context->{settings}{pictureMode}||'';
+   my $mode_matches=lg_setting_values_agree({verify=>{comparator=>'picture_mode_semantic'}},$item->{picture_mode},$actual);
+   if(($context->{status}||'') ne 'ok' || ($actual ne '' && !$context->{virtual_picture_settings} && !$mode_matches)) {
+    $check->(0,"item-$index-preview-mode","First-job settings were not checked: select $item->{picture_mode} on the TV and retry. ".($context->{message}||"Current mode: ".($actual||'unconfirmed')).". No picture mode was changed.",$index);
+    push @prepared,$item;next;
+   }
   }
   my $read_response=PGAutomation::decode_json(eval { &webui_lg_picture_settings(&webui_automation_json({
    keys=>\@keys,picture_mode=>$item->{picture_mode},signal_mode=>$signal,category=>"picture",
@@ -13904,6 +13982,10 @@ sub webui_automation_readiness_data (@) {
    push @prepared,$item;$progress->($index,"TV settings read failed for ".$item->{name});next;
   }
   my $generation=ref($read_response->{lg_generation}) eq "HASH" ? $read_response->{lg_generation} : {};
+  if($item->{stages}{calibration}) {
+   my $admission=lg_calibration_mode_contract($generation,signal_mode=>$signal,picture_mode=>$item->{picture_mode});
+   $check->($admission->{allowed},"item-$index-tv-calibration-mode",$admission->{message},$index);
+  }
   my $generation_known=ref($generation) eq "HASH" && ($generation->{model_name}||"") ne "" && ($generation->{generation_id}||"") ne "" && ($generation->{generation_id}||"") ne "lg_unknown";
   my $firmware=$lg->{software_version}||$read_response->{software_version}||"unknown";
   my $webos_release=$generation->{webos_release}||"unknown";
@@ -14044,7 +14126,7 @@ sub webui_automation_readiness_data (@) {
   checks => \@checks,
   items => \@prepared,
   hazard_restore => \%hazard_restore,
-  message => $ready ? ($job_checks?"Job TV settings checks passed":"General readiness and queue validation passed; TV settings are checked at each job") : "Automation readiness failed; fix the listed checks",
+  message => $ready ? ($preview?"First-job TV checks and queue validation passed; later jobs still require their own TV checks. Review any unverified or manual controls below.":$job_checks?"Job TV settings checks passed":"General readiness and queue validation passed; TV settings are checked at each job") : "Automation readiness failed; fix the listed checks",
  };
 }
 
@@ -14533,9 +14615,18 @@ sub webui_automation_api (@) {
  if($path eq "/api/automation/queues" && $method eq "POST") { return &webui_automation_save_queue($payload); }
  if($path eq "/api/automation/queues/delete" && $method eq "POST") { return &webui_automation_delete_def("queue",$payload->{id}||$payload->{queue_id}); }
  if($path=~m{^/api/automation/queues/([^/]+)/delete$} && $method eq "POST") { return &webui_automation_delete_def("queue",$1); }
+ if($path eq '/api/automation/settings-plan' && $method eq 'POST') { return &webui_automation_json(&webui_automation_settings_plan($payload)); }
  if($path eq "/api/automation/readiness" && $method eq "POST") { return &webui_automation_json(($payload->{automation_token}||"") ne "" ? &webui_automation_readiness_data($payload) : &webui_automation_checked_readiness($payload,"readiness")); }
+ if($path eq '/api/automation/readiness/dismiss' && $method eq 'POST') { return &webui_automation_dismiss_readiness($payload); }
  if(($path eq "/api/automation/start" || $path eq "/api/automation/runs/start") && $method eq "POST") { return &webui_automation_start($payload); }
  if($path eq "/api/automation/runs" && $method eq "GET") { return &webui_automation_json({status=>"ok",runs=>&webui_automation_list_runs()}); }
+ if($path=~m{^/api/automation/runs/([^/]+)/queue$} && $method eq 'GET') {
+  my $run=&webui_automation_run($1);
+  return &webui_automation_error('Automation run not found','not-found') if(ref($run) ne 'HASH');
+  my $items=$run->{items}||$run->{queue_snapshot}{items}||[];
+  return &webui_automation_json({status=>'ok',queue=>{name=>$run->{queue_name}||$run->{queue_snapshot}{name}||'Recovered queue',
+   items=>[map { &webui_automation_scrub_credentials(&webui_automation_normalize_item($_)) } @$items]}});
+ }
  if($path eq "/api/automation/runs/current" && $method eq "GET") {
   &webui_automation_reap_dead_runner();
   my $execution=&webui_automation_read_execution();
@@ -14550,7 +14641,14 @@ sub webui_automation_api (@) {
   delete($public_execution->{token}) if(ref($public_execution) eq "HASH");
   my $activity_run=$run;
   $activity_run=undef if(ref($preflight) eq "HASH" && ($preflight->{status}||"")=~/^(?:checking|blocked|failed|interrupted)$/ && ref($run) eq "HASH" && ($run->{status}||"")=~/^(?:complete(?:-with-warnings)?|stopped|failed)$/);
-  return &webui_automation_json({status=>"ok",execution=>$public_execution,run=>ref($run) eq "HASH" ? &webui_automation_public_run($run) : undef,preflight=>$preflight,activity=>&webui_automation_activity($activity_run,$preflight)});
+  my $activity=&webui_automation_activity($activity_run,$preflight);
+  my $dismissed=PGAutomation::read_json_file(PGAutomation::base_dir().'/preflight-dismissed.json');
+  $preflight=undef if(ref($preflight) eq 'HASH' && ref($dismissed) eq 'HASH'
+   && ($preflight->{status}||'') =~ /^(?:ready|blocked|failed|interrupted)$/
+   && ($preflight->{id}||'') eq ($dismissed->{id}||'')
+   && ($preflight->{started_at}||0)==($dismissed->{started_at}||0)
+   && ($preflight->{completed_at}||0)==($dismissed->{completed_at}||0));
+  return &webui_automation_json({status=>"ok",execution=>$public_execution,run=>ref($run) eq "HASH" ? &webui_automation_public_run($run) : undef,preflight=>$preflight,activity=>$activity});
  }
  if($path=~m{^/api/automation/runs/([^/]+)/jobs/(\d+)$} && $method eq "GET") {
   my $detail=&webui_automation_job_detail($1,$2);

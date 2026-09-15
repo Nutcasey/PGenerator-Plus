@@ -474,9 +474,11 @@ function lgUses2018Or2019PictureModeMap(){
 
 function lgPictureModesForSignal(signalMode){
  const signal=String(signalMode||'sdr');
+ const catalogue=lgDisplayControlSnapshot?.generation_profile?.picture_mode_catalogue;
  if(lgUses2018Or2019PictureModeMap()&&LG_2018_2019_PICTURE_MODES_BY_SIGNAL[signal]){
   return LG_2018_2019_PICTURE_MODES_BY_SIGNAL[signal];
  }
+ if(catalogue?.[signal]) return Object.values(catalogue[signal]).filter(row=>row.offered).map(row=>[row.value,row.label]);
  if(lgUsesPre2022PictureModeMap()&&LG_PRE2022_PICTURE_MODES_BY_SIGNAL[signal]){
   return LG_PRE2022_PICTURE_MODES_BY_SIGNAL[signal];
  }
@@ -485,6 +487,7 @@ function lgPictureModesForSignal(signalMode){
 
 function lgPictureModeEntries(){
  return [
+  ...Object.values(lgDisplayControlSnapshot?.generation_profile?.picture_mode_catalogue||{}).flatMap(rows=>Object.values(rows).map(row=>[row.value,row.label])),
   ...LG_PICTURE_MODES_BY_SIGNAL.sdr,
   ...LG_PICTURE_MODES_BY_SIGNAL.hdr10,
   ...LG_PICTURE_MODES_BY_SIGNAL.dv,
@@ -507,6 +510,12 @@ function lgPictureModeCanonicalValue(value){
  const exact=lgPictureModeEntries().find(item=>item[0]===raw);
  if(exact) return exact[0];
  const token=lgPictureModeToken(raw);
+ const catalogue=lgDisplayControlSnapshot?.generation_profile?.picture_mode_catalogue;
+ if(catalogue){
+  const matches=Object.values(catalogue).flatMap(rows=>Object.values(rows)).filter(row=>[row.value,row.settings_value,...(row.aliases||[])].some(value=>lgPictureModeToken(value)===token));
+  const values=[...new Set(matches.map(row=>row.value))];
+  if(values.length===1)return values[0];
+ }
  const aliases={
   isfexpert1:'expert1',
   isfexpertbright:'expert1',
@@ -2232,7 +2241,7 @@ function lgRenderCalHistoryInto(el){
   list.forEach(it=>{
    const de=(it.de!=null&&isFinite(it.de))?' · best dE '+Number(it.de).toFixed(3):'';
    const note=it.note?('<small style="color:var(--orange)">'+String(it.note).replace(/</g,'&lt;')+'</small>'):'';
-   const canUp=!(it.type==='dv'&&it.reuploadable===0);
+   const canUp=it.reuploadable!==0;
    html+='<div class="lg-cal-hist-item" data-id="'+String(it.id||'').replace(/"/g,'&quot;')+'">'
     +'<div class="lg-cal-hist-meta"><strong>'+lgCalHistoryTypeLabel(it.type)+'</strong> '
     +String(it.label||it.id||'').replace(/</g,'&lt;')
@@ -2268,8 +2277,8 @@ async function lgCalHistoryReupload(id){
  if(lgCalHistoryBusy) return;
  const item=lgCalHistoryCache.find(x=>x&&x.id===id);
  if(!item){ toast('History item not found','err'); return; }
- if(item.type==='dv'&&item.reuploadable===0){ toast(item.note||'Cannot reupload this DV config','err'); return; }
- if(!window.confirm('Reupload this '+lgCalHistoryTypeLabel(item.type)+' to the TV?\n\nCalibration mode will be enabled, the payload uploaded, then calibration mode disabled.')) return;
+ if(item.reuploadable===0){ toast(item.note||'Cannot reupload this artifact','err'); return; }
+ if(!window.confirm('Reupload this '+lgCalHistoryTypeLabel(item.type)+' to '+(item.picture_mode||'the TV')+' ('+(item.signal_mode||'unknown signal')+')?\n\nSelect that signal on the generator first. Calibration mode will be enabled, the payload uploaded, then calibration mode disabled.\n\nThis restores only the selected artifact, not the entire picture mode. A Dolby Vision profile does not restore its separate 1D LUT.')) return;
  lgCalHistoryBusy=true;
  try{
   if(typeof lgBeginCommand==='function') lgBeginCommand('Reuploading '+lgCalHistoryTypeLabel(item.type));

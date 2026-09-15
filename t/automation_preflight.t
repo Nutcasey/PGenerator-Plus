@@ -52,6 +52,12 @@ my $exit_calls=0;
  my $invalid=main::webui_automation_checked_readiness({items=>[{%$job,signal_format=>'hlg',picture_mode=>'hdrCinema'}]},'start');
  ok(!$invalid->{ready},'unsupported HLG calibration still blocks startup without TV probes');
  is(scalar @observed,0,'invalid queue does not probe inactive settings');
+ for my $case (['hdr10','hdrCinema'],['dv','dolbyVisionFilmMaker']) {
+  my $bad_target=main::webui_automation_checked_readiness({items=>[{%$job,template_id=>'',signal_format=>$case->[0],picture_mode=>$case->[1],settings=>{},panel_light=>{policy=>'target',key=>'backlight',target_luminance=>100}}]},'start');
+  ok(!$bad_target->{ready},"$case->[0] target policy is rejected before hardware work");
+  my ($check)=grep {$_->{name} eq 'item-0-panel-light-signal'} @{$bad_target->{checks}};
+  like($check->{message},qr/SDR-only.*panel_light\.policy: fixed/,'API rejection explains the supported format and fixed alternative');
+ }
  my $home={%$job,signal_format=>'hdr10',picture_mode=>'hdrCinemaBright'};
  my $unsupported=main::webui_automation_checked_readiness({items=>[$home]},'start');
  ok(!$unsupported->{ready},'HDR Cinema Home AutoCal is blocked at batch startup');
@@ -62,6 +68,30 @@ my $exit_calls=0;
  ok($readings->{ready},'HDR Cinema Home remains available for measurements without AutoCal');
  ok(main::webui_automation_calibration_mode_ok('dolbyVisionCinemaBright'),'Dolby Vision Cinema Home remains supported');
  ok(!main::webui_automation_calibration_mode_ok('hdr_cinema_home'),'HDR Home aliases are also rejected');
+ {
+  my $reader=\&main::webui_lg_picture_settings;
+  my $signal='sdr';my $mode='filmMaker';my @probes;
+  local *main::webui_pattern_signal_mode=sub {$signal};
+  local *main::webui_lg_picture_settings=sub {
+   my $request=PGAutomation::decode_json($_[0]);push @probes,$request;
+   my $result=PGAutomation::decode_json($reader->($_[0]));
+   $result->{picture_settings}{pictureMode}=$mode;
+   return PGAutomation::encode_json($result);
+  };
+  my $preview=main::webui_automation_checked_readiness({scope=>'preview',items=>[$job,{%$job,settings=>{contrast=>100},signal_format=>'hdr10',picture_mode=>'hdrCinema'}]},'readiness');
+  ok($preview->{ready},'preview probes first job in the matching active context');
+  ok(!grep({($_->{signal_mode}||'') eq 'hdr10'} @probes),'preview never probes inactive later signal');
+  like($preview->{message},qr/later jobs still require/,'preview does not certify the full queue TV settings');
+  @probes=();$signal='dv';
+  $preview=main::webui_automation_checked_readiness({scope=>'preview',items=>[$job]},'readiness');
+  ok(!$preview->{ready},'wrong generator signal blocks preview');
+  is(scalar @probes,0,'no picture settings probe in the wrong signal');
+  $signal='sdr';$mode='cinema';@probes=();
+  $preview=main::webui_automation_checked_readiness({scope=>'preview',items=>[$job]},'readiness');
+  ok(!$preview->{ready},'wrong live picture mode blocks preview');
+  is(scalar @probes,1,'only context is read on picture-mode mismatch');
+  ok(!exists($probes[0]{picture_mode}),'context read cannot echo a requested virtual mode');
+ }
  my $result=main::webui_automation_checked_readiness({scope=>'job',items=>[$job,$job],queue_name=>'Six modes',request_id=>'test-check'},'start');
  ok($result->{ready},'known reference motion pin is upgraded without blocking startup');
  ok(grep({$_->{name} eq 'calibration-mode-off' && $_->{ok}} @{$result->{checks}}),'readiness includes a fresh TV exit acknowledgement even when cached flag is off');

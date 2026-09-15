@@ -39,7 +39,16 @@
           },
           "additionalProperties": false
         },
-        "data": { "type": "object" },
+        "data": {
+          "type": "object",
+          "properties": {
+            "picture_modes": {
+              "type": "object",
+              "propertyNames": {"enum": ["sdr", "hdr10", "hlg", "dv"]},
+              "additionalProperties": {"type": "object", "additionalProperties": {"$ref": "#/$defs/picture_mode_patch"}}
+            }
+          }
+        },
         "evidence": {
           "type": "array",
           "minItems": 1,
@@ -53,6 +62,30 @@
             }
           }
         }
+      }
+    },
+    "picture_mode_patch": {
+      "description": "Complete catalogue records or scoped patches. New records require all fields in the runtime validator; scoped patches may override individual fields.",
+      "type": "object",
+      "properties": {
+        "value": {"type": "string", "minLength": 1},
+        "label": {"type": "string", "minLength": 1},
+        "settings_key": {"const": "pictureMode"},
+        "settings_value": {"type": "string", "minLength": 1},
+        "aliases": {"type": "array", "items": {"type": "string"}},
+        "offered": {"type": "boolean"},
+        "selection": {"$ref": "#/$defs/mode_operation"},
+        "readback": {"$ref": "#/$defs/mode_operation"},
+        "calibration": {"$ref": "#/$defs/mode_operation"},
+        "source_ids": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "mode_operation": {
+      "type": "object",
+      "properties": {
+        "support_state": {"enum": ["unknown", "unsupported", "inventory", "supported", "verified"]},
+        "bank": {"type": ["string", "null"]},
+        "internal_mode": {"type": ["string", "null"]}
       }
     },
     "recipe": {

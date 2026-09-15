@@ -27,8 +27,8 @@
       "data": {"settings": {
         "best_available": {
           "label": "LG C1 — best available settings",
-          "unverified_write_signals": ["sdr"],
-          "note": "The supplied C1 log reports successful five-key jobs. Probe this TV first; other controls remain usable when readable, otherwise give manual instructions. The report is not universal firmware verification."
+          "unverified_write_signals": ["sdr", "hdr10", "dv"],
+          "note": "C1 hardware reports cover the five native controls in SDR, HDR10 and Dolby Vision. Probe this TV first; other controls remain usable when readable, otherwise give manual instructions. Accepted writes without readback remain unverified, not universal firmware verification."
         },
         "controls": {
           "backlight": {"write": {"allow_unverified_readback": true}},
@@ -38,7 +38,7 @@
           "energySaving": {"write": {"allow_unverified_readback": true}}
         }
       }},
-      "evidence": [{"source_id": "c1-user-run-20260915", "strength": "user_report", "scope": "Five native setting candidates may use acknowledged-only success when readback is missing; actual write refusal, readback mismatch, invalid values and changed TV/input remain errors."}]
+      "evidence": [{"source_id": "c1-user-run-20260915", "strength": "user_report", "scope": "Five native setting candidates may use acknowledged-only success when readback is missing; actual write refusal, readback mismatch, invalid values and changed TV/input remain errors."}, {"source_id": "c1-pr14-all-signals-20260915", "strength": "user_report", "scope": "Extends only backlight, brightness, color, contrast and energySaving to SDR, HDR10 and Dolby Vision. HLG and other controls receive no acknowledged-only allowance."}]
     }
   ]
 }

@@ -91,6 +91,11 @@
     },
     "evidence": [
       {
+        "source_id": "colourstrue-g3-mode-banks",
+        "strength": "implementation_policy",
+        "scope": "Workflow admission is distinct from picture-mode selection and platform calibration support. HDR Cinema Home has no proved calibration bank; settings/readings remain available. A listed mode still requires the runtime platform and context guards."
+      },
+      {
         "source_id": "pgenerator-existing-behaviour",
         "strength": "proposed",
         "scope": "Fail-closed defaults used when no platform or exact model profile matches."

@@ -48,6 +48,7 @@ our $LG_AUTOCAL_DDC_LAYOUT = "sdr26";
 our $LG_AUTOCAL_DARK_DETAIL = 0;
 our $LG_AUTOCAL_CONFIG;
 our $LG_AUTOCAL_STATE;
+our $LG_AUTOCAL_COMMAND_FAILURE;
 our $LG_AUTOCAL_TARGET_CONTEXT;
 our $LG_AUTOCAL_LAST_FULL_DDC_SPINE_SEED_DETAILS = [];
 # Active-range lowest-body DPG seed index(es) for the SDR26 1D spline.
@@ -299,6 +300,10 @@ sub api_json {
  $content="" if(!defined($content));
  my $result=decode_json_safe($content,{});
  if(ref($result) eq "HASH" && %{$result}) {
+  if(($result->{status}||'') eq 'error') {
+   $LG_AUTOCAL_COMMAND_FAILURE={operation=>"$method $path",message=>$result->{message}||'',error_code=>$result->{error_code}||'',time=>time()};
+   log_line('LG command failed: '.$json->encode($LG_AUTOCAL_COMMAND_FAILURE));
+  }
   return $result;
  }
  log_line("$method $path returned an invalid response");
@@ -345,7 +350,13 @@ sub lg_helper_json {
  my $raw=`$cmd`;
  my $exit_status=$? >> 8;
  my $result=decode_json_safe($raw,{});
- return $result if(ref($result) eq "HASH" && ($result->{"status"}||"") ne "");
+ if(ref($result) eq 'HASH' && ($result->{status}||'') ne '') {
+  if(($result->{status}||'') eq 'error') {
+   $LG_AUTOCAL_COMMAND_FAILURE={operation=>'LG helper '.($request->{action}||$request->{command}||'picture control'),message=>$result->{message}||'',error_code=>$result->{error_code}||'',time=>time()};
+   log_line('LG command failed: '.$json->encode($LG_AUTOCAL_COMMAND_FAILURE));
+  }
+  return $result;
+ }
  return { status=>"error", message=>"LG TV did not finish the white-balance write" } if($exit_status == 124 || $exit_status == 137);
  $raw=~s/[\r\n]+/ /g;
  $raw=~s/\s+/ /g;
@@ -27096,6 +27107,10 @@ eval {
 } or do {
  my $err=$@ || "Auto Cal failed";
  $err=~s/[\r\n]+/ /g;
+ # Capture before cleanup overwrites phase, message or the last command.
+ $state->{failure_detail}={raw_message=>$err,phase=>$state->{phase}||'',operation_label=>$state->{current_name}||'',
+  current_step=>$state->{current_step},total_steps=>$state->{total_steps},picture_mode=>$active_picture_mode_for_cleanup||$config->{picture_mode}||'',signal_mode=>$signal_mode,
+  (ref($LG_AUTOCAL_COMMAND_FAILURE) eq 'HASH' && time()-$LG_AUTOCAL_COMMAND_FAILURE->{time}<30 ? (command=>{%$LG_AUTOCAL_COMMAND_FAILURE}) : ())};
  log_line("autocal eval die caught: err=\"".$err."\" calibration_mode_active_before=".($calibration_mode_active?1:0)." cancelled=".(cancelled()?1:0));
  if($calibration_mode_active || $state->{calibration_mode}) {
   my $closed=autocal_error_calibration_cleanup($state,$active_picture_mode_for_cleanup || $state->{calibration_picture_mode} || "");

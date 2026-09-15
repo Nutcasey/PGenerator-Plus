@@ -114,6 +114,7 @@ function pgAutomationSnapshot(source){
  const item=pgAutomationClone(source)||{};
  delete item.warmup_minutes;
  delete item.settings_recovery;
+ ['readiness','setting_contracts','generation_profile','capability_profile','best_available_settings','best_available_write_ack','tv_input','worker_status','started_at','completed_at'].forEach(key=>delete item[key]);
  pgAutomationUpgradeReference(item);
  ['item_number','status','checkpoints','checkpoint','checkpoint_status','active_stage','stage_started_at','failure','warnings','recheck','hazards','hazard_capabilities','hazard_restore','device_identity','fault_injected','drift_recovery_attempts','drift_recovery_pending','series','apply-all','panel-light'].forEach(key=>delete item[key]);
  return item;
@@ -126,7 +127,8 @@ function pgAutomationUpgradeReference(item){
  item.manual_checks=['TruMotion: verify Off in the TV menu; this control is not available through the API.'];item.template_id='reference-settings-v3';
 }
 function pgAutomationSaveDraft(){
- try{localStorage.setItem('pgen.automation.queueDraft',JSON.stringify({queue:pgAutomation.queue,editingRunId:pgAutomation.editingRunId,firstPending:pgAutomation.firstPending,selectedQueue:pgAutomation.selectedQueue,loadedQueueSnapshot:pgAutomation.loadedQueueSnapshot}));}catch(e){}
+ try{localStorage.setItem('pgen.automation.queueDraft',JSON.stringify({queue:pgAutomation.queue,editingRunId:pgAutomation.editingRunId,firstPending:pgAutomation.firstPending,selectedQueue:pgAutomation.selectedQueue,loadedQueueSnapshot:pgAutomation.loadedQueueSnapshot}));}
+ catch(e){pgAutomationNotice('Browser draft storage is unavailable. Use Save queue to keep edits on the Pi before refreshing.', 'warning');}
  const ready=pgAutomationEl('Readiness');if(ready)ready.innerHTML='';
 }
 function pgAutomationModes(signal){
@@ -157,7 +159,7 @@ function pgAutomationModeChanged(){
   if(pgAutomationValue('RecipeName','')===pgAutomationModeLabel(oldMode,oldSignal))pgAutomationEl('RecipeName').value=pgAutomationModeLabel(pgAutomationValue('PictureMode',''),pgAutomationValue('Signal','sdr'));
   try{Object.assign(pgAutomation.supportedValues,pgAutomationReadSettingsEditor());}catch(e){}
   pgAutomation.editorSettingsDrafts[pgAutomation.editorSettingsKey]={values:pgAutomationClone(pgAutomation.supportedValues),pins:[...pgAutomation.pinnedKeys],gamma:pgAutomationValue('Gamma','bt1886'),gammaFollowsTarget:pgAutomation.gammaFollowsTarget,
-   panel:{key:pgAutomationValue('PanelKey',''),policy:pgAutomationValue('PanelPolicy','fixed'),fixed_value:pgAutomationValue('PanelValue',100),target_luminance:pgAutomationValue('PanelTarget',100)}};
+   manualSettings:pgAutomationClone(pgAutomation.manualSettings||{}),panel:{key:pgAutomationValue('PanelKey',''),policy:pgAutomationValue('PanelPolicy','fixed'),fixed_value:pgAutomationValue('PanelValue',100),target_luminance:pgAutomationValue('PanelTarget',100)}};
  }
  pgAutomation.editorEpoch++;pgAutomation.editorSettingsKey=key;
  const draft=pgAutomation.editorSettingsDrafts[key];
@@ -172,7 +174,7 @@ function pgAutomationPictureDefaults(signal,mode,panelKey){
  if(!match)return {settings:{},panel_light:{key:panelKey||'backlight',policy:'fixed',fixed_value:100,target_luminance:100}};
  return pgAutomationReferenceItems([match.id],{panel_key:panelKey})[0];
 }
-function pgAutomationApplyPictureDefaults(draft){
+function pgAutomationApplyPictureDefaults(draft,reference){
  const defaults=pgAutomationPictureDefaults(pgAutomationValue('Signal','sdr'),pgAutomationValue('PictureMode',''),pgAutomationValue('PanelKey','backlight'));
  const panel=draft?.panel||defaults.panel_light;
  pgAutomation.supportedKeys=[];pgAutomation.supportedSignal='';pgAutomation.supportedPictureMode='';
@@ -180,6 +182,7 @@ function pgAutomationApplyPictureDefaults(draft){
  pgAutomation.pinnedKeys=draft?[...draft.pins]:Object.keys(defaults.settings);
  pgAutomationEl('Gamma').value=draft?.gamma||defaults.target_gamma||'hlg';
  pgAutomation.gammaFollowsTarget=draft?!!draft.gammaFollowsTarget:!!defaults.tv_gamma_follows_target;
+ pgAutomation.settingsPlan=null;pgAutomation.manualSettings=pgAutomationClone(draft?.manualSettings||{});
  pgAutomationEl('PanelKey').value=panel.key;
  pgAutomationRenderSettingsEditor();
  pgAutomationEl('PanelKey').value=panel.key;
@@ -187,10 +190,11 @@ function pgAutomationApplyPictureDefaults(draft){
  pgAutomationEl('PanelValue').value=panel.fixed_value;
  pgAutomationEl('PanelTarget').value=panel.target_luminance;
  pgAutomationUpdateEditor();
+ pgAutomationResolveSettingsPlan();
 }
 function pgAutomationResetPictureDefaults(){
  pgAutomation.editorEpoch++;
- pgAutomationApplyPictureDefaults();
+ pgAutomationApplyPictureDefaults(null,true);
 }
 function pgAutomationSignalDefaults(){
  const signal=pgAutomationValue('Signal','sdr');
@@ -226,9 +230,11 @@ function pgAutomationGammaChanged(){
   const value=pgAutomationTvGamma(pgAutomationValue('Gamma','bt1886'));
   const input=document.querySelector('[data-pg-automation-key="gamma"]'),pin=document.querySelector('[data-pg-automation-pin="gamma"]');
   pgAutomation.pinnedKeys=pgAutomation.pinnedKeys.filter(key=>key!=='gamma');
-  if(value){pgAutomation.supportedValues.gamma=value;pgAutomation.pinnedKeys.push('gamma');if(input)input.value=value;}
-  if(input)input.disabled=!value;
-  if(pin)pin.checked=!!value;
+  const unavailable=pgAutomation.settingsPlan?.manual?.gamma||pgAutomation.settingsPlan?.blocked?.gamma;
+  if(value){pgAutomation.supportedValues.gamma=value;if(!unavailable)pgAutomation.pinnedKeys.push('gamma');if(input)input.value=value;}
+  if(pgAutomation.manualSettings?.gamma){if(value)pgAutomation.manualSettings.gamma.value=value;else delete pgAutomation.manualSettings.gamma;pgAutomationRenderManualSettings();}
+  if(input)input.disabled=!value||!!unavailable;
+  if(pin)pin.checked=!!value&&!unavailable;
   pgAutomationUpdateSettingsStatus();
  }
  pgAutomationUpdateEditor();
@@ -263,10 +269,77 @@ function pgAutomationDisplayTypeChanged(){
  pgAutomationDisplayHelp();
 }
 function pgAutomationSetPanelPolicy(policy){pgAutomationEl('PanelPolicy').value=policy;pgAutomationUpdateEditor();}
+function pgAutomationModeEligibility(){
+ const candidate=pgAutomation.settingsPlan?.calibration_mode;
+ const contract=candidate&&candidate.signal_mode===pgAutomationValue('Signal','sdr')?candidate:null;
+ const blocked=!!contract&&!contract.allowed&&pgAutomationChecked('Cal');
+ const select=pgAutomationEl('PictureMode');
+ const token=value=>String(value||'').replace(/[\s_-]/g,'').toLowerCase();
+ const allowed=new Set((contract?.allowed_modes||[]).map(token));
+ // Preserve a saved unknown token rather than silently selecting a preset.
+ if(Array.isArray(contract?.catalogue)){
+  const selected=select.value;
+  const rows=contract.catalogue.filter(row=>row.offered||[row.value,row.settings_value,...(row.aliases||[])].some(value=>token(value)===token(selected)));
+  const options=rows.map(row=>{
+   const value=[row.value,row.settings_value,...(row.aliases||[])].some(value=>token(value)===token(selected))?selected:row.value;
+   const option=new Option(row.label,value);option.dataset.modeLabel=row.label;return option;
+  });
+  if(selected&&!options.some(option=>option.value===selected))options.unshift(new Option(selected,selected));
+  select.replaceChildren(...options);select.value=selected;
+ }
+ Array.from(select.options).forEach(option=>{
+  option.dataset.modeLabel||=option.textContent;
+  const readingsOnly=!!contract&&!allowed.has(token(option.value));
+  option.disabled=readingsOnly&&pgAutomationChecked('Cal');
+  option.textContent=option.dataset.modeLabel+(readingsOnly?' — readings only':'');
+ });
+ const message=blocked?pgAutomationModeLabel(select.value,pgAutomationValue('Signal','sdr'))+': '+contract.message
+  :contract&&!contract.allowed?'This mode is available for readings, not AutoCal.':contract?.message||'';
+ pgAutomationEl('ModeEligibility').textContent=message;
+ select.setAttribute('aria-invalid',blocked?'true':'false');
+ pgAutomationEl('EditorSave').disabled=!!pgAutomation.planPending||!!pgAutomation.planError||blocked;
+ pgAutomationEl('EditorSave').title=blocked?message:'';
+ let footer=pgAutomationEl('ModeSaveHelp');
+ if(!footer){footer=document.createElement('p');footer.id='pgAutomationModeSaveHelp';footer.className='auto-muted';footer.style.cssText='flex-basis:100%;margin:0';pgAutomationEl('EditorSave').parentElement.prepend(footer);}
+ footer.textContent=pgAutomation.planPending?'Checking TV compatibility — required before saving. You can continue editing while this runs.'
+  :pgAutomation.planError?'TV compatibility check failed. Review the error above and retry before saving.'
+  :blocked?message:'';
+ footer.hidden=!footer.textContent;
+ pgAutomationEl('EditorSave').setAttribute('aria-describedby','pgAutomationModeSaveHelp');
+ pgAutomationRenderCompatibilityStatus(blocked?message:'');
+ return blocked?message:'';
+}
+function pgAutomationRenderCompatibilityStatus(modeBlockMessage){
+ const panel=pgAutomationEl('Compatibility');if(!panel)return;
+ const plan=pgAutomation.settingsPlan;
+ let state='required',label='Check required',detail='Required before saving. Connect your TV, then check which controls this job can use.',action='Check TV compatibility';
+ if(pgAutomation.planPending){
+  state='checking';label='Checking…';action='Checking compatibility…';
+  detail='Required before saving. Reading the connected TV and matching its controls to this job. Keep the TV connected; you can continue editing.';
+ }else if(pgAutomation.planError){
+  state='error';label='Check failed — action needed';action='Retry compatibility check';
+  detail=pgAutomation.planError+' Keep your TV connected, then retry. This check must complete before you can save.';
+ }else if(plan){
+  const limited=!plan.known||Object.keys(plan.manual||{}).length>0||Object.keys(plan.blocked||{}).length>0;
+  state=modeBlockMessage?'error':limited?'limited':'checked';
+  label=modeBlockMessage?'Action needed':limited?'Checked — review limits':'Checked';action='Refresh TV compatibility';
+  const context=(plan.model_name||'Connected TV')+' · '+pgAutomationValue('Signal','sdr').toUpperCase()+' · '+pgAutomationModeLabel(pgAutomationValue('PictureMode',''),pgAutomationValue('Signal','sdr'))+'. ';
+  detail=context+(modeBlockMessage?modeBlockMessage
+   :!plan.known?'No reviewed TV profile matched. Only conservative controls are available; review the limitations under TV Settings.'
+   :limited?'Compatibility checked. Review manual steps and unavailable controls under TV Settings.'
+   :plan.live_context_matches?'Compatibility checked in the current TV mode. Settings will be verified again when the job runs.'
+   :'Settings selected from the TV matrix. Live checks will run after the job selects its signal and picture mode.');
+ }
+ panel.dataset.state=state;
+ // Do not re-announce unchanged status on every unrelated form edit.
+ const setText=(id,value)=>{const el=pgAutomationEl(id);if(el.textContent!==value)el.textContent=value;};
+ setText('CompatibilityState',label);setText('CompatibilityDetail',detail);setText('CompatibilityButton',action);
+ pgAutomationEl('CompatibilityButton').disabled=!!pgAutomation.planPending;
+}
 function pgAutomationSelectSettings(all){
  document.querySelectorAll('[data-pg-automation-pin]').forEach(el=>{
   const key=el.getAttribute('data-pg-automation-pin');
-  if(all&&pgAutomation.supportedValues[key]==null)return;
+  if(el.disabled||all&&pgAutomation.supportedValues[key]==null)return;
   el.checked=all;pgAutomationTogglePin(el);
  });
 }
@@ -287,6 +360,7 @@ function pgAutomationRenderSettingsEditor(){
  const checked=pgAutomation.supportedKeys.length>0;
  const keys=Array.from(new Set([...(checked?pgAutomation.supportedKeys:pgAutomationSettingCandidates()),...pinned]));
   editor.innerHTML=keys.filter(key=>!['backlight','oledLight','oledPixelBrightness'].includes(key)).map(key=>{
+   const unavailable=pgAutomation.settingsPlan?.manual?.[key]||pgAutomation.settingsPlan?.blocked?.[key];
    const meta=pgAutomationSettingMetadata(key),raw=pgAutomation.supportedValues[key],value=pgAutomationSettingValue(key==='gamma'?(pgAutomationTvGamma(raw)||raw):raw),pin=pinned.includes(key);
    let input;
    const attrs=' data-pg-automation-key="'+pgAutomationEscape(key)+'" onchange="pgAutomationSettingChanged(this.dataset.pgAutomationKey)"'+(pin?'':' disabled');
@@ -296,7 +370,7 @@ function pgAutomationRenderSettingsEditor(){
    }else{
     input='<input'+attrs+' type="'+(meta.type==='number'?'number':'text')+'"'+(meta.min!=null?' min="'+meta.min+'"':'')+(meta.max!=null?' max="'+meta.max+'"':'')+' value="'+pgAutomationEscape(value)+'">';
    }
-   return '<div class="field"><label><input type="checkbox" data-pg-automation-pin="'+pgAutomationEscape(key)+'"'+(pin?' checked':'')+' onchange="pgAutomationTogglePin(this)"> '+pgAutomationEscape(meta.label||key)+'</label>'+input+'</div>';
+   return '<div class="field"><label><input type="checkbox" data-pg-automation-pin="'+pgAutomationEscape(key)+'"'+(pin?' checked':'')+(unavailable?' disabled':'')+' onchange="pgAutomationTogglePin(this)"> '+pgAutomationEscape(meta.label||key)+'</label>'+input+(unavailable?'<span class="auto-muted">'+pgAutomationEscape(unavailable.reason)+'</span>':'')+'</div>';
   }).join('');
  pgAutomationUpdateSettingsStatus();
  pgAutomationRenderPanelKeyOptions();
@@ -305,7 +379,7 @@ function pgAutomationRenderSettingsEditor(){
 }
 function pgAutomationUpdateSettingsStatus(){
  const count=pgAutomation.pinnedKeys.filter(key=>!['backlight','oledLight','oledPixelBrightness'].includes(key)).length;
- pgAutomationEl('SettingsStatus').textContent=count+' picture controls pinned · '+(pgAutomation.supportedKeys.length?'TV values read for '+pgAutomationModeLabel(pgAutomation.supportedPictureMode,pgAutomation.supportedSignal)+'; unread controls retain prepared values.':'Prepared values, not TV readback. Support is checked when this job starts.');
+ pgAutomationEl('SettingsStatus').textContent=count+' picture controls pinned · '+(pgAutomation.settingsPlan?'TV-matrix selection for '+(pgAutomation.settingsPlan.model_name||'unidentified TV')+'. Writes are verified at run time.':pgAutomation.supportedKeys.length?'TV values read for '+pgAutomationModeLabel(pgAutomation.supportedPictureMode,pgAutomation.supportedSignal)+'.':'Reference values prepared; TV compatibility must be checked.');
 }
 function pgAutomationTogglePin(el){
  const key=el.getAttribute('data-pg-automation-pin');
@@ -317,11 +391,46 @@ function pgAutomationTogglePin(el){
  pgAutomationUpdateSettingsStatus();
 }
 function pgAutomationRenderPanelKeyOptions(){
- const select=pgAutomationEl('PanelKey'),prior=select.value||pgAutomation.editingRecipe?.panel_light?.key||'';
- const keys=(pgAutomation.supportedKeys.length?pgAutomation.supportedKeys:['backlight','oledLight','oledPixelBrightness']).filter(key=>['backlight','oledLight','oledPixelBrightness'].includes(key));
- if(!keys.length&&prior)keys.push(prior);
- select.innerHTML='<option value="">Do not pin panel light</option>'+keys.map(key=>'<option value="'+pgAutomationEscape(key)+'">'+pgAutomationEscape(pgAutomationSettingMetadata(key).label)+'</option>').join('');
- select.value=keys.includes(prior)?prior:'';
+ const panel=pgAutomation.settingsPlan?.panel_light;
+ pgAutomationEl('PanelBinding').textContent=panel?.wire_key?panel.label:'TV control not yet identified';
+ pgAutomationEl('PanelBindingHelp').textContent=panel?.wire_key?(panel.target_available?(panel.source==='native_readback'?'Confirmed by TV readback.':'Selected from the TV matrix; live readback is required before target adjustment.'):'Automatic luminance targeting is unavailable because this control cannot be read back. Set panel brightness manually or use a supported fixed write.'):'Connect your TV, then refresh compatibility. No API alias needs to be selected.';
+}
+async function pgAutomationResolveSettingsPlan(){
+ if(typeof fetchJSON!=='function')return;
+ const epoch=pgAutomation.editorEpoch,request=(pgAutomation.planRequest||0)+1;
+ pgAutomation.planRequest=request;pgAutomation.planPending=true;pgAutomation.planError='';
+ pgAutomationEl('EditorSave').disabled=true;pgAutomationEl('PanelBinding').textContent='Checking TV compatibility…';
+ pgAutomationEl('KeysButton').disabled=true;pgAutomationUpdateEditor();
+ try{
+  Object.assign(pgAutomation.supportedValues,pgAutomationReadSettingsEditor());
+  const result=await fetchJSON('/api/automation/settings-plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({signal_mode:pgAutomationValue('Signal','sdr'),picture_mode:pgAutomationValue('PictureMode',''),settings:pgAutomation.supportedValues}),_quiet:true,_timeoutMs:60000});
+  if(epoch!==pgAutomation.editorEpoch||request!==pgAutomation.planRequest)return;
+  if(result?.status!=='ok')throw new Error(result?.message||'Connect the TV and refresh compatibility before saving.');
+  // Filter the current selection, not the selection at request time. Edits made
+  // during the read remain intact; a refresh never copies live TV values.
+  Object.assign(pgAutomation.supportedValues,pgAutomationReadSettingsEditor());
+  pgAutomation.settingsPlan=result;
+  const intended=Array.from(new Set([...pgAutomation.pinnedKeys,...Object.keys(pgAutomation.manualSettings||{})]));
+  pgAutomation.manualSettings=Object.fromEntries(intended.filter(key=>result.manual?.[key]).map(key=>[key,{...result.manual[key],value:pgAutomation.supportedValues[key]}]));
+  pgAutomation.pinnedKeys=intended.filter(key=>Object.hasOwn(result.automatic||{},key));
+  const panel=result.panel_light||{};
+  pgAutomationEl('PanelKey').value=panel.writable?panel.wire_key||'':'';
+  pgAutomationRenderManualSettings();
+  pgAutomationRenderSettingsEditor();
+ }catch(e){
+  if(epoch!==pgAutomation.editorEpoch||request!==pgAutomation.planRequest)return;
+  pgAutomation.planError=e.message;pgAutomationEl('PanelBinding').textContent='TV compatibility unavailable';
+  pgAutomationEl('PanelBindingHelp').textContent=e.message+' Refresh TV compatibility to retry.';
+ }finally{
+  if(epoch===pgAutomation.editorEpoch&&request===pgAutomation.planRequest){pgAutomation.planPending=false;pgAutomationEl('EditorSave').disabled=!!pgAutomation.planError;pgAutomationEl('KeysButton').disabled=false;pgAutomationUpdateEditor();}
+ }
+}
+function pgAutomationRenderManualSettings(){
+ const manual=Object.entries(pgAutomation.manualSettings||{}).map(([key,entry])=>'Set '+(pgAutomationSettingMetadata(key).label||key)+' to '+pgAutomationSettingValue(entry.value)+' in the TV menu ('+entry.reason+').');
+ const blocked=Object.entries(pgAutomation.settingsPlan?.blocked||{}).map(([key,entry])=>(pgAutomationSettingMetadata(key).label||key)+': '+entry.reason+'.');
+ const panel=pgAutomation.settingsPlan?.panel_light;
+ if(panel&&!panel.writable)manual.push('Set '+panel.label+' manually to '+pgAutomationValue('PanelValue',100)+'; automatic panel adjustment is unavailable.');
+ pgAutomationEl('ManualSettings').textContent=[...manual,...blocked].join(' ');
 }
 function pgAutomationReadSettingsEditor(){
  const values={};
@@ -346,30 +455,40 @@ async function pgAutomationLoadSupportedKeys(){
   const prior=pgAutomationReadSettingsEditor();
   const panelBefore=['PanelKey','PanelPolicy','PanelValue','PanelTarget'].map(id=>pgAutomationValue(id,''));
   const candidates=pgAutomationSettingCandidates();
-  const result=await fetchJSON('/api/lg/picture-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys:[...candidates,'pictureMode'],picture_mode:pictureMode,signal_mode:signal,category:'picture'}),_quiet:true,_timeoutMs:60000});
+  const result=await fetchJSON('/api/lg/picture-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys:[...candidates,'pictureMode'],picture_mode:pictureMode,signal_mode:signal,category:'picture',include_current_input:true}),_quiet:true,_timeoutMs:60000});
   if(epoch!==pgAutomation.editorEpoch||signal!==pgAutomationValue('Signal','sdr')||pictureMode!==pgAutomationValue('PictureMode',''))return;
   if(!result||result.status==='error')throw new Error(result?.message||'Could not read TV controls. Check the TV connection.');
   if(JSON.stringify(prior)!==JSON.stringify(pgAutomationReadSettingsEditor())||JSON.stringify(panelBefore)!==JSON.stringify(['PanelKey','PanelPolicy','PanelValue','PanelTarget'].map(id=>pgAutomationValue(id,''))))throw new Error('Settings changed while the TV was being read. Your edits were kept; use TV settings again if you want to replace them.');
   const current=result.picture_settings||result.settings||{};
   const canonical=value=>String(typeof lgPictureModeCanonicalValue==='function'?lgPictureModeCanonicalValue(value):value).replace(/[\s_-]/g,'').toLowerCase();
   if(current.pictureMode&&canonical(current.pictureMode)!==canonical(pictureMode))throw new Error('The TV reported a different picture mode. Select '+pgAutomationModeLabel(pictureMode,signal)+' on the TV before using its settings. Prepared values were kept.');
-  const values=Object.fromEntries(Object.entries(current).filter(([key,value])=>candidates.includes(key)&&value!=null&&!(typeof value==='string'&&!value.trim())));
+  const values=Object.fromEntries(Object.entries(current).filter(([key,value])=>candidates.includes(key)&&value!=null&&!(typeof value==='string'&&!value.trim())&&!result.unsupported_picture_keys?.[key]&&(!result.virtual_picture_settings||(result.supported_picture_keys||[]).includes(key))));
   if(!Object.keys(values).length)throw new Error('The TV returned no readable picture controls. Prepared values were kept.');
   pgAutomation.supportedKeys=Array.from(new Set([...(result.supported_picture_keys||[]),...Object.keys(values)])).filter(key=>candidates.includes(key));
-  pgAutomation.supportedValues=Object.assign({},prior,values);
-  pgAutomation.pinnedKeys=Object.keys(pgAutomation.supportedValues);
-  if(values.gamma!=null)pgAutomation.gammaFollowsTarget=false;
+  // Keep unread values available for deliberate manual selection, not as
+  // automatic writes. A read limitation alone does not prove a write is unsafe.
+  const removed=Object.keys(prior).filter(key=>!Object.hasOwn(values,key));
+  const writable=Object.keys(values).filter(key=>!['blocked','not_applicable'].includes(result.setting_contracts?.[key]?.write_decision));
+  pgAutomation.supportedKeys=Array.from(new Set([...candidates,...Object.keys(values)]));
+  pgAutomation.supportedValues=Object.assign({},pgAutomation.supportedValues,prior,values);
+  pgAutomation.pinnedKeys=writable;
+  pgAutomation.manualSettings={};
+  pgAutomation.gammaFollowsTarget=false;
   pgAutomation.supportedSignal=signal;pgAutomation.supportedPictureMode=pictureMode;
-  const panelKey=[pgAutomationValue('PanelKey',''),'backlight','oledLight','oledPixelBrightness'].find(key=>key&&values[key]!=null);
-  if(panelKey){pgAutomationEl('PanelKey').value=panelKey;pgAutomationEl('PanelValue').value=values[panelKey];}
+  const panelKey=result.logical_controls?.panel_light?.wire_key||pgAutomation.settingsPlan?.panel_light?.wire_key||pgAutomationValue('PanelKey','');
+  if(panelKey&&writable.includes(panelKey)){pgAutomationEl('PanelKey').value=panelKey;pgAutomationEl('PanelValue').value=values[panelKey];}
+  else pgAutomationEl('PanelKey').value='';
   pgAutomationRenderSettingsEditor();
-  if(panelKey)pgAutomationEl('PanelKey').value=panelKey;
+  pgAutomationEl('PanelKey').value=panelKey&&writable.includes(panelKey)?panelKey:'';
   pgAutomationUpdateEditor();
-  pgAutomationNotice('TV values copied into this job. Controls the TV could not read kept their prepared values. No TV settings were changed.');
+  await pgAutomationResolveSettingsPlan();
+  const reasons=removed.map(key=>key+': '+(result.unsupported_picture_keys?.[key]?'TV readback unavailable':'no native value returned')).join('; ');
+  pgAutomationNotice(writable.length+' readable controls copied. '+removed.length+' unread pins removed'+(reasons?' ('+reasons+')':'')+'. You can explicitly select write-only controls; the TV matrix decides whether to write them or require a manual check. No TV settings were changed.');
  }catch(e){pgAutomationNotice(e.message,true);}
  finally{button.disabled=false;button.textContent='Use TV Settings';}
 }
 function pgAutomationUpdateEditor(){
+ pgAutomationModeEligibility();
  const signal=pgAutomationValue('Signal','sdr'),cal=pgAutomationChecked('Cal')&&signal!=='hlg',post=pgAutomationChecked('Post');
  const sdr=signal==='sdr',dv=signal==='dv',hdr=signal==='hdr10',hlg=signal==='hlg';
  const show=(id,value)=>{pgAutomationEl(id).style.display=value?'':'none';};
@@ -379,6 +498,7 @@ function pgAutomationUpdateEditor(){
  pgAutomationEl('QualitySection').style.display=post?'':'none';
  pgAutomationEl('Sweeps').style.display=post||pgAutomationChecked('Pre')?'':'none';
  pgAutomationEl('PanelTarget').disabled=!sdr||!cal;
+ pgAutomationEl('PanelTargetRadio').disabled=pgAutomation.planPending||!!pgAutomation.planError||!!pgAutomation.settingsPlan&&!pgAutomation.settingsPlan.panel_light?.target_available;
  pgAutomationEl('PanelPolicy').querySelector('option[value="target"]').disabled=signal!=='sdr'||!cal;
  if(!sdr||!cal)pgAutomationEl('PanelPolicy').value='fixed';
  const target=pgAutomationValue('PanelPolicy','fixed')==='target';
@@ -410,6 +530,9 @@ function pgAutomationNumber(id,fallback,min,max){
  return value;
 }
 function pgAutomationRecipeFromForm(){
+ if(pgAutomation.planPending||pgAutomation.planError)throw new Error(pgAutomation.planError||'Wait for the TV compatibility check to finish.');
+ const admission=pgAutomation.settingsPlan?.calibration_mode;
+ if(pgAutomationChecked('Cal')&&admission&&!admission.allowed)throw new Error(admission.message);
  const recipe=pgAutomationSnapshot(pgAutomation.editingRecipe),signal=pgAutomationValue('Signal','sdr'),settings=pgAutomationReadSettingsEditor();
  const stages={pre_readings:pgAutomationChecked('Pre'),calibration:pgAutomationChecked('Cal'),post_readings:pgAutomationChecked('Post'),apply_all:pgAutomationChecked('Cal')&&pgAutomationChecked('ApplyAll')};
  if(!stages.pre_readings&&!stages.calibration&&!stages.post_readings)throw new Error('Enable at least one stage.');
@@ -419,6 +542,7 @@ function pgAutomationRecipeFromForm(){
  if(stages.pre_readings&&!pre.length||stages.post_readings&&!post.length)throw new Error('Select a sweep for each enabled readings stage.');
  const panelKey=pgAutomationValue('PanelKey',''),policy=pgAutomationValue('PanelPolicy','fixed');
  if(policy==='target'&&(signal!=='sdr'||!stages.calibration||!panelKey))throw new Error('Target luminance requires SDR AutoCal and a supported panel-light control.');
+ if(policy==='target'&&pgAutomation.settingsPlan&&!pgAutomation.settingsPlan.panel_light?.target_available)throw new Error('Target luminance requires readable panel brightness. Use fixed brightness and the manual TV checks for this model.');
  const panelValue=pgAutomationNumber('PanelValue',signal==='sdr'?80:100,0,100);
  ['backlight','oledLight','oledPixelBrightness'].forEach(key=>delete settings[key]);
  if(panelKey&&policy==='fixed')settings[panelKey]=panelValue;
@@ -443,6 +567,11 @@ function pgAutomationRecipeFromForm(){
   max_bpc:signal==='dv'?8:pgAutomationNumber('BitDepth',10,8,10),display_type:pgAutomationValue('DisplayType','lcd'),ccss_override:pgAutomationValue('Ccss','')
  });
  if(signal==='dv')recipe.signal_range=recipe.pattern_signal_range=recipe.transport_signal_range=recipe.rgb_quant_range='2';
+ const previous=recipe.reference_manual_checks||[];
+ recipe.reference_manual_checks=Object.entries(pgAutomation.manualSettings||{}).map(([key,entry])=>'Set '+(pgAutomationSettingMetadata(key).label||key)+' to '+pgAutomationSettingValue(entry.value)+' in the TV menu for '+recipe.picture_mode+' ('+signal+'). '+entry.reason+'.');
+ if(pgAutomation.settingsPlan?.panel_light&&!pgAutomation.settingsPlan.panel_light.writable)recipe.reference_manual_checks.push('Set '+pgAutomation.settingsPlan.panel_light.label+' manually to '+panelValue+' for '+recipe.picture_mode+' ('+signal+'). Automatic panel adjustment is unavailable.');
+ recipe.reference_manual_settings=pgAutomationClone(pgAutomation.manualSettings||{});
+ recipe.manual_checks=[...(recipe.manual_checks||[]).filter(text=>!previous.includes(text)),...recipe.reference_manual_checks];
  const source=signal==='hdr10'?'matrix':pgAutomationValue('Method','hybrid3'),method=source.startsWith('hybrid')?'hybrid':source;
  const size=source==='hybrid9'?9:source==='hybrid5'?5:source==='hybrid3'?3:Number(pgAutomationValue('LatticeSize',5));
  const oldCal=recipe.calibration||{};
@@ -458,6 +587,8 @@ function pgAutomationRecipeFromForm(){
 }
 function pgAutomationFillRecipe(recipe){
  recipe=recipe||{};pgAutomation.editorEpoch++;pgAutomation.editingRecipe=pgAutomationClone(recipe);
+ pgAutomation.settingsPlan=null;pgAutomation.manualSettings=pgAutomationClone(recipe.reference_manual_settings||{});pgAutomation.planPending=false;pgAutomation.planError='';
+ pgAutomationEl('ManualSettings').textContent='';pgAutomationEl('EditorSave').disabled=false;
  pgAutomation.fillingEditor=true;pgAutomation.editorSettingsDrafts={};pgAutomation.editorSettingsKey='';
  pgAutomation.gammaFollowsTarget=!!recipe.tv_gamma_follows_target;
  pgAutomation.supportedKeys=[];pgAutomation.supportedSignal='';pgAutomation.supportedPictureMode='';
@@ -468,6 +599,7 @@ function pgAutomationFillRecipe(recipe){
  if(!Array.from(pgAutomationEl('PictureMode').options).some(x=>x.value===mode))pgAutomationEl('PictureMode').add(new Option(mode,mode));
  set('PictureMode',mode);pgAutomationModeChanged();
  pgAutomation.supportedValues=pgAutomationClone(recipe.settings||{});pgAutomation.pinnedKeys=Object.keys(recipe.settings||{});
+ Object.entries(pgAutomation.manualSettings).forEach(([key,entry])=>{if(!Object.hasOwn(pgAutomation.supportedValues,key))pgAutomation.supportedValues[key]=entry.value;});
  if(Array.isArray(recipe.supported_picture_keys)&&recipe.supported_picture_keys.length){pgAutomation.supportedKeys=recipe.supported_picture_keys.filter(key=>pgAutomationSettingCandidates().includes(key));pgAutomation.supportedSignal=recipe.signal_format;pgAutomation.supportedPictureMode=mode;}
  pgAutomationRenderSettingsEditor();
  ['Pre','Cal','Post','ApplyAll'].forEach((id,index)=>{const key=['pre_readings','calibration','post_readings','apply_all'][index];check(id,pgAutomationStageEnabled(stages,key));});
@@ -503,6 +635,7 @@ function pgAutomationOpenEditor(target,recipe,index){
  pgAutomationEl('EditorError').textContent='';
  pgAutomationEl('Editor').showModal();
  pgAutomationEl('Editor').scrollTop=0;
+ pgAutomationResolveSettingsPlan();
 }
 function pgAutomationCancelEditor(){pgAutomation.editorEpoch++;pgAutomationEl('Editor').close();pgAutomation.editingQueueIndex=null;}
 function pgAutomationNewRecipe(target){
@@ -517,7 +650,8 @@ function pgAutomationNewRecipe(target){
  }catch(e){}
  const mode=pgAutomationModes('sdr').find(x=>/filmmaker/i.test(x))||'cinema';
  const defaults=pgAutomationPictureDefaults('sdr',mode,'backlight');
- pgAutomationOpenEditor(target||'queue',{...measurement,display_use_case:'tv',color_format:'1',signal_range:'1',max_bpc:10,name:pgAutomationModeLabel(mode,'sdr'),signal_format:'sdr',picture_mode:mode,settings:defaults.settings,target_gamma:defaults.target_gamma,tv_gamma_follows_target:defaults.tv_gamma_follows_target,panel_light:defaults.panel_light,manual_checks:defaults.manual_checks});
+ pgAutomationOpenEditor(target||'queue',{...measurement,display_use_case:'tv',color_format:'1',signal_range:'1',max_bpc:10,name:pgAutomationModeLabel(mode,'sdr'),signal_format:'sdr',picture_mode:mode,settings:defaults.settings,target_gamma:defaults.target_gamma,tv_gamma_follows_target:!!defaults.tv_gamma_follows_target,panel_light:defaults.panel_light,manual_checks:defaults.manual_checks});
+ pgAutomation.supportedValues=pgAutomationClone(defaults.settings);pgAutomationRenderSettingsEditor();
  pgAutomationDisplayTypeChanged();
 }
 async function pgAutomationSaveRecipe(){
@@ -535,7 +669,7 @@ async function pgAutomationSaveRecipe(){
   }
   pgAutomationCancelEditor();pgAutomationNotice(pgAutomation.editorTarget==='recipe'?'Recipe saved':'Queue item saved');await pgAutomationRefresh();
  }catch(e){pgAutomationNotice(e.message,true);}
- finally{button.disabled=false;}
+ finally{button.disabled=false;if(pgAutomationEl('Editor').open)pgAutomationModeEligibility();}
 }
 function pgAutomationItemSummary(item){
  const signal=item.signal_format||'sdr',cal=item.calibration||{},stages=item.stages||{},panel=item.panel_light||{};
@@ -720,11 +854,27 @@ function pgAutomationStageLabel(stage){
  return {'readiness':'Checking TV and meter','job-readiness':'Checking this job’s devices and picture mode','item-started':'Checking this job before measurements','tv-setup-verified':'Applying TV settings','pre-readings-done':'Before readings','reset-and-reapply-verified':'Resetting calibration and reapplying settings','panel-light-settled':'Setting 100% white luminance','greyscale-done':'Calibrating the 1D LUT','volume-done':'3D LUT / Dolby Vision profiling','session-closed':'Closing calibration','apply-all-done':'Applying calibration to all inputs','post-readings-done':'After readings','item-complete':'Saving job results'}[stage]||String(stage||'').replace(/-/g,' ');
 }
 function pgAutomationIssueText(issue){
+ const raw=typeof issue==='string'?issue:issue?.message||'';
+ if(/Driver error while executing the command/i.test(raw))return 'The TV rejected a calibration command. Let cleanup finish, confirm the intended signal and picture mode, then retry readiness. If it repeats, reconnect the TV and include the saved command details in the report. The TV-side cause is not yet known.';
  if(typeof issue==='string'){
   const unverified=issue.match(/^([a-z][a-z0-9-]*)-unverified$/);
   return unverified?pgAutomationStageLabel(unverified[1])+': verification incomplete. See the job’s recorded checks for details.':issue;
  }
- return (issue.item_number!=null?'Job '+(Number(issue.item_number)+1)+': ':'')+[pgAutomationStageLabel(issue.stage),issue.message||issue.code||issue.name].filter(Boolean).join(' · ');
+ let message=issue.message||issue.code||issue.name;
+ if(/-key-/.test(issue.name||'')&&/is not supported by the LG TV/.test(message||''))message=message.replace(/ \(matrix:.*?\)/g,'').replace(/: .+?\. Configure/,'. Configure');
+ return (issue.item_number!=null?'Job '+(Number(issue.item_number)+1)+': ':'')+[pgAutomationStageLabel(issue.stage),message].filter(Boolean).join(' · ');
+}
+function pgAutomationFailureChecks(item,index){
+ const checks=item?.failure?.stage==='job-readiness'?(item.readiness?.checks||[]).filter(check=>!check.ok&&check.level!=='warning'):[];
+ return checks.length?checks.map(check=>({...check,item_number:index??check.item_number})):item?.failure?[{...item.failure,item_number:index}]:[];
+}
+function pgAutomationFailureHtml(run){
+ const checks=(run?.items||[]).flatMap((item,index)=>pgAutomationFailureChecks(item,index));
+ const issues=checks.length?checks:run?.failure?[run.failure]:[];
+ if(checks.length&&run.failure&&!(run.items||[]).some(item=>item.failure?.stage===run.failure.stage&&item.failure?.message===run.failure.message))issues.push(run.failure);
+ if(!issues.length)return '';
+ return '<details open style="color:var(--red)"><summary>Problems requiring attention ('+issues.length+')</summary><ul class="auto-readiness-problems">'+issues.map(issue=>'<li>'+pgAutomationEscape(pgAutomationIssueText(issue))+'</li>').join('')+'</ul></details>'
+  +'<details><summary>Technical details</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere">'+pgAutomationEscape(JSON.stringify({failure:run.failure,checks},null,2))+'</pre></details>';
 }
 function pgAutomationResuming(run){return run?.status==='starting'||(run?.status==='running'&&run.active_stage==='readiness');}
 function pgAutomationTerminal(run){return /^(complete(-with-warnings)?|stopped|failed)$/.test(run?.status||'');}
@@ -747,7 +897,8 @@ function pgAutomationRenderActivity(){
  const scope=historical?'history:'+run.id:run?.id||pre?.id||'idle';
  if(pgAutomation.logScope!==scope){
   pgAutomation.logScope=scope;pgAutomation.logObserved=[];pgAutomation.logSignature=null;pgAutomation.logFollow=true;
-  if(historical||preActive||['starting','running','paused','interrupted','stopping','completing','failed'].includes(run?.status))pgAutomationEl('Activity').open=true;
+  // Opening the log is a user choice. Polling, history selection and failed
+  // readiness must not repeatedly expand it above the queue.
  }
  const activity=historical?historical.activity||{}:pgAutomation.pendingChecks&&current.preflight?.id!==pgAutomation.pendingChecks.id?{}:current.activity||{};
  const entries=[...(activity.entries||[])];
@@ -785,6 +936,22 @@ async function pgAutomationClearLastRun(){
   const result=await pgAutomationRequest('runs/'+encodeURIComponent(run.id)+'/control/clear',{});
   pgAutomation.lastProblem='';pgAutomationNotice(result.message);await pgAutomationPollLive();
  }catch(e){pgAutomationNotice(e.message,true);}
+}
+async function pgAutomationDismissReadiness(button){
+ const pre=pgAutomation.current?.preflight;
+ if(!pre?.id||pgAutomation.pendingChecks||pre.status==='checking')return;
+ if(button)button.disabled=true;
+ try{
+  const result=await pgAutomationRequest('readiness/dismiss',{request_id:pre.id});
+  pgAutomation.dismissedCheck={id:result.dismissed,started_at:pre.started_at};
+  if(pgAutomation.current?.preflight?.id===result.dismissed){
+   pgAutomation.current.preflight=null;pgAutomation.lastProblem='';pgAutomationEl('Readiness').innerHTML='';pgAutomationNotice('');
+   pgAutomationRenderLiveRun(pgAutomation.current.run,pgAutomation.current.execution);
+   pgAutomationEl('ReadinessButton').focus();
+  }
+  await pgAutomationPollLive();
+ }catch(e){pgAutomationNotice(e.message,true);}
+ finally{if(button)button.disabled=false;}
 }
 function pgAutomationEstimateText(run,now){
  if(!run)return '';
@@ -842,7 +1009,7 @@ function pgAutomationRenderProgress(){
  if(showRun&&pgAutomationTerminal(run)){
   box.style.display='';box.dataset.error=String(run.status==='failed'||!!pgAutomation.statusError);box.setAttribute('role',run.status==='failed'?'alert':'status');
   box.innerHTML='<strong>Last batch '+pgAutomationEscape(run.status.replace(/-/g,' '))+' · '+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Calibration queue')+'</strong><p class="auto-muted">No calibration is running. Jobs and results are saved in History.</p>'
-   +(run.status==='failed'&&run.failure?'<p>'+pgAutomationEscape(pgAutomationIssueText(run.failure))+'</p>':'')
+   +(run.status==='failed'?pgAutomationFailureHtml(run):'')
    +(pgAutomation.statusError?'<p>'+pgAutomationEscape(pgAutomation.statusError)+'</p>':'')
    +pgAutomationRunWarningsHtml(run)
    +'<button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationClearLastRun()">Clear last batch</button>';
@@ -870,18 +1037,23 @@ function pgAutomationRenderProgress(){
   if(run.heartbeat_age>60&&['running','starting','stopping','completing'].includes(run.status))issues.push({message:'No runner heartbeat for '+run.heartbeat_age+' seconds. Progress is unconfirmed; do not start a second run.'});
  }else if(pre){
   total=pre.total_items||0;completed=(pre.items||[]).filter(item=>item.status==='checked').length;
-  title=pre.status==='checking'?'Checking '+(pre.active_item==null?'TV and meter':'job '+(Number(pre.active_item)+1)+' of '+total):pre.status==='ready'?'Startup checks passed':pre.status==='started'?'Launching calibration runner':'Startup '+pre.status;
+  title=pre.status==='checking'?'Checking '+(pre.active_item==null?'TV and meter':'job '+(Number(pre.active_item)+1)+' of '+total):pre.status==='ready'?'Last readiness check passed':pre.status==='started'?'Launching calibration runner':'Last readiness check did not pass';
   message=(pre.queue_name?pre.queue_name+' · ':'')+(pre.message||'')+(pre.elapsed_seconds!=null?' · '+pre.elapsed_seconds+' s elapsed':'');
   issues=pre.issues||[];error=['blocked','failed','interrupted'].includes(pre.status)||issues.some(issue=>issue.level==='error');
  }else if(!pgAutomation.lastProblem&&!pgAutomation.statusError){box.style.display='none';return;}
  if(pgAutomation.statusError){error=true;issues=[{message:pgAutomation.statusError},...issues];}
  if(pgAutomation.lastProblem){error=true;issues=[{message:pgAutomation.lastProblem},...issues];}
+ if(showRun&&!pgAutomationResuming(run)&&(run.items||[]).some(item=>item.failure?.stage==='job-readiness'&&item.readiness?.checks?.length)){
+  const checks=(run.items||[]).flatMap((item,index)=>pgAutomationFailureChecks(item,index));
+  if(checks.length)issues=[...checks,...issues.filter(issue=>issue.level==='warning')];
+ }
  box.style.display='';box.dataset.error=String(error);box.setAttribute('role',error?'alert':'status');
  const unique=[...new Set(issues.map(pgAutomationIssueText).filter(Boolean))];
  box.innerHTML='<strong>'+pgAutomationEscape(title||(error?'Automation needs attention':'Automation'))+'</strong><div class="auto-muted">'+pgAutomationEscape(message)+'</div>'
   +(total?'<progress aria-label="'+(showRun?'Completed jobs':'Validated queue configurations')+'" value="'+completed+'" max="'+total+'"></progress><div class="auto-muted auto-progress-footer"><span>'+completed+' / '+total+' '+(showRun?'jobs complete':'queue configurations validated; TV settings checked per job')+'</span>'
    +(showRun?'<span data-automation-eta title="Rough estimate from live patch pace and comparable saved stage timings. Recalculated every two minutes and when the stage changes. Calibration speed varies; the range is not a guarantee.">'+pgAutomationEscape(pgAutomationEstimateText(run))+'</span>':'')+'</div>':'')
-  +(unique.length?'<details '+(error?'open':'')+'><summary>'+(error?'Problems requiring attention':'Warnings and manual checks')+' ('+unique.length+')</summary><div class="auto-issues">'+unique.map(text=>'<p class="auto-muted"'+(issues.some(issue=>pgAutomationIssueText(issue)===text&&issue.level==='warning')?' data-level="warning"':'')+'>'+pgAutomationEscape(text)+'</p>').join('')+'</div></details>':'');
+  +(unique.length?'<details '+(error?'open':'')+'><summary>'+(error?'Problems requiring attention':'Warnings and manual checks')+' ('+unique.length+')</summary><div class="auto-issues">'+unique.map(text=>'<p class="auto-muted"'+(issues.some(issue=>pgAutomationIssueText(issue)===text&&issue.level==='warning')?' data-level="warning"':'')+'>'+pgAutomationEscape(text)+'</p>').join('')+'</div></details>':'')
+  +(!showRun&&pre?.id&&['ready','blocked','failed','interrupted'].includes(pre.status)?'<p class="auto-muted">This is a saved check result, not an active calibration lock. After correcting the issue, check again or dismiss this result. Dismissing does not bypass future safety checks.</p><button id="pgAutomationDismissReadiness" type="button" class="btn btn-sm btn-secondary" onclick="pgAutomationDismissReadiness(this)">Dismiss previous check</button>':'');
 }
 function pgAutomationBeginChecks(intent){
  const id='ui-'+Date.now()+'-'+Math.random().toString(36).slice(2,10);
@@ -896,18 +1068,20 @@ function pgAutomationRenderReadiness(result){
  box.innerHTML='<p class="auto-muted">'+pgAutomationEscape(result.message||'Readiness')+' · '+checks.length+' checks. See the activity log for details.</p>'
   +(problems.length?'<ul class="auto-readiness-problems">'+problems.map(check=>'<li data-level="'+(check.level==='warning'?'warning':'error')+'">'+pgAutomationEscape(pgAutomationIssueText(check))+'</li>').join('')+'</ul>':'');
  pgAutomation.current={...pgAutomation.current,activity:{entries:checks.map(check=>({...check,source:'Startup check',level:check.ok?'ok':check.level||'error'}))}};pgAutomationRenderActivity();
- if(!result.ready){pgAutomation.lastProblem=result.message||'Startup checks failed';pgAutomationRenderProgress();pgAutomationEl('Progress')?.scrollIntoView({block:'nearest'});}
+ box.scrollIntoView({block:'nearest'});
 }
 async function pgAutomationReadiness(){
  if(pgAutomation.pendingChecks||pgAutomation.busy||pgAutomation.current?.preflight?.status==='checking')return;
+ if(!pgAutomation.queue.items.length){pgAutomationNotice('Add a job before checking readiness. No device checks were started.');return;}
  const button=pgAutomationEl('ReadinessButton');button.disabled=true;button.textContent='Checking TV and Meter…';
  const request_id=pgAutomationBeginChecks('readiness');
- try{pgAutomationRenderReadiness(await pgAutomationRequest('readiness',{items:pgAutomation.queue.items,queue_name:pgAutomation.queue.name,request_id},300000));}catch(e){pgAutomationNotice(e.message,true);}
+ try{pgAutomationRenderReadiness(await pgAutomationRequest('readiness',{scope:'preview',items:pgAutomation.queue.items,queue_name:pgAutomation.queue.name,request_id},300000));}catch(e){pgAutomationNotice(e.message,true);}
  finally{pgAutomation.pendingChecks=null;button.disabled=false;button.textContent='Check Readiness';await pgAutomationPollLive();}
 }
 async function pgAutomationStart(){
- if(pgAutomation.busy||pgAutomation.pendingChecks||pgAutomation.current?.preflight?.status==='checking')return;if(!pgAutomation.queue.items.length){pgAutomationNotice('Add at least one queue item.',true);return;}
+ if(pgAutomation.busy||pgAutomation.pendingChecks||pgAutomation.current?.preflight?.status==='checking')return;if(!pgAutomation.queue.items.length){pgAutomationNotice('Add a job before running the queue. No calibration was started.');return;}
  pgAutomation.busy=true;pgAutomationEl('StartButton').disabled=true;pgAutomationEl('StartButton').textContent='Checking and Starting…';
+ pgAutomationSaveDraft();
  const request_id=pgAutomationBeginChecks('start');
  try{
   const result=await pgAutomationRequest('runs/start',{queue:pgAutomation.queue,request_id},300000);
@@ -940,10 +1114,14 @@ function pgAutomationRenderLiveRun(run,execution){
  pgAutomationSyncCalibrationView(run);
  pgAutomationRenderActivity();
  const pre=pgAutomation.current?.preflight,checking=pgAutomation.pendingChecks||pre?.status==='checking';
- const status=run?.status||(checking?'checking':pre&&['blocked','failed','interrupted'].includes(pre.status)?pre.status:'idle');pgAutomationStateBadge(status);pgAutomationRenderProgress();
+ const status=run?.status||(checking?'checking':'idle');pgAutomationStateBadge(status);pgAutomationRenderProgress();
  const occupied=checking||['starting','running','paused','interrupted','stopping','completing'].includes(run?.status);
  pgAutomationEl('StartButton').disabled=!!(occupied||pgAutomation.busy);
  pgAutomationEl('ReadinessButton').disabled=!!(occupied||pgAutomation.pendingChecks);
+ const reason=checking?'Readiness checks are in progress.':occupied?'The previous batch is '+run.status+'. Open Live Run to resume it or Stop it before starting a new queue.':pgAutomation.busy?'A start request is in progress.':'';
+ for(const id of ['StartButton','ReadinessButton'])pgAutomationEl(id).title=reason;
+ const blocker=pgAutomationEl('ActionBlocker');
+ if(blocker){blocker.hidden=!reason;blocker.innerHTML=pgAutomationEscape(reason)+(occupied&&!checking?' <button type="button" class="btn btn-sm btn-secondary" onclick="pgAutomationTab(\'live\')">Open Live Run</button>':'');}
  pgAutomationEl('PauseButton').disabled=status!=='running';pgAutomationEl('ResumeButton').disabled=!['paused','interrupted'].includes(status);
  pgAutomationEl('StopButton').disabled=!['starting','running','paused','interrupted','stopping','completing'].includes(status);
  const live=pgAutomationEl('Live');
@@ -958,7 +1136,7 @@ function pgAutomationRenderLiveRun(run,execution){
   live.innerHTML='<h3>'+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Batch')+' · '+pgAutomationEscape(status)+'</h3>'
   +'<p class="auto-muted">'+(active>=0?'Job '+(active+1)+' of '+items.length+' · ':'')+pgAutomationEscape(pgAutomationStageLabel(run.active_stage||'Between stages'))+'</p>'
   +'<p>'+pgAutomationEscape(worker.current_name||worker.message||'')+(worker.total_steps?' · '+Number(worker.current_step||0)+' / '+Number(worker.total_steps):'')+'</p>'
-  +(run.failure?'<p style="color:var(--red)">'+pgAutomationEscape(run.failure.message||'')+'</p>':'')
+  +pgAutomationFailureHtml(run)
   +(['starting','running','completing','stopping'].includes(status)&&run.heartbeat_age!=null&&run.heartbeat_age>60?'<p style="color:var(--orange)">No heartbeat for '+Number(run.heartbeat_age)+' s. If the runner has stopped, the next status check marks this run interrupted.</p>':'')
   +'<p class="auto-muted">Saved checkpoint: '+pgAutomationEscape(run.checkpoint||'none')+' · Heartbeat '+pgAutomationEscape(run.heartbeat_age==null?'pending':run.heartbeat_age+'s ago')+'</p>'
   +items.map((item,i)=>pgAutomationJobButton(item,i,'live',run.id,i===active)).join('');
@@ -968,7 +1146,11 @@ async function pgAutomationPollLive(){
  if(pgAutomation.polling)return;pgAutomation.polling=true;
  try{
   const result=await fetchJSON('/api/automation/runs/current',{_quiet:true,_timeoutMs:8000});
-  if(result&&result.status!=='error'){pgAutomation.statusError='';pgAutomation.current=result;pgAutomationRenderLiveRun(result.run,result.execution);}
+  if(result&&result.status!=='error'){
+   if(pgAutomation.dismissedCheck&&result.preflight?.id===pgAutomation.dismissedCheck.id&&result.preflight?.started_at===pgAutomation.dismissedCheck.started_at&&result.preflight?.status!=='checking')result.preflight=null;
+   if(pgAutomation.current?.preflight?.id&&!result.preflight&&!pgAutomation.pendingChecks)pgAutomationEl('Readiness').innerHTML='';
+   pgAutomation.statusError='';pgAutomation.current=result;pgAutomationRenderLiveRun(result.run,result.execution);
+  }
   else{pgAutomation.statusError='Cannot refresh run status. Showing the last known state; progress is unconfirmed. Do not start another run.';pgAutomationRenderProgress();}
  }catch(e){pgAutomation.statusError='Run status connection failed: '+e.message+'. Showing the last known state.';pgAutomationRenderProgress();
  }finally{
@@ -1009,10 +1191,23 @@ async function pgAutomationOpenHistory(index){
  delete pgAutomation.jobViews.history;
  detail.innerHTML='<h3>'+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Automation queue')+' · '+pgAutomationEscape((run.status||'').replace(/-/g,' '))+'</h3>'
   +pgAutomationRunWarningsHtml(run)
-  +'<div style="color:var(--text2);margin-bottom:8px">'+pgAutomationEscape(run.failure&&run.failure.message||'')+'</div>'
+  +pgAutomationFailureHtml(run)
+  +'<button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationRecoverQueue()">Copy this run to an editable queue</button><p class="auto-muted">Recovers the jobs saved on the Pi, including failed runs. Does not resume or start calibration.</p>'
   +(Array.isArray(run.hazard_restore_failures)&&run.hazard_restore_failures.length?'<div style="color:var(--red);margin-bottom:8px">TV protections were not restored: '+pgAutomationEscape(run.hazard_restore_failures.map(x=>typeof x==='string'?x:(x.key||'')+(x.message?' ('+x.message+')':'')).join(', '))+'. Check the TV\'s energy saving, screen saver and power-off settings.</div>':'')
   +'<div class="auto-job-layout"><div id="pgAutomationHistoryJobs">'+(run.items||[]).map((item,i)=>pgAutomationJobButton(item,i,'history',run.id,false)).join('')+'</div><aside id="pgAutomationHistoryJobDetail" class="auto-job-detail" aria-label="Selected historical job details"></aside></div>';
  if(run.items?.length)pgAutomationSelectJob('history',run.id,0);
+}
+async function pgAutomationRecoverQueue(){
+ const run=pgAutomation.historyActivity?.run;if(!Array.isArray(run?.items)||!run.items.length)return;
+ if(pgAutomation.queue.items.length&&!confirm('Replace the current draft with a copy of this run? Save your draft first if you want to keep it.'))return;
+ const before=JSON.stringify(pgAutomation.queue);
+ let result;
+ try{result=await pgAutomationRequest('runs/'+encodeURIComponent(run.id)+'/queue');if(!Array.isArray(result.queue?.items))throw new Error('Saved queue is unavailable.');if(before!==JSON.stringify(pgAutomation.queue))throw new Error('Your draft changed while loading. Retry recovery to replace it.');}
+ catch(e){pgAutomationNotice(e.message,true);return;}
+ pgAutomation.queue={name:pgAutomationQueueName(result.queue.name)||'Recovered queue',items:result.queue.items.map(pgAutomationSnapshot)};
+ pgAutomation.editingRunId='';pgAutomation.firstPending=0;pgAutomation.selectedQueue='';pgAutomation.loadedQueueSnapshot='';
+ pgAutomationSaveDraft();pgAutomationRenderSavedQueues();pgAutomationRenderQueue();pgAutomationTab('queue');
+ pgAutomationNotice('Jobs recovered from the Pi. Review and Save queue to keep a named copy. Nothing has started.');
 }
 
 function pgAutomationJobButton(item,index,view,runId,active){
@@ -1023,6 +1218,7 @@ function pgAutomationJobButton(item,index,view,runId,active){
 function pgAutomationJobStatus(item,runStatus){return item.status==='running'&&['paused','interrupted','stopped','failed'].includes(runStatus)?runStatus:item.status||'queued';}
 function pgAutomationJobFailureHtml(item){
  if(!item?.failure)return '';
+ if(item.failure.message)return pgAutomationFailureHtml({items:[item],failure:item.failure});
  const cancelled=item.status==='stopped'&&item.failure.status==='interrupted'&&!item.failure.message&&!item.failure.error_code;
  return '<p style="color:var('+(cancelled?'--text2':'--red')+')">'+(cancelled?'Stopped during ':'')+pgAutomationEscape(pgAutomationIssueText(item.failure))+'</p>';
 }

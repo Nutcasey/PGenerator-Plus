@@ -3150,6 +3150,8 @@ sub webui_lg_calibration_history_list (@) {
     mtime => $mtime+0,
     de => defined($meta->{"de"}) ? ($meta->{"de"}+0) : undef,
     source => "archive",
+    reuploadable => ($pm ne '' && $sm =~ /^(?:sdr|hdr10|dv)$/) ? 1 : 0,
+    note => ($pm ne '' && $sm =~ /^(?:sdr|hdr10|dv)$/) ? 'Restores the 1D LUT only; other settings and profiles are unchanged.' : 'Saved signal or picture mode is missing; automatic restore is unavailable.',
    };
   }
   closedir($dh);
@@ -3212,6 +3214,8 @@ sub webui_lg_calibration_history_list (@) {
     mtime => $mtime+0,
     de => defined($de_from_data) ? ($de_from_data+0) : undef,
     source => "run",
+    reuploadable => ($pm ne '' && $sm =~ /^(?:sdr|hdr10|dv)$/) ? 1 : 0,
+    note => ($pm ne '' && $sm =~ /^(?:sdr|hdr10|dv)$/) ? 'Restores the 1D LUT only; other settings and profiles are unchanged.' : 'Saved signal or picture mode is missing; automatic restore is unavailable.',
    };
   }
   closedir($dh);
@@ -3356,6 +3360,35 @@ sub webui_lg_calibration_history_download (@) {
  return &lg_encode_json({ status => "error", message => "Unknown id" });
 }
 
+sub _lg_cal_hist_restore_1d {
+ my ($data,$saved_mode,$saved_signal,$payload)=@_;
+ my $mode=$payload->{picture_mode}||$saved_mode||'';
+ my $signal=$payload->{signal_mode}||$saved_signal||'';
+ return &lg_encode_json({status=>'error',message=>'Restore requires the original saved signal and picture mode; cross-mode 1D restoration is not allowed.'})
+  if(!$saved_mode || !$saved_signal || $mode ne $saved_mode || $signal ne $saved_signal || $signal !~ /^(?:sdr|hdr10|dv)$/);
+ return &lg_encode_json({status=>'error',message=>"Select $signal output on the generator before restoring this 1D LUT."})
+  if(defined(&webui_pattern_signal_mode) && &webui_pattern_signal_mode('{}') ne $signal);
+ # History restoration always owns its bookends. Never claim that an upload
+ # succeeded when CAL_START or CAL_END failed, even if the upload itself did.
+ my $context={picture_mode=>$mode,signal_mode=>$signal};
+ my $result;
+ eval {
+  my $on=&lg_decode_json(&webui_lg_calibration_mode(&lg_encode_json({%$context,enabled=>JSON::PP::true})));
+  die(($on->{message}||'TV did not acknowledge calibration entry')."\n")
+   if(($on->{status}||'') ne 'ok' || !$on->{calibration_mode});
+  $result=&lg_decode_json(&webui_lg_1d_dpg_upload(&lg_encode_json({%$context,dpg_data=>$data,keep_calibration_mode=>1,calibration_mode_active=>1,helper_timeout=>90})));
+  die "No 1D upload result returned\n" if(ref($result) ne 'HASH' || !exists($result->{status}));
+  1;
+ } or $result={status=>'error',message=>"1D restore failed: ".($@||'Unknown upload failure')};
+ my $off=eval { &lg_decode_json(&webui_lg_calibration_mode(&lg_encode_json({%$context,enabled=>JSON::PP::false}))) };
+ my $exit_error=$@;
+ if(ref($off) ne 'HASH' || ($off->{status}||'') ne 'ok' || !exists($off->{calibration_mode}) || $off->{calibration_mode}) {
+  $result={%{$result||{}},status=>'error',upload_status=>$result->{status}||'unknown',error_code=>'calibration-exit-unconfirmed',
+   message=>($result->{message}||'1D upload finished').'; calibration exit is unconfirmed. Use Exit Calibration before testing the TV.',cleanup_detail=>$exit_error||$off->{message}||'No exit acknowledgement'};
+ }
+ return &lg_encode_json($result);
+}
+
 sub webui_lg_calibration_history_reupload (@) {
  my ($body)=@_;
  my $payload=&lg_decode_json($body);
@@ -3374,42 +3407,23 @@ sub webui_lg_calibration_history_reupload (@) {
    unless(ref($run_dpg) eq "ARRAY" && @{$run_dpg}==3072);
   my $manifest=_lg_cal_hist_read_json_file("$_lg_cal_hist_runs/$run/manifest.json") || {};
   my $cfg=(ref($manifest->{"config"}) eq "HASH") ? $manifest->{"config"} : {};
-  $picture_mode ||= $cfg->{"picture_mode"} || $state->{"picture_mode"} || $state->{"calibration_picture_mode"} || "";
+  my $saved_mode=$cfg->{"picture_mode"} || $state->{"picture_mode"} || $state->{"calibration_picture_mode"} || "";
   # Fall back to the layout the DPG itself came from, so an SDR run cannot be
   # re-pushed as HDR (which would write the curve into the wrong picture mode).
-  $signal_mode ||= $cfg->{"signal_mode"} || $state->{"signal_mode"} || $state->{"requested_signal_mode"} || $run_sm || "";
-  # Optional cal-mode bookends via existing calibration-mode endpoint helpers
-  if($enable_cal) {
-   my $on_body=sprintf('{"enabled":true,"picture_mode":"%s","signal_mode":"%s"}',
-    _lg_cal_hist_json_escape($picture_mode),_lg_cal_hist_json_escape($signal_mode));
-   eval { &webui_lg_calibration_mode($on_body); };
-  }
-  my $up_body=&lg_encode_json({
-   dpg_data => $run_dpg,
-   picture_mode => $picture_mode,
-   signal_mode => $signal_mode,
-   keep_calibration_mode => 1,
-   calibration_mode_active => 1,
-   helper_timeout => 90,
-  });
-  my $result_json=&webui_lg_1d_dpg_upload($up_body);
+  my $saved_signal=$cfg->{"signal_mode"} || $state->{"signal_mode"} || $state->{"requested_signal_mode"} || $run_sm || "";
+  my $result_json=_lg_cal_hist_restore_1d($run_dpg,$saved_mode,$saved_signal,$payload);
   eval {
    my $decoded=&lg_decode_json($result_json);
    if(ref($decoded) eq "HASH" && ($decoded->{"status"}||"") eq "ok") {
     &_lg_cal_hist_archive_1d($run_dpg,{
-     picture_mode => $picture_mode,
-     signal_mode => $signal_mode,
+     picture_mode => $saved_mode,
+     signal_mode => $saved_signal,
      de => $run_de,
      run_id => $run,
      variant => (_lg_cal_hist_run_smoothed($state) ? "smoothed" : ""),
     });
    }
   };
-  if($disable_cal) {
-   my $off_body=sprintf('{"enabled":false,"picture_mode":"%s","signal_mode":"%s"}',
-    _lg_cal_hist_json_escape($picture_mode),_lg_cal_hist_json_escape($signal_mode));
-   eval { &webui_lg_calibration_mode($off_body); };
-  }
   return $result_json;
  }
 
@@ -3445,28 +3459,7 @@ sub webui_lg_calibration_history_reupload (@) {
   my $meta=_lg_cal_hist_read_json_file("$_lg_cal_hist_dir/1d/$1.json");
   return &lg_encode_json({ status => "error", message => "1D archive not found" })
    unless(ref($meta) eq "HASH" && ref($meta->{"dpg_data"}) eq "ARRAY" && @{$meta->{"dpg_data"}}==3072);
-  $picture_mode ||= $meta->{"picture_mode"} || "";
-  $signal_mode ||= $meta->{"signal_mode"} || "";
-  if($enable_cal) {
-   my $on_body=sprintf('{"enabled":true,"picture_mode":"%s","signal_mode":"%s"}',
-    _lg_cal_hist_json_escape($picture_mode),_lg_cal_hist_json_escape($signal_mode));
-   eval { &webui_lg_calibration_mode($on_body); };
-  }
-  my $up_body=&lg_encode_json({
-   dpg_data => $meta->{"dpg_data"},
-   picture_mode => $picture_mode,
-   signal_mode => $signal_mode,
-   keep_calibration_mode => 1,
-   calibration_mode_active => 1,
-   helper_timeout => 90,
-  });
-  my $result_json=&webui_lg_1d_dpg_upload($up_body);
-  if($disable_cal) {
-   my $off_body=sprintf('{"enabled":false,"picture_mode":"%s","signal_mode":"%s"}',
-    _lg_cal_hist_json_escape($picture_mode),_lg_cal_hist_json_escape($signal_mode));
-   eval { &webui_lg_calibration_mode($off_body); };
-  }
-  return $result_json;
+  return _lg_cal_hist_restore_1d($meta->{dpg_data},$meta->{picture_mode},$meta->{signal_mode},$payload);
  }
 
  if($id =~ /^dvfile:([A-Za-z0-9._-]+)$/) {

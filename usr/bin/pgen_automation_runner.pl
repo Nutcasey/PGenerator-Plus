@@ -2319,6 +2319,7 @@ sub _calibration_greyscale_stage {
     return 0 if !$copied;
     if (!ref($grey) || ($grey->{status} || '') ne 'complete') {
         $::LAST_ERROR = $grey->{message} || $grey->{error} || 'Greyscale worker did not complete';
+        $::LAST_ERROR_DETAIL = $grey->{failure_detail} if ref($grey->{failure_detail}) eq 'HASH';
         return 0;
     }
     $ACTIVE_WORKER = '';
@@ -2683,6 +2684,7 @@ sub _stage {
     return 0 if $STOP_REQUESTED;
     $::LAST_ERROR = '';
     $::LAST_ERROR_CODE = '';
+    $::LAST_ERROR_DETAIL = undef;
     $ACTIVE_STAGE = $name;
     $item->{active_stage} = $name;
     $item->{stage_started_at} = time();
@@ -2717,6 +2719,7 @@ sub _stage {
         $item->{status} = $resumable ? 'interrupted' : 'failed';
         $item->{failure} = { stage => $name, message => "$message", at => time() };
         $item->{failure}{error_code} = $::LAST_ERROR_CODE if $::LAST_ERROR_CODE;
+        $item->{failure}{detail} = PGAutomation::clone($::LAST_ERROR_DETAIL) if ref($::LAST_ERROR_DETAIL) eq 'HASH';
         _update_item_snapshot($item_number, $item);
         _update_run(sub {
             my ($run) = @_;

@@ -38,6 +38,46 @@ The schema is `schema-v1.json`; source identifiers and licences are in
 
 ## Runtime integration
 
+### Contributing picture-mode knowledge
+
+`lg/picture-modes/catalogue.json` is the shared picture-mode vocabulary. Each
+signal has records keyed by the stable application value. A record separates
+the human-facing `label`, `settings_key` / `settings_value`, accepted `aliases`,
+and `calibration.bank` (externalpq wire token) / `calibration.internal_mode`
+(the helper's internal namespace). `offered` controls menu visibility, not
+hardware availability. Selection, readback and calibration support are
+independent; `inventory` does not mean a write has been verified.
+
+For example, HDR Cinema Home is labelled `HDR Cinema Home`, selects
+`pictureMode: hdrCinemaBright`, and has no reviewed calibration bank. The job
+editor offers it for readings but blocks AutoCal, without replacing a saved
+selection. HDR Cinema has a different selector, `hdrCinema`, and bank,
+`hdr_cinema`. The older DV Cinema menu label and bank override are profile data,
+not a special C1 workflow.
+
+Add new modes as complete records; use a higher-priority, model/platform/firmware
+scoped profile to override an existing record. Attach source IDs and evidence
+scope. Do not promote G3 observations to every LG TV, or infer a bank from a
+similar name. Hidden legacy application tokens can share a selector with an
+offered menu row; exact internal spellings retain their identity and native
+readback prefers the offered row. Ambiguous offered aliases fail closed.
+
+The job editor and Display picker consume the resolved catalogue; readiness
+and HDR reset use its bank eligibility. The helper uses the same records for
+selector mapping, mode comparison and calibration-mode resolution. Existing
+legacy/free-text adapters remain fallbacks for older spellings outside the
+catalogue; they are not evidence that an unknown mode supports AutoCal.
+Runtime platform, input, signal, write-acknowledgement and verification guards
+still apply. Adding a label or alias never grants those capabilities.
+
+Run `prove -Iusr/share/PGenerator t/lg_calibration_mode_contract.t
+t/lg_capability_library.t` and `node t/browser/automation_settings_plan.cjs`.
+The contribution regression adds a scoped profile in a temporary library and
+checks that its label, selector, readback alias and bank reach the shared
+planner and helper, without application code changes. Other controls continue
+to use `settings.controls` for schemas, routes and verification policies;
+recipe targets are not manufacturer defaults or measured values.
+
 The shared `pgenerator-lg` picture read/write workflows resolve the contracts
 on every connection. They validate types, ranges and enum tokens, isolate
 context-sensitive requests, retry omissions from grouped reads, require a
