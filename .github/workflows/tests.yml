@@ -28,6 +28,7 @@ jobs:
           perl -Iusr/share/PGenerator -c usr/share/PGenerator/PGAutomation.pm
           perl -Iusr/share/PGenerator -c usr/share/PGenerator/PGAutomationProcessing.pm
           perl -Iusr/share/PGenerator -c usr/share/PGenerator/PGAutomationETA.pm
+          perl -Iusr/share/PGenerator -c usr/share/PGenerator/PGAutomationLaunch.pm
           perl -Iusr/share/PGenerator -c usr/share/PGenerator/PGLGCapabilities.pm
           perl -Iusr/share/PGenerator -c usr/share/PGenerator/PGLGVerification.pm
           perl -Iusr/share/PGenerator -c usr/bin/pgen_automation_runner.pl
