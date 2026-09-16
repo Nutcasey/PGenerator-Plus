@@ -19,7 +19,7 @@ use strict;
 use warnings;
 use FindBin qw($Bin);
 use File::Temp qw(tempdir);
-use Test::More tests => 44;
+use Test::More tests => 48;
 
 my $dir = "$Bin/../usr/share/PGenerator";
 ok(-f "$dir/pattern.pm", 'pattern.pm is present');
@@ -91,14 +91,27 @@ like(idle_pattern_text(), qr/^BG=256,256,256$/m,  'background too');
 like(idle_pattern_text(), qr/^SOURCE_RANGE=LIMITED$/m,
      'DV inner components are legal-range even on a Full tunnel');
 # DV signalled through the transport flags with dv_status still 0 must still get
-# the 8-bit tunnel. sync_pattern_bits_default() only pins bits on dv_status==1, so
-# without the $bits=8-if-$dv guard this leaked BITS=10 under a 12-bit DV black.
+# the 8-bit tunnel. These assert the seeder's own $bits=8-if-$dv guard, which holds
+# even if a caller reaches it without a fresh sync_pattern_bits_default(); the
+# source-level contract is asserted separately below.
 conf(max_bpc => 10, dv_status => 0, is_std_dovi => 1);
 like(idle_pattern_text(), qr/^RGB=256,256,256$/m, 'is_std_dovi alone is enough to mean DV');
 like(idle_pattern_text(), qr/^BITS=8$/m,          'is_std_dovi alone still forces the 8-bit tunnel');
 like(idle_pattern_text(), qr/^SOURCE_MAX=4095$/m, 'and still declares 12-bit source precision');
 conf(max_bpc => 10, dv_status => 0, is_ll_dovi => 1);
 like(idle_pattern_text(), qr/^BITS=8$/m,          'is_ll_dovi alone forces the 8-bit tunnel too');
+
+# --- and the same contract at its source, not just in the seeder ---
+# sync_pattern_bits_default() is what every conf-change site calls, and several
+# consumers fall back to $bits_default when a pattern carries no explicit BITS.
+# It must agree with every other "is DV active" test in the tree, so assert it
+# directly rather than only through idle_pattern_text()'s own guard.
+for my $flag (qw(dv_status is_ll_dovi is_std_dovi)) {
+  conf(max_bpc => 12, $flag => 1);
+  is($bits_default, 8, "sync_pattern_bits_default pins 8 bpc for DV via $flag");
+}
+conf(max_bpc => 12);
+is($bits_default, 12, 'and leaves a non-DV 12 bpc link alone');
 
 # --- the frame itself is full-screen black ---
 conf();

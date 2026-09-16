@@ -805,11 +805,11 @@ sub idle_pattern_text (@) {
  $dv=1 if(int($pgenerator_conf{"is_ll_dovi"} || 0) == 1);
  $dv=1 if(int($pgenerator_conf{"is_std_dovi"} || 0) == 1);
  # DV is always the 8-bit tunnel, whichever flag set $dv. sync_pattern_bits_default()
- # only pins $bits_default to 8 on dv_status==1, so a session signalled through
- # is_ll_dovi/is_std_dovi alone (dv_status still 0 at sync time) would otherwise
- # leave $bits at max_bpc and emit e.g. BITS=10 + SOURCE_MAX=4095 + RGB=256,256,256,
- # a 12-bit DV black floor on a 10-bit tunnel. webui_pattern_effective_bits() returns
- # 8 for dv unconditionally; match it.
+ # now pins $bits_default to 8 for all three DV flags, so this is belt-and-braces:
+ # it also covers a caller that reaches the seeder without a fresh sync, where
+ # $bits would otherwise stay at max_bpc and emit e.g. BITS=10 + SOURCE_MAX=4095 +
+ # RGB=256,256,256, a 12-bit DV black floor on a 10-bit tunnel.
+ # webui_pattern_effective_bits() returns 8 for dv unconditionally; match it.
  $bits=8 if($dv);
  # Draw through the 10-bit path on a 12 bpc link, as webui_pattern_effective_bits()
  # does. This is not cosmetic: ofApp::setBackground() branches on bit_depth == 10
