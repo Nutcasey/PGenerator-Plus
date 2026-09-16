@@ -114,7 +114,7 @@ function pgAutomationSnapshot(source){
  const item=pgAutomationClone(source)||{};
  delete item.warmup_minutes;
  delete item.settings_recovery;
- ['readiness','setting_contracts','generation_profile','capability_profile','best_available_settings','best_available_write_ack','tv_input','worker_status','started_at','completed_at'].forEach(key=>delete item[key]);
+ ['readiness','setting_contracts','generation_profile','capability_profile','preflight_contract','best_available_settings','best_available_write_ack','tv_input','worker_status','started_at','completed_at'].forEach(key=>delete item[key]);
  pgAutomationUpgradeReference(item);
  ['item_number','status','checkpoints','checkpoint','checkpoint_status','active_stage','stage_started_at','failure','warnings','recheck','hazards','hazard_capabilities','hazard_restore','device_identity','fault_injected','drift_recovery_attempts','drift_recovery_pending','series','apply-all','panel-light'].forEach(key=>delete item[key]);
  return item;
@@ -1068,14 +1068,18 @@ function pgAutomationRenderReadiness(result){
  box.innerHTML='<p class="auto-muted">'+pgAutomationEscape(result.message||'Readiness')+' · '+checks.length+' checks. See the activity log for details.</p>'
   +(problems.length?'<ul class="auto-readiness-problems">'+problems.map(check=>'<li data-level="'+(check.level==='warning'?'warning':'error')+'">'+pgAutomationEscape(pgAutomationIssueText(check))+'</li>').join('')+'</ul>':'');
  pgAutomation.current={...pgAutomation.current,activity:{entries:checks.map(check=>({...check,source:'Startup check',level:check.ok?'ok':check.level||'error'}))}};pgAutomationRenderActivity();
- box.scrollIntoView({block:'nearest'});
+ if(result.scope!=='queue')box.scrollIntoView({block:'nearest'});
 }
 async function pgAutomationReadiness(){
  if(pgAutomation.pendingChecks||pgAutomation.busy||pgAutomation.current?.preflight?.status==='checking')return;
  if(!pgAutomation.queue.items.length){pgAutomationNotice('Add a job before checking readiness. No device checks were started.');return;}
- const button=pgAutomationEl('ReadinessButton');button.disabled=true;button.textContent='Checking TV and Meter…';
+ if(!confirm('Check every queued job? This temporarily switches generator signals and TV picture modes, then restores them. It does not reset calibration, upload LUTs or take measurements. A neutral grey pattern is left afterwards.'))return;
+ const button=pgAutomationEl('ReadinessButton');button.disabled=true;button.textContent='Checking all jobs…';
  const request_id=pgAutomationBeginChecks('readiness');
- try{pgAutomationRenderReadiness(await pgAutomationRequest('readiness',{scope:'preview',items:pgAutomation.queue.items,queue_name:pgAutomation.queue.name,request_id},300000));}catch(e){pgAutomationNotice(e.message,true);}
+ try{const result=await pgAutomationRequest('readiness',{scope:'queue',confirm_mode_switches:true,items:pgAutomation.queue.items,queue_name:pgAutomation.queue.name,request_id},300000);
+  if(result.run_id){pgAutomationNotice('Whole-queue preflight started. No calibration will be performed.');await pgAutomationRefresh();pgAutomationTab('live');}
+  else pgAutomationRenderReadiness(result);
+ }catch(e){pgAutomationNotice(e.message,true);}
  finally{pgAutomation.pendingChecks=null;button.disabled=false;button.textContent='Check Readiness';await pgAutomationPollLive();}
 }
 async function pgAutomationStart(){
@@ -1086,7 +1090,7 @@ async function pgAutomationStart(){
  try{
   const result=await pgAutomationRequest('runs/start',{queue:pgAutomation.queue,request_id},300000);
   if(!result.run_id){pgAutomationRenderReadiness(result);throw new Error(result.message||'Batch did not start');}
-  pgAutomationNotice('Batch started');await pgAutomationRefresh();pgAutomationTab('live');
+  pgAutomationNotice('Runner started. Every queued job will be checked before calibration begins.');await pgAutomationRefresh();pgAutomationTab('live');
  }catch(e){pgAutomationNotice(e.message+' No new run is confirmed. Check the status above before retrying.',true);}
  finally{pgAutomation.pendingChecks=null;pgAutomation.busy=false;pgAutomationEl('StartButton').disabled=false;pgAutomationEl('StartButton').textContent='Run queue';await pgAutomationPollLive();}
 }
@@ -1115,20 +1119,23 @@ function pgAutomationRenderLiveRun(run,execution){
  pgAutomationRenderActivity();
  const pre=pgAutomation.current?.preflight,checking=pgAutomation.pendingChecks||pre?.status==='checking';
  const status=run?.status||(checking?'checking':'idle');pgAutomationStateBadge(status);pgAutomationRenderProgress();
- const occupied=checking||['starting','running','paused','interrupted','stopping','completing'].includes(run?.status);
+ const occupied=checking||run?.cleanup_required||['starting','running','paused','interrupted','stopping','completing'].includes(run?.status);
  pgAutomationEl('StartButton').disabled=!!(occupied||pgAutomation.busy);
  pgAutomationEl('ReadinessButton').disabled=!!(occupied||pgAutomation.pendingChecks);
- const reason=checking?'Readiness checks are in progress.':occupied?'The previous batch is '+run.status+'. Open Live Run to resume it or Stop it before starting a new queue.':pgAutomation.busy?'A start request is in progress.':'';
+ const reason=run?.cleanup_required?'Cleanup is still required. Open Live Run and use Retry cleanup.':checking?'Readiness checks are in progress.':occupied?'The previous batch is '+run.status+'. Open Live Run to resume it or Stop it before starting a new queue.':pgAutomation.busy?'A start request is in progress.':'';
  for(const id of ['StartButton','ReadinessButton'])pgAutomationEl(id).title=reason;
  const blocker=pgAutomationEl('ActionBlocker');
  if(blocker){blocker.hidden=!reason;blocker.innerHTML=pgAutomationEscape(reason)+(occupied&&!checking?' <button type="button" class="btn btn-sm btn-secondary" onclick="pgAutomationTab(\'live\')">Open Live Run</button>':'');}
- pgAutomationEl('PauseButton').disabled=status!=='running';pgAutomationEl('ResumeButton').disabled=!['paused','interrupted'].includes(status);
- pgAutomationEl('StopButton').disabled=!['starting','running','paused','interrupted','stopping','completing'].includes(status);
+ pgAutomationEl('PauseButton').disabled=status!=='running'||run?.preflight_only||run?.active_stage==='queue-preflight';pgAutomationEl('ResumeButton').disabled=!!run?.preflight_only||!!run?.cleanup_required||!['paused','interrupted'].includes(status);
+ pgAutomationEl('ResumeButton').title=run?.cleanup_required?'Retry cleanup before resuming.':'';
+ pgAutomationEl('StopButton').disabled=!run?.cleanup_required&&!['starting','running','paused','interrupted','stopping','completing'].includes(status);
+ pgAutomationEl('StopButton').textContent=run?.cleanup_required?'Retry cleanup':'Stop';
  const live=pgAutomationEl('Live');
- if(!run){live.innerHTML='<div class="auto-empty">'+(checking?'Checking TV/meter availability and queue configuration. Each job checks its own TV settings after selecting its signal and picture mode.':pre&&['blocked','failed','interrupted'].includes(pre.status)?'Calibration has not started. Resolve the startup problems shown above, then retry.':'No active batch. Completed and stopped runs are in History.')+'</div>';pgAutomationEl('LiveDetail').innerHTML='';delete pgAutomation.jobViews.live;return;}
+ if(run?.preflight_result)pgAutomationRenderReadiness(run.preflight_result);
+ if(!run){live.innerHTML='<div class="auto-empty">'+(checking?'Checking the whole queue against the connected TV before calibration. Signal and picture modes are temporarily switched and restored.':pre&&['blocked','failed','interrupted'].includes(pre.status)?'Calibration has not started. Resolve the startup problems shown above, then retry.':'No active batch. Completed and stopped runs are in History.')+'</div>';pgAutomationEl('LiveDetail').innerHTML='';delete pgAutomation.jobViews.live;return;}
  const terminal=pgAutomationTerminal(run),active=run.active_item!=null?Number(run.active_item):-1,items=run.items||[],worker=terminal?{}:run.worker_status||{};
  if(terminal){
-  live.innerHTML='<h3>Last batch · '+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Batch')+'</h3><p class="auto-muted">'+pgAutomationEscape(status.replace(/-/g,' '))+' · Nothing is running. Results remain available below and in History.</p>'
+  live.innerHTML='<h3>'+(run.preflight_only?'Last whole-queue check · ':'Last batch · ')+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Batch')+'</h3><p class="auto-muted">'+pgAutomationEscape(status.replace(/-/g,' '))+' · Nothing is running. Results remain available below and in History.</p>'
    +pgAutomationRunWarningsHtml(run)
    +items.map((item,i)=>pgAutomationJobButton(item,i,'live',run.id,false)).join('');
   if(pgAutomation.tab==='live')pgAutomationSyncLiveDetail(run);return;

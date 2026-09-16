@@ -2,11 +2,11 @@
 const assert=require('node:assert/strict'),fs=require('fs'),path=require('path'),http=require('http'),puppeteer=require('puppeteer');
 const root=path.resolve(__dirname,'../..'),read=name=>fs.readFileSync(path.join(root,'usr/share/PGenerator',name),'utf8');
 const meta=read('webui-lg.js').match(/const LG_DISPLAY_CONTROL_ITEMS=\[[\s\S]*?const LG_DISPLAY_CONTROL_KEYS=[^;]+;/)[0];
-const html='<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>'+read('webui-theme.css')+'</style>'+read('webui-automation.html')+'<script>'+meta+'</script><script>'+read('webui-automation.js')+'</script><script>'+`
+const html='<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><style>'+read('webui-theme.css')+'</style>'+read('webui-automation.html')+'<script>'+meta+'</script><script>'+`
 window.requests=[];
 window.fetchJSON=async(url,opts={})=>{
  const body=opts.body?JSON.parse(opts.body):null;requests.push({url,body});
- if(url==='/api/automation/runs/current')return {status:'ok'};
+ if(url==='/api/automation/runs/current')return window.mockCurrent||{status:'ok'};
  if(url==='/api/automation/recipes')return {recipes:[]};
  if(url==='/api/automation/queues')return {queues:[]};
  if(url==='/api/automation/runs')return {runs:[]};
@@ -17,7 +17,7 @@ window.fetchJSON=async(url,opts={})=>{
  throw new Error('Unexpected request: '+url);
 };
 window.confirm=()=>true;
-`+'</script>';
+`+'</script><script>'+read('webui-automation.js')+'</script>';
 (async()=>{
  const server=http.createServer((req,res)=>{res.setHeader('Content-Type','text/html');res.end(html)});
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
@@ -39,13 +39,19 @@ window.confirm=()=>true;
   await page.waitForFunction(()=>!pgAutomationEl('Editor').open);
   await page.reload();await page.waitForFunction(()=>pgAutomation.loaded&&pgAutomation.queue.items.length===1);
   assert.equal(await page.evaluate(()=>pgAutomation.queue.items[0].settings.contrast),85,'draft survives real browser refresh');
+  await page.evaluate(()=>window.confirm=()=>false);
+  const beforeCheck=await page.evaluate(()=>requests.filter(x=>x.url.endsWith('/readiness')).length);
+  await page.click('#pgAutomationReadinessButton');
+  assert.equal(await page.evaluate(()=>requests.filter(x=>x.url.endsWith('/readiness')).length),beforeCheck,'cancelling consent makes no device request');
+  await page.evaluate(()=>window.confirm=()=>true);
   await page.click('#pgAutomationReadinessButton');
   await page.waitForFunction(()=>pgAutomationEl('Readiness').textContent.includes('gamma'));
-  assert.equal(await page.evaluate(()=>requests.find(x=>x.url.endsWith('/readiness')).body.scope),'preview');
+  assert.equal(await page.evaluate(()=>requests.find(x=>x.url.endsWith('/readiness')).body.scope),'queue');
+  assert.equal(await page.evaluate(()=>requests.find(x=>x.url.endsWith('/readiness')).body.confirm_mode_switches),true,'mode switching is explicitly confirmed');
   assert.ok(await page.$eval('#pgAutomationReadiness',el=>el.getBoundingClientRect().bottom<document.getElementById('pgAutomationQueueItems').getBoundingClientRect().top),'readiness is beside actions, before jobs');
   await page.evaluate(()=>{
    const failure={stage:'job-readiness',message:'Combined failure'};
-   pgAutomation.current={run:{id:'parked',status:'interrupted',active_item:0,failure,items:[{name:'Job',failure,readiness:{checks:Array.from({length:13},(_,i)=>({name:'item-0-key-control'+i,ok:0,level:'error',message:'control'+i+' is not supported by the LG TV. Configure this job.'}))}}]}};
+   pgAutomation.current=window.mockCurrent={run:{id:'parked',status:'interrupted',active_item:0,failure,items:[{name:'Job',failure,readiness:{checks:Array.from({length:13},(_,i)=>({name:'item-0-key-control'+i,ok:0,level:'error',message:'control'+i+' is not supported by the LG TV. Configure this job.'}))}}]}};
    pgAutomationRenderLiveRun(pgAutomation.current.run);
   });
   assert.ok(await page.$eval('#pgAutomationStartButton',el=>el.disabled&&el.title.includes('interrupted')));
@@ -55,7 +61,20 @@ window.confirm=()=>true;
   await page.click('#pgAutomationActionBlocker button');
   assert.equal(await page.evaluate(()=>pgAutomation.tab),'live');
   await page.evaluate(()=>{
-   pgAutomationEl('Activity').open=false;pgAutomation.current={run:{id:'different',status:'running',items:[]}};pgAutomationRenderActivity();
+   pgAutomation.current.run.cleanup_required=true;
+   pgAutomationRenderLiveRun(pgAutomation.current.run);
+  });
+  assert.equal(await page.$eval('#pgAutomationResumeButton',el=>el.disabled),true,'cleanup blocks Resume');
+  assert.equal(await page.$eval('#pgAutomationStopButton',el=>el.textContent),'Retry cleanup','failed cleanup has an explicit retry action');
+  assert.equal(await page.$eval('#pgAutomationStopButton',el=>el.disabled),false,'cleanup retry is enabled');
+  await page.evaluate(()=>{
+   pgAutomation.current=window.mockCurrent={run:{id:'checked',status:'failed',preflight_only:true,items:[],preflight_result:{scope:'queue',ready:0,message:'Queue blocked before calibration',checks:[{ok:0,level:'error',item_number:3,message:'Job four unsupported'}]}}};
+   pgAutomationRenderLiveRun(pgAutomation.current.run);
+  });
+  assert.match(await page.$eval('#pgAutomationLive',el=>el.textContent),/Last whole-queue check/,'check-only run is not reported as a calibration');
+  assert.match(await page.$eval('#pgAutomationReadiness',el=>el.textContent),/Job four unsupported/,'late incompatibility is visible');
+  await page.evaluate(()=>{
+   pgAutomationEl('Activity').open=false;pgAutomation.current=window.mockCurrent={run:{id:'different',status:'running',items:[]}};pgAutomationRenderActivity();
    pgAutomation.historyActivity={run:{id:'saved',items:[{name:'Summary only'}]}};
    pgAutomationEl('HistoryDetail').innerHTML='<button id="recover" onclick="pgAutomationRecoverQueue()">Recover queue</button>';
    pgAutomationTab('history');

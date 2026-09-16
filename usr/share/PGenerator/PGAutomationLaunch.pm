@@ -5,65 +5,180 @@ use warnings;
 use Time::HiRes ();
 use PGAutomation ();
 
-sub runner_announced {
-    my ($run_id, $timeout) = @_;
-    $timeout = 3 if !defined($timeout) || ref($timeout) || $timeout !~ /^\d+(?:\.\d+)?$/;
-    return 0 if !defined($run_id) || PGAutomation::safe_component($run_id) eq '';
+# Internal configuration, never taken from an HTTP request. Tests use a real
+# subprocess with an isolated store, not a mocked successful shell return.
+our $RUNNER_PATH = '/usr/bin/pgen_automation_runner.pl';
+our $PERL_PATH = '/usr/bin/perl';
+our $START_TIMEOUT = 10;
 
-    my $file = PGAutomation::run_dir($run_id) . '/runner.pid';
-    my $deadline = Time::HiRes::time() + $timeout;
-    while (1) {
-        my $pid = PGAutomation::read_raw($file);
-        if (defined($pid)) {
-            $pid =~ s/^\s+|\s+$//g;
-            return 1 if $pid =~ /^\d+$/
-                && PGAutomation::pid_is_live($pid, 'pgen_automation_runner.pl');
-        }
-        last if Time::HiRes::time() >= $deadline;
-        Time::HiRes::sleep(0.1);
+sub _quote {
+    my ($value) = @_;
+    $value =~ s/'/'"'"'/g;
+    return "'$value'";
+}
+
+sub _file { return PGAutomation::run_dir($_[0]) . '/launch.json'; }
+sub _clock { return Time::HiRes::clock_gettime(Time::HiRes::CLOCK_MONOTONIC()); }
+
+sub _owns {
+    my ($value, $run_id, $token) = @_;
+    return ref($value) eq 'HASH' && ($value->{run_id} || $value->{id} || '') eq $run_id
+        && ($value->{token} || '') eq $token;
+}
+
+sub _live_attempt_pid {
+    my ($pid, $run_id, $token, $attempt) = @_;
+    return 0 if !defined($pid) || $pid !~ /^\d+$/ || $pid <= 1;
+    my $raw = PGAutomation::read_raw("/proc/$pid/cmdline");
+    return 0 if !defined($raw);
+    my @args = split(/\0/, $raw);
+    for (my $i = 0; $i + 3 < @args; $i++) {
+        return 1 if $args[$i] eq $RUNNER_PATH && $args[$i+1] eq $run_id
+            && $args[$i+2] eq $token && $args[$i+3] eq $attempt;
     }
     return 0;
 }
 
 sub _spawn_runner {
-    my ($command) = @_;
-    return system($command) == 0 ? 1 : 0;
+    my ($run_id, $token, $attempt, $log) = @_;
+    my $command = 'setsid ' . join(' ', map { _quote($_) }
+        ($PERL_PATH, $RUNNER_PATH, $run_id, $token, $attempt))
+        . ' </dev/null >>' . _quote($log) . ' 2>&1 & printf "%s\\n" "$!"';
+    # Reap only the short-lived shell. Its detached child must acknowledge the
+    # unique attempt below; neither this PID nor exit 0 means it is ready.
+    return 0 if !open(my $pipe, '-|', '/bin/sh', '-c', $command);
+    my $pid = <$pipe> // '';
+    my $ok = close($pipe);
+    $pid =~ s/\s+\z//;
+    return $ok && $pid =~ /^\d+$/ && $pid > 1 ? 0+$pid : 0;
+}
+
+sub _accept_ready {
+    my ($run_id, $token, $attempt) = @_;
+    my $dir = PGAutomation::run_dir($run_id);
+    my ($ok, $accepted) = PGAutomation::with_lock(_file($run_id), sub {
+        my ($launch) = @_;
+        return undef if ref($launch) ne 'HASH' || ($launch->{attempt} || '') ne $attempt
+            || ($launch->{state} || '') ne 'ready' || Time::HiRes::time() >= $launch->{expires_at}
+            || !_live_attempt_pid($launch->{pid}, $run_id, $token, $attempt);
+        my $pid = $launch->{pid};
+        my $execution_file = PGAutomation::base_dir() . '/execution.json';
+        die "Automation ownership changed during startup\n"
+            if !_owns(PGAutomation::read_json_file($execution_file), $run_id, $token);
+        my $control = PGAutomation::read_json_file("$dir/control.json") || {};
+        my $status = ($control->{request} || '') eq 'stop' ? 'stopping' : 'running';
+        my $now = Time::HiRes::time();
+        my ($saved) = PGAutomation::with_lock("$dir/run.json", sub {
+            my ($run) = @_;
+            die "Run changed during startup\n" if !_owns($run, $run_id, $token)
+                || ($run->{status} || '') !~ /^(?:starting|running|stopping)$/;
+            $run->{status} = $status;
+            $run->{runner_pid} = $pid;
+            $run->{launch_attempt} = $attempt;
+            $run->{started_at} ||= $now;
+            $run->{heartbeat} = $now;
+            return $run;
+        });
+        die "Unable to persist runner startup\n" if !$saved;
+        ($saved) = PGAutomation::with_lock($execution_file, sub {
+            my ($execution) = @_;
+            die "Automation ownership changed during startup\n" if !_owns($execution, $run_id, $token);
+            return {%$execution, pid=>$pid, status=>$status, launch_attempt=>$attempt, updated_at=>$now};
+        });
+        die "Unable to persist runner ownership\n" if !$saved;
+        die "Unable to persist runner PID\n"
+            if !PGAutomation::write_atomic("$dir/runner.pid", "$pid\n", 0664);
+        # This is the commit point. The child is forbidden from talking to any
+        # device until it sees this exact accepted attempt, after all required
+        # startup writes have succeeded.
+        return {%$launch, state=>'accepted', accepted_at=>$now};
+    });
+    return $ok && ref($accepted) eq 'HASH' && $accepted->{state} eq 'accepted' ? 1 : 0;
+}
+
+sub _cancel {
+    my ($run_id, $token, $attempt, $spawn_pid) = @_;
+    my ($ok, $launch) = PGAutomation::with_lock(_file($run_id), sub {
+        my ($current) = @_;
+        return undef if ref($current) ne 'HASH' || ($current->{attempt} || '') ne $attempt;
+        return undef if ($current->{state} || '') eq 'accepted';
+        return {%$current, state=>'cancelled', cancelled_at=>Time::HiRes::time()};
+    });
+    # An accepted attempt cannot be revoked as a failed launch. Ordinary Stop
+    # owns cancellation after acceptance. Missing/unwritable cancellation state
+    # still fails closed in the worker because the attempt deadline expires.
+    my $current = PGAutomation::read_json_file(_file($run_id));
+    return 1 if ref($current) eq 'HASH' && ($current->{attempt} || '') eq $attempt
+        && ($current->{state} || '') eq 'accepted';
+    my %pids = map { defined($_) ? ($_=>1) : () } ($spawn_pid, ref($launch) eq 'HASH' ? $launch->{pid} : undef);
+    for my $pid (keys %pids) {
+        next if !_live_attempt_pid($pid, $run_id, $token, $attempt);
+        kill('TERM', $pid);
+        my $until = _clock() + 0.3;
+        Time::HiRes::sleep(0.02) while _clock() < $until && _live_attempt_pid($pid, $run_id, $token, $attempt);
+        kill('KILL', $pid) if _live_attempt_pid($pid, $run_id, $token, $attempt);
+    }
+    return 0;
 }
 
 sub launch_runner {
     my ($run_id, $token) = @_;
-    $run_id = PGAutomation::safe_component($run_id);
-    return 0 if $run_id eq '';
-    return 0 if !defined($token) || $token !~ /^[A-Za-z0-9_.:-]{8,200}$/;
-
+    return 0 if !PGAutomation::safe_component($run_id) || !defined($token) || ref($token)
+        || $token !~ /^[A-Za-z0-9_.:-]{8,200}$/;
     my $dir = PGAutomation::run_dir($run_id);
-    my $pid_file = $dir . '/runner.pid';
-
-    # A previous interrupted/paused runner can leave runner.pid behind. The
-    # startup handshake must observe a PID written by this launch, not stale
-    # state (or a recycled PID that happens to name another runner process).
-    if (-e $pid_file && !unlink($pid_file)) {
-        return 0;
+    my $run = PGAutomation::read_json_file("$dir/run.json");
+    my $execution = PGAutomation::read_json_file(PGAutomation::base_dir() . '/execution.json');
+    return 0 if !_owns($run, $run_id, $token) || !_owns($execution, $run_id, $token);
+    return 0 if PGAutomation::pid_is_live($run->{runner_pid}, 'pgen_automation_runner.pl')
+        || PGAutomation::pid_is_live($execution->{pid}, 'pgen_automation_runner.pl');
+    my $attempt = PGAutomation::new_id();
+    my $deadline = _clock() + $START_TIMEOUT;
+    my ($saved) = PGAutomation::with_lock(_file($run_id), sub {
+        return {run_id=>$run_id, attempt=>$attempt, state=>'pending',
+            created_at=>Time::HiRes::time(), expires_at=>Time::HiRes::time()+$START_TIMEOUT};
+    });
+    return 0 if !$saved;
+    if (-e "$dir/runner.pid" && !unlink("$dir/runner.pid")) {
+        return _cancel($run_id, $token, $attempt, 0);
     }
-
-    my $quote = \&main::webui_automation_shell_quote;
-    my $cmd = 'setsid /usr/bin/perl /usr/bin/pgen_automation_runner.pl '
-        . $quote->($run_id) . ' ' . $quote->($token)
-        . ' </dev/null >>' . $quote->($dir . '/runner.log') . ' 2>&1 &';
-
-    # `system()` only establishes that the shell accepted the background
-    # command. The runner can still die immediately while validating its
-    # manifest, token, or singleton lock. Report launch success only once the
-    # validated runner has written runner.pid and that PID is actually live.
-    return 0 if !_spawn_runner($cmd);
-    return runner_announced($run_id, 3);
+    my $pid = _spawn_runner($run_id, $token, $attempt, "$dir/runner.log");
+    return _cancel($run_id, $token, $attempt, 0) if !$pid;
+    while (_clock() < $deadline) {
+        return 1 if _accept_ready($run_id, $token, $attempt);
+        my $launch = PGAutomation::read_json_file(_file($run_id));
+        last if ref($launch) ne 'HASH' || ($launch->{attempt} || '') ne $attempt
+            || ($launch->{state} || '') =~ /^(?:cancelled|failed)$/;
+        Time::HiRes::sleep(0.02);
+    }
+    return _cancel($run_id, $token, $attempt, $pid);
 }
 
-sub install {
-    no warnings 'redefine';
-    *main::webui_automation_runner_announced = \&runner_announced;
-    *main::webui_automation_launch_runner = \&launch_runner;
-    return 1;
+sub worker_handshake {
+    my ($run_id, $token, $attempt) = @_;
+    return 0 if !PGAutomation::safe_component($attempt);
+    my ($ok, $ready) = PGAutomation::with_lock(_file($run_id), sub {
+        my ($launch) = @_;
+        return undef if ref($launch) ne 'HASH' || ($launch->{attempt} || '') ne $attempt
+            || ($launch->{state} || '') ne 'pending' || Time::HiRes::time() >= $launch->{expires_at};
+        return undef if !_owns(PGAutomation::read_json_file(PGAutomation::base_dir().'/execution.json'), $run_id, $token);
+        return {%$launch, state=>'ready', pid=>$$};
+    });
+    return 0 if !$ok || ref($ready) ne 'HASH';
+    my $deadline = _clock() + ($ready->{expires_at} - Time::HiRes::time());
+    while (1) {
+        my $launch = PGAutomation::read_json_file(_file($run_id));
+        return 0 if ref($launch) ne 'HASH' || ($launch->{attempt} || '') ne $attempt
+            || ($launch->{pid} || 0) != $$ || ($launch->{state} || '') =~ /^(?:failed|cancelled)$/;
+        if (($launch->{state} || '') eq 'accepted') {
+            my $run = PGAutomation::read_json_file(PGAutomation::run_dir($run_id).'/run.json');
+            my $execution = PGAutomation::read_json_file(PGAutomation::base_dir().'/execution.json');
+            return _owns($run,$run_id,$token) && _owns($execution,$run_id,$token)
+                && ($run->{launch_attempt}||'') eq $attempt && ($execution->{launch_attempt}||'') eq $attempt
+                && ($execution->{pid}||0) == $$ && ($run->{runner_pid}||0) == $$ ? 1 : 0;
+        }
+        return 0 if _clock() >= $deadline;
+        Time::HiRes::sleep(0.02);
+    }
 }
 
 1;

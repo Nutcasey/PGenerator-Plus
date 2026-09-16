@@ -35,6 +35,7 @@ is(main::webui_route_device_lane('POST','/api/lg/dv-profile/stop'),'meter','DV w
 }
 {
  my $id='cancel-guard';
+ local *main::webui_automation_reap_dead_runner=sub {0}; # This fixture represents a still-live final-cleanup runner.
  PGAutomation::write_json_atomic(PGAutomation::base_dir().'/execution.json',{run_id=>$id,status=>'running',token=>'owner'});
  PGAutomation::write_json_atomic(PGAutomation::run_dir($id).'/control.json',{request=>'stop'});
  my $result=PGAutomation::decode_json(main::lg_automation_guard_json('{"automation_token":"owner"}'));
@@ -127,7 +128,8 @@ is(main::webui_route_device_lane('POST','/api/lg/dv-profile/stop'),'meter','DV w
  ok(!$run->{stop_cleanup}{verified},'unacknowledged exit is saved as unverified');
  like($run->{worker_status}{message},qr/Cleanup failed:.*TV did not acknowledge CAL_END/,'finished cleanup replaces the in-progress worker message with its actual failure');
  main::_finish('stopped');
- is($run->{status},'failed','failed cleanup is not presented as a clean Stop');
+ is($run->{status},'interrupted','failed cleanup stays retryable instead of becoming terminal');
+ ok($run->{cleanup_required},'cleanup-required flag persists');
  like($run->{failure}{message},qr/TV did not acknowledge CAL_END/,'top-level status includes cleanup cause');
 }
 {

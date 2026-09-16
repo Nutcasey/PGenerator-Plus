@@ -29,6 +29,7 @@ use Fcntl qw(O_NONBLOCK O_WRONLY LOCK_EX LOCK_UN);
 use File::Path qw(make_path);
 use JSON::PP ();
 use PGAutomation ();
+use PGAutomationLaunch ();
 use Time::HiRes ();
 # Required for the ":shared" attributes and lock() below: webui_http dispatches
 # requests to a worker thread pool, so the cross-call state at this file scope
@@ -13018,6 +13019,15 @@ sub webui_automation_error (@) {
  });
 }
 
+sub webui_automation_cleanup_required (@) {
+ my ($run)=@_;
+ return 0 if(ref($run) ne 'HASH');
+ return 1 if($run->{cleanup_required} || $run->{preflight_restore_required});
+ my $cleanup=$run->{stop_cleanup};
+ return ref($cleanup) eq 'HASH' && !$cleanup->{verified}
+  && ($cleanup->{completed_at}||0)>=($run->{resumed_at}||0) ? 1 : 0;
+}
+
 sub webui_automation_active_status (@) {
  my $status=shift||"";
  return ($status eq "starting" || $status eq "running" || $status eq "paused" || $status eq "stopping" || $status eq "completing" || $status eq "interrupted") ? 1 : 0;
@@ -13078,6 +13088,9 @@ sub webui_automation_public_run (@) {
  my $public={
   id=>$run->{id}||"",
   status=>$run->{status}||"idle",
+  cleanup_required=>&webui_automation_cleanup_required($run)?JSON::PP::true:JSON::PP::false,
+  preflight_only=>$run->{preflight_only}?JSON::PP::true:JSON::PP::false,
+  preflight_result=>ref($run->{preflight_result}) eq 'HASH' ? &webui_automation_scrub_credentials(PGAutomation::clone($run->{preflight_result})) : undef,
   queue_name=>$run->{queue_name}||$queue_snapshot->{name}||"Automation queue",
   active_item=>$active_item,
   items=>\@items,
@@ -13488,7 +13501,7 @@ sub webui_automation_normalize_item (@) {
  delete $item->{readiness};
  delete $item->{settings_recovery};
  delete $item->{profile_baseline_needs_restore};
- delete @$item{qw(setting_contracts generation_profile capability_profile calibration_settings_recipe device_identity best_available_settings best_available_write_ack)};
+ delete @$item{qw(setting_contracts generation_profile capability_profile calibration_settings_recipe device_identity best_available_settings best_available_write_ack preflight_contract)};
  $item->{id}=PGAutomation::new_id() if(!defined($item->{id}) || !PGAutomation::safe_component($item->{id}));
  $item->{name}=substr(($item->{name}||$item->{title}||"Automation item"),0,120);
  $item->{signal_format}=lc($item->{signal_format}||$item->{signal_mode}||"sdr");
@@ -14188,10 +14201,7 @@ sub webui_automation_write_item_files (@) {
 }
 
 sub webui_automation_launch_runner (@) {
- my ($run_id,$token)=@_;
- my $dir=PGAutomation::run_dir($run_id);
- my $cmd="setsid /usr/bin/perl /usr/bin/pgen_automation_runner.pl ".&webui_automation_shell_quote($run_id)." ".&webui_automation_shell_quote($token)." </dev/null >>".&webui_automation_shell_quote($dir."/runner.log")." 2>&1 &";
- return system($cmd)==0 ? 1 : 0;
+ return PGAutomationLaunch::launch_runner(@_);
 }
 
 sub webui_automation_start (@) {
@@ -14206,7 +14216,7 @@ sub webui_automation_start (@) {
   my $id=PGAutomation::safe_component($payload->{queue_id});
   $queue=PGAutomation::read_json_file(PGAutomation::queues_dir()."/$id.json") if($id ne "");
  }
- $queue=&webui_automation_normalize_queue($queue||{name=>$payload->{name}||"Automation queue",items=>$payload->{items}});
+ $queue=&webui_automation_normalize_queue($queue||{name=>$payload->{queue_name}||$payload->{name}||"Automation queue",items=>$payload->{items}});
  return &webui_automation_error("Unable to create the automation store","store-unavailable") if(!PGAutomation::ensure_store());
  my $readiness=&webui_automation_checked_readiness({items=>$queue->{items},queue_name=>$queue->{name},request_id=>$payload->{request_id},automation_token=>""},"start");
  return &webui_automation_json($readiness) if(!$readiness->{ready});
@@ -14217,6 +14227,7 @@ sub webui_automation_start (@) {
  my $run_dir=PGAutomation::run_dir($run_id);
  my $run={
   schema_version=>1,id=>$run_id,token=>$token,status=>"starting",
+  preflight_only=>$payload->{preflight_only}?JSON::PP::true:JSON::PP::false,queue_revision=>0,
   queue_id=>$queue->{id},queue_name=>$queue->{name},queue_snapshot=>$queue,
   items=>$items,hazard_restore=>$readiness->{hazard_restore}||{},created_at=>PGAutomation::now(),created_at_iso=>&webui_automation_iso(),
   runner_pid=>0,active_item=>undef,active_stage=>"",checkpoints=>[],readiness=>$readiness,startup_events=>$readiness->{events}||[],
@@ -14238,14 +14249,19 @@ sub webui_automation_start (@) {
   &webui_automation_preflight_finish("failed",$message,"start-failed");
   return &webui_automation_error($message,"start-failed");
  }
+ # Publish startup before accepting the child: once accepted, the runner
+ # owns preflight progress and an HTTP response must not overwrite its state.
+ &webui_automation_preflight_finish("started","Runner starting; all queued jobs will be checked before calibration","",$run_id);
  if(!&webui_automation_launch_runner($run_id,$token)) {
   $run->{status}="failed"; $run->{failure}={stage=>"runner-start",message=>"Unable to launch automation runner",at=>PGAutomation::now()};
   &webui_automation_write_locked($run_dir."/run.json",$run);
-  PGAutomation::with_lock(PGAutomation::base_dir()."/execution.json",sub { return {__pg_automation_delete=>1}; });
+  PGAutomation::with_lock(PGAutomation::base_dir()."/execution.json",sub {
+   my ($claim)=@_;return undef if(ref($claim) ne 'HASH' || ($claim->{run_id}||'') ne $run_id || ($claim->{token}||'') ne $token);
+   return {__pg_automation_delete=>1};
+  });
   &webui_automation_preflight_finish("failed","Unable to launch automation runner","runner-start-failed",$run_id);
   return &webui_automation_error("Unable to launch automation runner","runner-start-failed");
  }
- &webui_automation_preflight_finish("started","Startup checks passed; calibration runner launched","",$run_id);
  return &webui_automation_json({status=>"started",run_id=>$run_id,run=>&webui_automation_public_run($run)});
 }
 
@@ -14264,6 +14280,8 @@ sub webui_automation_control (@) {
   # The body re-reads the run and re-checks its status under the lock.
   my $id=PGAutomation::safe_component($run_id);
   my $run=$id ne "" ? &webui_automation_read_run($id) : undef;
+  return &webui_automation_error("Cleanup must finish before Resume. Use Retry cleanup.","cleanup-required")
+   if(&webui_automation_cleanup_required($run));
   if(ref($run) eq "HASH" && ($run->{status}||"") =~ /^(?:paused|interrupted)$/) {
    my $connection=&webui_automation_reconnect_for_resume($run);
    return &webui_automation_json($connection) if(($connection->{status}||"") ne "ok");
@@ -14295,6 +14313,7 @@ sub webui_automation_stop_launch_failed (@) {
  my ($run,$message)=@_;
  my $now=PGAutomation::now();
  $run->{status}="interrupted";
+ $run->{cleanup_required}=JSON::PP::true;
  $run->{runner_pid}=0;
  $run->{failure}={stage=>"stop-cleanup",error_code=>"runner-start-failed",message=>$message,at=>$now};
  $run->{stop_cleanup}={verified=>JSON::PP::false,completed_at=>$now,
@@ -14318,6 +14337,8 @@ sub webui_automation_control_body (@) {
  my $run=&webui_automation_read_run($run_id);
  return &webui_automation_error("Automation run not found","not-found") if(ref($run) ne "HASH");
  if($action eq "clear") {
+  return &webui_automation_error("Cleanup is still required. Use Retry cleanup before clearing this batch.","cleanup-required")
+   if(&webui_automation_cleanup_required($run));
   return &webui_automation_error("Stop this batch before clearing it. Paused or interrupted runs may still need cleanup.","not-finished")
    if(($run->{status}||"") !~ /^(?:complete(?:-with-warnings)?|stopped|failed)$/);
   my $execution=&webui_automation_read_execution();
@@ -14336,6 +14357,8 @@ sub webui_automation_control_body (@) {
   return &webui_automation_json({status=>"ok",message=>"Pause requested at the next checkpoint",run=>&webui_automation_public_run($run)});
  }
  if($action eq "resume") {
+  return &webui_automation_error("Cleanup must finish before Resume. Use Retry cleanup.","cleanup-required")
+   if(&webui_automation_cleanup_required($run));
   return &webui_automation_error("Run is already active","already-active") if(($run->{status}||"") eq "running");
   return &webui_automation_error("Run cannot be resumed","not-resumable") if(($run->{status}||"") !~ /^(?:paused|interrupted)$/);
   my $readiness=(ref($options) eq "HASH" && ref($options->{readiness}) eq "HASH") ? $options->{readiness} : &webui_automation_readiness_data({items=>$run->{items},automation_token=>$run->{token}||""});
@@ -14364,15 +14387,23 @@ sub webui_automation_control_body (@) {
   return &webui_automation_json({status=>"ok",message=>"Automation resumed",run=>&webui_automation_public_run($run)});
  }
  if($action eq "stop") {
-  return &webui_automation_error("Run is already finished","not-active") if(($run->{status}||"") =~ /^(?:complete|failed|stopped)$/);
+  my $needs_cleanup=&webui_automation_cleanup_required($run);
+  return &webui_automation_error("Run is already finished","not-active")
+   if(!$needs_cleanup && ($run->{status}||"") =~ /^(?:complete(?:-with-warnings)?|failed|stopped)$/);
+  # Older builds made failed cleanup terminal and dropped execution.json.
+  # Allow an explicit retry, but never reclaim the TV from a different run.
+  my $execution=&webui_automation_read_execution();
+  return &webui_automation_error("A different batch owns the TV; finish it before retrying this cleanup.","automation-owner-mismatch")
+   if(ref($execution) eq 'HASH' && &webui_automation_active_status($execution->{status})
+      && (($execution->{run_id}||'') ne $run_id || ($execution->{token}||'') ne ($run->{token}||'')));
+  if($needs_cleanup && ($run->{status}||'') =~ /^(?:failed|stopped|complete(?:-with-warnings)?)$/) {
+   $run->{status}='interrupted';$run->{cleanup_required}=JSON::PP::true;
+  }
   return &webui_automation_error("Unable to write automation control","write-failed")
    if(!PGAutomation::write_json_atomic(PGAutomation::run_dir($run_id)."/control.json",{request=>"stop",updated_at=>PGAutomation::now()},0664));
   if(($run->{status}||"") eq "paused" || ($run->{status}||"") eq "interrupted") {
-   # A cleanup runner that died must leave the TV exit unverified and keep
-   # ownership; a later Stop can retry after the runner problem is resolved.
-  if(($run->{stop_relaunches}||0)>=1 && ref($run->{failure}) eq "HASH" && ($run->{failure}{error_code}||"") eq "runner-died") {
-    return &webui_automation_stop_launch_failed($run,"The cleanup runner exited before confirming TV calibration exit");
-   }
+   # Each explicit Stop may retry cleanup once. A previous cleanup child
+   # dying is not a permanent lockout; the attempt handshake bounds startup.
    $run->{stop_relaunches}=($run->{stop_relaunches}||0)+1;
    $run->{status}="running"; $run->{runner_pid}=0;
    my ($updated,$update_error)=&webui_automation_write_locked(PGAutomation::run_dir($run_id)."/run.json",$run);
@@ -14427,6 +14458,7 @@ sub webui_automation_edit_run (@) {
   if(!defined($requested) || $requested!~/^\d+$/ || $requested!=$first) {
    $failure="The active item changed. Reload pending items before saving."; return undef;
   }
+  if($current->{preflight_in_progress}) {$failure="Wait for the full-queue preflight to finish before editing pending jobs";return undef;}
   my @pending=map { &webui_automation_normalize_item($_) } @{$payload->{items}};
   foreach my $item (@pending) {
    $item->{status}="queued"; $item->{recheck}=1;
@@ -14434,6 +14466,8 @@ sub webui_automation_edit_run (@) {
   splice(@{$current->{items}},$first,scalar(@{$current->{items}})-$first,@pending);
   $first_pending=$first;
   $current->{edited_at}=PGAutomation::now();
+  $current->{queue_revision}=($current->{queue_revision}||0)+1;
+  delete $current->{preflight_revision};
   return $current;
  });
  return &webui_automation_error($failure||$update_error||"Unable to update run","item-locked") if(!$updated || ref($updated_run) ne "HASH");
@@ -14454,6 +14488,9 @@ sub webui_automation_delete_run (@) {
  my $run=&webui_automation_run($run_id);
  return &webui_automation_error("Automation run not found","not-found") if(ref($run) ne "HASH");
  my ($locked,$delete_result,$lock_error)=&webui_automation_lock(sub {
+  my $latest=&webui_automation_read_run($run_id);
+  return {error_code=>"cleanup-required",error=>"Retry cleanup before deleting this run and its recovery evidence"}
+   if(&webui_automation_cleanup_required($latest));
   my $execution=&webui_automation_read_execution();
   return {error_code=>"automation-active",error=>"Active automation runs cannot be deleted"}
    if(ref($execution) eq "HASH" && ($execution->{run_id}||"") eq $run_id && &webui_automation_active_status($execution->{status}));
@@ -14545,6 +14582,10 @@ sub webui_automation_reconcile_execution (@) {
   # through the interface; keeping a claim for it would only block guided
   # operations until someone removes the file by hand.
   return {__pg_automation_delete=>1} if(ref($run) ne "HASH");
+  if(&webui_automation_cleanup_required($run)) {
+   $execution->{status}='interrupted';$execution->{pid}=0;$execution->{updated_at}=PGAutomation::now();
+   return $execution;
+  }
   return undef if(($run->{status}||"") eq "paused");
   if(($run->{status}||"") =~ /^(?:running|starting|stopping|interrupted)$/) {
    $execution->{status}="interrupted"; $execution->{pid}=0; $execution->{updated_at}=PGAutomation::now();
@@ -14616,7 +14657,17 @@ sub webui_automation_api (@) {
  if($path eq "/api/automation/queues/delete" && $method eq "POST") { return &webui_automation_delete_def("queue",$payload->{id}||$payload->{queue_id}); }
  if($path=~m{^/api/automation/queues/([^/]+)/delete$} && $method eq "POST") { return &webui_automation_delete_def("queue",$1); }
  if($path eq '/api/automation/settings-plan' && $method eq 'POST') { return &webui_automation_json(&webui_automation_settings_plan($payload)); }
- if($path eq "/api/automation/readiness" && $method eq "POST") { return &webui_automation_json(($payload->{automation_token}||"") ne "" ? &webui_automation_readiness_data($payload) : &webui_automation_checked_readiness($payload,"readiness")); }
+ if($path eq "/api/automation/readiness" && $method eq "POST") {
+  if(($payload->{automation_token}||'') ne '') {
+   my $execution=&webui_automation_read_execution();
+   return &webui_automation_error('This runner does not own readiness checks','automation-owner-mismatch')
+    if(ref($execution) ne 'HASH' || ($execution->{token}||'') ne $payload->{automation_token});
+   return &webui_automation_json(&webui_automation_readiness_data($payload));
+  }
+  return &webui_automation_error('Whole-queue readiness temporarily switches generator signals and TV picture modes, then restores them. Confirm mode switching to continue.','preflight-consent-required')
+   if(!$payload->{confirm_mode_switches});
+  return &webui_automation_start({%$payload,preflight_only=>1});
+ }
  if($path eq '/api/automation/readiness/dismiss' && $method eq 'POST') { return &webui_automation_dismiss_readiness($payload); }
  if(($path eq "/api/automation/start" || $path eq "/api/automation/runs/start") && $method eq "POST") { return &webui_automation_start($payload); }
  if($path eq "/api/automation/runs" && $method eq "GET") { return &webui_automation_json({status=>"ok",runs=>&webui_automation_list_runs()}); }
