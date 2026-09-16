@@ -1,0 +1,22 @@
+name: PR14 review workspace
+on:
+  push:
+    branches: [review/pr14-safety-workspace]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 6b929baec0aed06ac3a385c74239b056eb8b9dc3
+          persist-credentials: false
+      - name: Export pinned source for isolated regression testing
+        run: git archive --format=tar.gz --output=pr14-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr14-pinned-source
+          path: pr14-source.tar.gz
+          retention-days: 1
