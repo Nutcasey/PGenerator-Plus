@@ -127,8 +127,9 @@ sub write_atomic {
         $ok = print {$fh} $data;
         # Flush and fsync before the rename so a power cut on the SD card
         # cannot leave the renamed file empty.
-        if ($ok) { $fh->flush; $fh->sync; }
-        $ok = 0 if !$ok || !close($fh);
+        if ($ok) { $ok = eval { $fh->flush && $fh->sync } ? 1 : 0; }
+        my $closed = close($fh);
+        $ok = 0 if !$closed;
     }
     if ($ok && defined($mode)) {
         $ok = chmod($mode, $tmp) ? 1 : 0;

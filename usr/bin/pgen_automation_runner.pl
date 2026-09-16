@@ -21,11 +21,14 @@ use POSIX qw(strftime);
 use Time::HiRes qw(time);
 use PGAutomation ();
 use PGAutomationETA ();
+use PGAutomationLaunch ();
+use PGAutomationPlan ();
 use PGMath ();
 use PGSignalCode ();
 use PGLGCapabilities qw(lg_setting_values_agree lg_scoped_request_payload lg_setting_write_accepted lg_readback_unavailable_reason);
 
-my ($RUN_ID, $TOKEN) = @ARGV;
+my ($RUN_ID, $TOKEN, $LAUNCH_ATTEMPT) = @ARGV;
+my $LAUNCH_ACCEPTED = 0;
 die "usage: pgen_automation_runner.pl RUN_ID TOKEN\n"
     if !defined($RUN_ID) || !defined($TOKEN)
     || !PGAutomation::safe_component($RUN_ID)
@@ -47,6 +50,7 @@ my $STOP_REQUESTED = 0;
 my $PAUSE_REQUESTED = 0;
 my $STOP_HANDLED = 0;
 my $STOPPING = 0;
+my $RESTORING_PREFLIGHT = 0;
 my $ACTIVE_ITEM;
 my $ACTIVE_STAGE = '';
 my $ACTIVE_WORKER = '';
@@ -152,6 +156,8 @@ sub _update_run {
         # Never replace an unreadable manifest with a skeleton: that would
         # silently drop the items, token and checkpoints.
         die "run manifest unreadable\n" if ref($run) ne 'HASH';
+        die "Runner launch no longer owns this run\n" if $LAUNCH_ACCEPTED
+            && (($run->{token}||'') ne $TOKEN || ($run->{launch_attempt}||'') ne ($LAUNCH_ATTEMPT||''));
         $callback->($run);
         # Advisory only: ETA failure must never stop or change calibration.
         eval { PGAutomationETA::update($run,time(),$ETA_HISTORY); 1 } or delete $run->{time_estimate};
@@ -181,11 +187,18 @@ sub _write_execution {
         owner     => 'automation',
         run_id    => $RUN_ID,
         token     => $TOKEN,
-        pid       => $$,
+        pid       => ($run->{status}||'') =~ /^(?:paused|interrupted)$/ ? 0 : $$,
+        launch_attempt => $LAUNCH_ATTEMPT,
         updated_at => time(),
         status    => $run->{status} || 'running',
     };
-    my ($ok) = PGAutomation::with_lock($EXECUTION_FILE, sub { return $value; });
+    my ($ok) = PGAutomation::with_lock($EXECUTION_FILE, sub {
+        my ($current) = @_;
+        die "Automation execution belongs to another launch\n" if $LAUNCH_ACCEPTED
+            && (ref($current) ne 'HASH' || ($current->{run_id}||'') ne $RUN_ID
+                || ($current->{token}||'') ne $TOKEN || ($current->{launch_attempt}||'') ne ($LAUNCH_ATTEMPT||''));
+        return $value;
+    });
     return $ok;
 }
 
@@ -194,10 +207,12 @@ sub _release_execution {
         my ($current) = @_;
         return undef if ref($current) ne 'HASH'
             || ($current->{run_id} || '') ne $RUN_ID
-            || ($current->{token} || '') ne $TOKEN;
+            || ($current->{token} || '') ne $TOKEN
+            || ($LAUNCH_ACCEPTED && ($current->{launch_attempt}||'') ne ($LAUNCH_ATTEMPT||''));
         return { __pg_automation_delete => 1 };
     });
     _log('execution lock release failed') if !$ok;
+    return $ok;
 }
 
 sub _heartbeat {
@@ -225,7 +240,7 @@ sub _sleep_controlled {
     my $deadline = time() + $seconds;
     while (time() < $deadline) {
         _refresh_control();
-        return 0 if $STOP_REQUESTED;
+        return 0 if $STOP_REQUESTED && !$RESTORING_PREFLIGHT;
         _heartbeat(0);
         select(undef, undef, undef, 0.5);
     }
@@ -366,7 +381,8 @@ sub _lg_connection_failure {
 
 sub _api {
     my ($method, $path, $payload, $allow_stop, $retry_window) = @_;
-    $allow_stop = 0 if !defined($allow_stop);
+    $allow_stop = $RESTORING_PREFLIGHT ? 1 : 0 if !defined($allow_stop);
+    $allow_stop = 1 if $RESTORING_PREFLIGHT;
     $retry_window = $API_RETRY_WINDOW if !defined($retry_window);
     $retry_window = 0 if $retry_window < 0;
     my $last;
@@ -2808,10 +2824,16 @@ sub _park_interrupted {
 sub _stop_active {
     return if $STOP_HANDLED++;
     $STOPPING = 1;
-    _update_run(sub {
+    # Journal an unfinished cleanup before issuing device commands. A process
+    # interruption or a failed result write must not expose an older successful
+    # cleanup as proof that this attempt safely released the TV and meter.
+    my $pending = _update_run(sub {
         $_[0]{status}='stopping';
+        $_[0]{stop_cleanup}={verified=>JSON::PP::false,completed_at=>time(),
+            message=>'Cleanup started but fresh worker, meter and TV exit verification is still required'};
         $_[0]{worker_status}={message=>'Stopping all workers and closing TV calibration mode'};
     });
+    die 'Unable to persist pending cleanup; ownership retained' if !ref($pending);
     _log_action('Stop requested: cancelling all measurement and calibration workers');
     my %paths = (
         series=>'/api/meter/series', grey=>'/api/meter/lg-autocal',
@@ -2862,10 +2884,11 @@ sub _stop_active {
     my $cleanup={verified=>@problems?JSON::PP::false:JSON::PP::true,completed_at=>time(),
         calibration_mode=>$off,run_end=>{map {exists($end->{$_})?($_=>$end->{$_}):()} qw(status error_code message calibration_mode stale_run_ignored)},tv_status=>$status,workers_alive=>\@alive,
         message=>@problems?join('; ',@problems):'All workers stopped; meter released; TV acknowledged calibration exit'};
-    _update_run(sub {
+    my $verified_cleanup = _update_run(sub {
         $_[0]{stop_cleanup}=$cleanup;
         $_[0]{worker_status}={message=>($cleanup->{verified}?'Cleanup complete: ':'Cleanup failed: ').$cleanup->{message}};
     });
+    die 'Unable to persist cleanup verification; ownership retained' if !ref($verified_cleanup);
     _log_action(($cleanup->{verified}?'Stop cleanup complete: ':'Stop cleanup FAILED: ').$cleanup->{message});
     if (ref($ACTIVE_ITEM) eq 'HASH') {
         my $number=$item->{item_number}||0;
@@ -2882,6 +2905,9 @@ sub _stop_active {
         }
         _update_item_snapshot($number,$item);
     }
+    if (_run()->{preflight_restore_required} && !_restore_preflight_context()) {
+        _log_action('Preflight restoration still requires cleanup: '.($::LAST_ERROR||'unconfirmed'));
+    }
     my $visible=_api('POST','/api/pattern',{name=>'gray50'},1,0);
     _log_action('Stop idle pattern: '.($visible->{status}||'unavailable'));
     $STOPPING = 0;
@@ -2889,23 +2915,55 @@ sub _stop_active {
 
 sub _finish {
     my ($status, $failure) = @_;
-    my $cleanup=_run()->{stop_cleanup};
-    if ($status eq 'stopped' && ref($cleanup) eq 'HASH' && !$cleanup->{verified}) {
-        $status='failed';
-        $failure={stage=>'stop-cleanup',message=>$cleanup->{message},error_code=>'stop-cleanup-unverified'};
+    my $meter = _api('POST', '/api/meter/session/stop', {}, 1, 0);
+    my $run = _run();
+    my $cleanup = $run->{stop_cleanup};
+    my @problems;
+    push @problems, $cleanup->{message} || 'TV/worker cleanup is unconfirmed'
+        if ref($cleanup) eq 'HASH' && !$cleanup->{verified}
+            && ($cleanup->{completed_at}||0)>=($run->{resumed_at}||0);
+    push @problems, 'Meter release failed: '.(ref($meter) eq 'HASH' ? ($meter->{message}||'no acknowledgement') : 'no acknowledgement')
+        if !_response_ok($meter);
+    push @problems, 'Preflight output restoration is unconfirmed; retry cleanup'
+        if $run->{preflight_restore_required};
+    if (@problems) {
+        my $message = join('; ', @problems);
+        my $saved = _update_run(sub {
+            my ($state) = @_;
+            $state->{original_failure} ||= $failure || $state->{failure};
+            $state->{pending_terminal_status} ||= $status;
+            $state->{status} = 'interrupted';
+            $state->{cleanup_required} = JSON::PP::true;
+            $state->{preflight_in_progress} = JSON::PP::false;
+            $state->{runner_pid} = 0;
+            $state->{active_stage} = 'stop-cleanup';
+            delete $state->{completed_at};
+            $state->{failure} = {stage=>'stop-cleanup', error_code=>'stop-cleanup-unverified', message=>$message, at=>time()};
+            $state->{stop_cleanup} = {%{ref($cleanup) eq 'HASH' ? $cleanup : {}},
+                verified=>JSON::PP::false, completed_at=>time(), message=>$message};
+            $state->{worker_status} = {message=>'Cleanup required: '.$message.'. Use Retry cleanup.'};
+        });
+        die 'Unable to persist required cleanup; ownership retained' if !ref($saved);
+        die 'Unable to retain cleanup ownership' if !_write_execution();
+        unlink($RUN_DIR . '/runner.pid');
+        _log('Cleanup remains required; retaining automation ownership: '.$message);
+        return 0;
     }
-    my $meter_session = _api('POST', '/api/meter/session/stop', {}, 1, 0);
-    _log('finish cleanup meter session=' . (($meter_session && ref($meter_session) eq 'HASH' && ($meter_session->{status} || '') eq 'ok') ? 'ok' : 'failed'));
-    _update_run(sub {
-        my ($run) = @_;
-        $run->{status} = $status;
-        $run->{completed_at} = time() if $status =~ /^(?:complete|failed|stopped)$/;
-        $run->{runner_pid} = 0;
-        $run->{active_stage} = '';
-        $run->{failure} = $failure if ref($failure) eq 'HASH';
+    my $saved = _update_run(sub {
+        my ($state) = @_;
+        $state->{status} = $status;
+        $state->{completed_at} = time() if $status =~ /^(?:complete(?:-with-warnings)?|failed|stopped)$/;
+        $state->{runner_pid} = 0;
+        $state->{active_stage} = '';
+        $state->{failure} = $failure if ref($failure) eq 'HASH';
+        delete $state->{failure} if $status eq 'stopped' && $state->{cleanup_required};
+        $state->{preflight_in_progress} = JSON::PP::false;
+        delete $state->{cleanup_required};
+        delete $state->{pending_terminal_status};
     });
+    die 'Unable to persist terminal state; ownership retained' if !ref($saved);
     unlink($RUN_DIR . '/runner.pid');
-    _release_execution();
+    return _release_execution();
 }
 
 sub _restore_hazards {
@@ -3180,6 +3238,10 @@ sub _freeze_job_lg_context {
         if (($live->{status}||'') ne 'ok' || $input!~/^hdmi[1-4](?:_pc)?$/ || ($profile->{capability_profile_hash}||'')!~/^[0-9a-f]{64}$/);
     die 'No reviewed LG platform is available for calibration'
         if ($item->{stages}{calibration} && (!$profile->{capability_library_valid} || !$profile->{capability_platform_profile_applied}));
+    my $contract=$item->{preflight_contract};
+    die 'Queue preflight is stale: TV input or compatibility changed; recheck the whole pending queue'
+        if ref($contract) eq 'HASH' && (($contract->{tv_input}||'') ne $input
+            || ($contract->{profile_hash}||'') ne ($profile->{capability_profile_hash}||''));
     $item->{tv_input}=$input;
     $item->{generation_profile}=$profile;
     $item->{capability_profile}={id=>$profile->{capability_profile_id},hash=>$profile->{capability_profile_hash}};
@@ -3199,10 +3261,15 @@ sub _prepare_job_context {
     _freeze_job_lg_context($item);
     die($::LAST_ERROR||'Unable to select job picture mode') if !_select_item_picture_mode($number,$item,'job-start');
     _log_action('Signal and picture mode selected; checking this job\'s TV controls');
+    my $contract=PGAutomation::clone($item->{preflight_contract});
     my $ready=_require_job_ready($number,$item,'job');
     if(ref($ready->{items}) eq 'ARRAY' && ref($ready->{items}[0]) eq 'HASH') {
         %$item=(%$item,%{$ready->{items}[0]});
     }
+    $item->{preflight_contract}=$contract if ref($contract) eq 'HASH';
+    die 'Queue preflight is stale: the resolved job settings or device identity changed; no calibration was started'
+        if ref($item->{preflight_contract}) eq 'HASH'
+            && !PGAutomationPlan::matches($item,$item->{preflight_contract});
     # Capture global power/screen-saver restoration values only on first use,
     # before this job applies them; later jobs may observe our disabled values.
     _update_run(sub {
@@ -3215,6 +3282,242 @@ sub _prepare_job_context {
     _update_item_snapshot($number,$item);
     _log_action('Job readiness passed; applying and verifying queued settings next');
     return 1;
+}
+
+# The full-queue check runs under the same execution claim as calibration,
+# before _run_item can reset or measure anything. Only generator output and
+# picture-mode selection may change; every changed context is journalled
+# before mutation and restored on success, failure, Stop and cleanup retry.
+sub _preflight_progress {
+    my ($result,$number,$message) = @_;
+    $result->{message}=$message;
+    die 'Unable to persist queue preflight progress' if !ref(_update_run(sub {
+        $_[0]{active_stage}='queue-preflight';$_[0]{active_item}=$number;
+        $_[0]{worker_status}={message=>$message};
+        $_[0]{preflight_result}=PGAutomation::clone($result);
+    }));
+    _log_action($message);
+    my $state={id=>$RUN_ID,run_id=>$RUN_ID,intent=>_run()->{preflight_only}?'readiness':'start',
+        scope=>'queue',status=>'checking',started_at=>$result->{started_at},updated_at=>time(),
+        active_item=>$number,total_items=>$result->{total_items},items=>$result->{jobs},
+        checks=>$result->{checks},issues=>[grep {!$_->{ok}} @{$result->{checks}}],message=>$message};
+    die 'Unable to persist visible queue preflight progress'
+        if !PGAutomation::write_json_atomic(PGAutomation::base_dir().'/preflight.json',$state,0664);
+}
+
+sub _preflight_read_mode {
+    my ($signal) = @_;
+    # lg_scoped_request_payload normally supplies the queued picture_mode.
+    # A restoration snapshot must instead observe the actual mode, never an
+    # echoed requested selector. Temporarily omit only that item context.
+    my $saved_item=$ACTIVE_ITEM;$ACTIVE_ITEM=undef;
+    my $live=eval { _api('POST','/api/lg/picture-settings',{
+        keys=>['pictureMode'],include_current_input=>JSON::PP::true,
+        ignore_calibration_picture_mode=>JSON::PP::true,signal_mode=>$signal,
+    },$RESTORING_PREFLIGHT,0) };
+    my $read_error=$@;$ACTIVE_ITEM=$saved_item;
+    die $read_error if $read_error;
+    die 'No independent current-mode response' if ref($live) ne 'HASH';
+    my $mode=_observed_settings($live)->{pictureMode}||'';
+    my $profile=$live->{generation_profile}||{};
+    die 'Cannot safely probe modes: the current TV mode cannot be read independently. No unverified mode will be used for restoration.'
+        if !_response_ok($live) || $live->{virtual_picture_settings} || $live->{picture_mode_read_forbidden}
+            || !$mode || !_signal_mode_compatible($signal,$mode);
+    die 'Cannot safely probe modes: TV input or compatibility signature is unavailable'
+        if ($live->{current_input}||'') !~ /^hdmi[1-4](?:_pc)?$/ || ($profile->{capability_profile_hash}||'') !~ /^[a-f0-9]{64}$/;
+    return {picture_mode=>$mode,signal_format=>$signal,tv_input=>$live->{current_input},
+        capability_profile=>{hash=>$profile->{capability_profile_hash},id=>$profile->{capability_profile_id}},
+        generation_profile=>$profile,settle_seconds=>1,stages=>{calibration=>0}};
+}
+
+sub _preflight_save_context {
+    my ($context) = @_;
+    die 'Unable to save reversible preflight context; no further mode changes are allowed'
+        if !_write_artifact($RUN_DIR.'/preflight-context.json',$context);
+}
+
+sub _preflight_snapshot {
+    my $config=_api('GET','/api/config',undef,0,0);
+    die 'Generator configuration is unavailable for preflight restoration'
+        if ref($config) ne 'HASH' || ($config->{status}||'') eq 'error'
+            || ($config->{signal_mode}||'') !~ /^(?:sdr|hdr10|hlg|dv)$/;
+    my @keys=qw(signal_mode eotf primaries colorimetry color_format rgb_quant_range max_bpc
+        dv_map_mode dv_transport dv_interface dv_profile dv_metadata dv_color_space dv_status is_ll_dovi is_std_dovi);
+    my $saved={map {exists($config->{$_}) && !ref($config->{$_}) ? ($_=>$config->{$_}) : ()} @keys};
+    my $mode=_preflight_read_mode($config->{signal_mode});
+    my $context={config=>$saved,original=>$mode,modes=>{$config->{signal_mode}=>$mode},order=>[$config->{signal_mode}]};
+    _preflight_save_context($context);
+    return $context;
+}
+
+sub _preflight_wait_config {
+    my ($config,$reply) = @_;
+    die($reply->{message}||'Generator restoration was rejected') if !_response_ok($reply);
+    my $until=time()+45;
+    while (time()<$until) {
+        my $restart_ok=1;
+        if ($reply->{restart_id}) {
+            my $r=_api('GET','/api/restart/status?id='.$reply->{restart_id},undef,1,0);
+            die($r->{message}||'Renderer restoration failed') if ($r->{state}||'') eq 'error';
+            $restart_ok=($r->{state}||'') eq 'ready';
+        }
+        my $actual=_api('GET','/api/config',undef,1,0);
+        my @different=grep {!defined($actual->{$_}) || "$actual->{$_}" ne "$config->{$_}"} keys %$config;
+        return 1 if $restart_ok && !@different;
+        _sleep_controlled(0.25);
+    }
+    die 'Generator output restoration did not verify';
+}
+
+sub _restore_preflight_context {
+    return 1 if !_run()->{preflight_restore_required};
+    my $context=PGAutomation::read_json_file($RUN_DIR.'/preflight-context.json');
+    if (ref($context) ne 'HASH' || ref($context->{original}) ne 'HASH' || ref($context->{config}) ne 'HASH') {
+        $::LAST_ERROR='Saved preflight restoration context is missing; ownership retained';
+        return 0;
+    }
+    my ($old_item,$old_stopping,$old_restoring)=($ACTIVE_ITEM,$STOPPING,$RESTORING_PREFLIGHT);
+    $STOPPING=1;$RESTORING_PREFLIGHT=1;
+    my $ok=eval {
+        # Return each signal's selected mode to its original value, with the
+        # initially active signal restored last. Never restore TV settings/LUTs.
+        for my $signal (reverse @{$context->{order}||[]}) {
+            my $item=$context->{modes}{$signal};
+            $ACTIVE_ITEM=$item;
+            die($::LAST_ERROR||'Unable to restore preflight signal') if !_apply_signal($item);
+            my $live=_preflight_read_mode($signal);
+            die 'TV input or compatibility changed during preflight restoration'
+                if $live->{tv_input} ne $item->{tv_input}
+                    || $live->{capability_profile}{hash} ne $item->{capability_profile}{hash};
+            if (!_mode_agrees($item->{picture_mode},$live->{picture_mode})) {
+                die($::LAST_ERROR||'Unable to restore picture mode')
+                    if !_select_item_picture_mode(0,$item,'preflight-restore');
+                $live=_preflight_read_mode($signal);
+                die 'Original picture mode restoration was not independently verified'
+                    if !_mode_agrees($item->{picture_mode},$live->{picture_mode});
+            }
+        }
+        $ACTIVE_ITEM=$context->{original};
+        _preflight_wait_config($context->{config},_api('POST','/api/config',$context->{config},1,0));
+        my $pattern=_api('POST','/api/pattern',{name=>'gray50',signal_mode=>$context->{config}{signal_mode}},1,0);
+        die 'Unable to display neutral pattern after preflight restoration' if !_response_ok($pattern);
+        my $live=_preflight_read_mode($context->{config}{signal_mode});
+        die 'Original viewing context did not restore'
+            if $live->{tv_input} ne $context->{original}{tv_input}
+                || !_mode_agrees($live->{picture_mode},$context->{original}{picture_mode});
+        die 'Unable to persist completed preflight restoration' if !ref(_update_run(sub {
+            $_[0]{preflight_restore_required}=JSON::PP::false;
+            $_[0]{preflight_context_restored_at}=time();
+        }));
+        1;
+    };
+    my $error=$@;
+    ($ACTIVE_ITEM,$STOPPING,$RESTORING_PREFLIGHT)=($old_item,$old_stopping,$old_restoring);
+    $::LAST_ERROR=$error||'Preflight restoration failed' if !$ok;
+    return $ok?1:0;
+}
+
+sub _preflight_queue {
+    $ACTIVE_STAGE='queue-preflight';
+    my $run=_update_run(sub {$_[0]{preflight_in_progress}=JSON::PP::true;});
+    die 'Unable to reserve queue preflight' if !ref($run);
+    my $revision=$run->{queue_revision}||0;
+    my $items=PGAutomation::clone($run->{items}||[]);
+    my @pending=grep {($items->[$_]{status}||'') !~ /^complete(?:-with-warnings)?$/} 0..$#$items;
+    my $result={scope=>'queue',ready=>0,started_at=>time(),total_items=>scalar(@pending),checked_items=>0,
+        jobs=>[map {{name=>$_->{name}||'Job',status=>(($_->{status}||'')=~/^complete/ ? 'previously-completed' : 'unchecked')}} @$items],checks=>[]};
+    my $context;
+    my $setup=eval {
+        _preflight_progress($result,undef,'Checking every pending job before any calibration begins');
+        if (@pending) {
+            # Establish idle devices/confirmed CAL_END under our execution claim.
+            my $base=_api('POST','/api/automation/readiness',{scope=>'batch',items=>[map {$items->[$_]} @pending]},0,0);
+            push @{$result->{checks}},@{$base->{checks}||[]};
+            die($base->{message}||'Equipment is not ready') if !$base->{ready};
+            $ACTIVE_ITEM=undef;
+            $context=_preflight_snapshot();
+        }
+        1;
+    };
+    if (!$setup) {
+        my $error=$@||'Unable to capture preflight context';
+        push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-context',message=>"$error"};
+    } else {
+        for my $number (@pending) {
+            _refresh_control();last if $STOP_REQUESTED;
+            my $item=$items->[$number];$ACTIVE_ITEM=$item;$item->{item_number}=$number;
+            $result->{jobs}[$number]{status}='checking';
+            my $ok=eval {
+                _preflight_progress($result,$number,'Checking job '.($number+1).' of '.scalar(@$items).': '.($item->{name}||_picture_mode($item)));
+                die 'Unable to save preflight mutation guard' if !ref(_update_run(sub {$_[0]{preflight_restore_required}=JSON::PP::true;}));
+                # Ignore old job context during transitions; freeze the actual
+                # connected input/profile afresh, then require the same TV.
+                delete @$item{qw(capability_profile generation_profile tv_input preflight_contract)};
+                die($::LAST_ERROR||'Unable to select preflight signal') if !_apply_signal($item);
+                my $signal=_signal($item);
+                my $before=_preflight_read_mode($signal);
+                die 'TV input or compatibility changed during queue preflight'
+                    if $before->{tv_input} ne $context->{original}{tv_input}
+                        || $before->{capability_profile}{hash} ne $context->{original}{capability_profile}{hash};
+                if (!exists($context->{modes}{$signal})) {
+                    $context->{modes}{$signal}=$before;push @{$context->{order}},$signal;
+                    _preflight_save_context($context);
+                }
+                _freeze_job_lg_context($item);
+                die($::LAST_ERROR||'Unable to select preflight picture mode')
+                    if !_select_item_picture_mode($number,$item,'queue-preflight');
+                my $selected=_preflight_read_mode($signal);
+                die 'Target picture mode was not independently confirmed during preflight'
+                    if !_mode_agrees(_picture_mode($item),$selected->{picture_mode});
+                my $ready=_api('POST','/api/automation/readiness',{scope=>'job',items=>[$item]},0,0);
+                for my $check (@{$ready->{checks}||[]}) {$check->{item_number}=$number;push @{$result->{checks}},$check;}
+                die($ready->{message}||'Job failed TV compatibility checks') if !$ready->{ready}
+                    || ref($ready->{items}) ne 'ARRAY' || ref($ready->{items}[0]) ne 'HASH';
+                %$item=(%$item,%{$ready->{items}[0]});
+                die 'Job preflight did not return a confirmed input and compatibility signature'
+                    if ($item->{tv_input}||'') ne $context->{original}{tv_input}
+                        || ($item->{capability_profile}{hash}||'') !~ /^[a-f0-9]{64}$/;
+                $item->{preflight_contract}=PGAutomationPlan::contract($item);
+                $result->{jobs}[$number]{status}='checked';$result->{checked_items}++;
+                1;
+            };
+            if (!$ok) {
+                my $error=$@||$::LAST_ERROR||'Job preflight failed';
+                $result->{jobs}[$number]{status}='blocked';
+                push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-job',item_number=>$number,message=>"$error"};
+            }
+        }
+    }
+    my $restored=_restore_preflight_context();
+    push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-restore',message=>$::LAST_ERROR||'Preflight restoration failed'} if !$restored;
+    push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-cancelled',message=>'Queue preflight stopped; unchecked jobs are not ready'} if $STOP_REQUESTED;
+    my @errors=grep {!$_->{ok} && ($_->{level}||'error') eq 'error'} @{$result->{checks}};
+    my @warnings=grep {!$_->{ok} && ($_->{level}||'') eq 'warning'} @{$result->{checks}};
+    $result->{ready}=!@errors && $restored && $result->{checked_items}==@pending ? 1 : 0;
+    $result->{restored}=$restored?1:0;$result->{completed_at}=time();
+    $result->{message}=$result->{ready}
+        ? 'All '.scalar(@pending).' pending jobs passed live preflight. Original output and picture modes restored.'
+            .(@warnings?' Review '.scalar(@warnings).' manual or limited-verification warnings.':'')
+        : 'Queue blocked before calibration: '.$result->{checked_items}.'/'.scalar(@pending).' pending jobs checked successfully.';
+    die 'Unable to persist full-queue preflight result' if !_write_artifact($RUN_DIR.'/preflight-plan.json',
+        {revision=>$revision,items=>$items,result=>$result});
+    die 'Unable to publish full-queue preflight result' if !ref(_update_run(sub {
+        my ($state)=@_;
+        die 'Queue changed during preflight' if ($state->{queue_revision}||0)!=$revision;
+        $state->{preflight_in_progress}=JSON::PP::false;
+        $state->{preflight_result}=$result;
+        if($result->{ready}) {$state->{items}=$items;$state->{preflight_revision}=$revision;}
+        else {delete $state->{preflight_revision};}
+        $state->{active_item}=undef;$state->{active_stage}='queue-preflight';
+        $state->{worker_status}={message=>$result->{message}};
+    }));
+    PGAutomation::write_json_atomic(PGAutomation::base_dir().'/preflight.json',{
+        id=>$RUN_ID,run_id=>$RUN_ID,scope=>'queue',status=>$result->{ready}?'ready':'blocked',
+        intent=>$run->{preflight_only}?'readiness':'start',%$result,updated_at=>time(),items=>$result->{jobs},
+        issues=>[grep {!$_->{ok}} @{$result->{checks}}],
+    },0664) or die 'Unable to publish final preflight status';
+    $ACTIVE_ITEM=undef;$ACTIVE_STAGE='';
+    return $result;
 }
 
 sub _run_item {
@@ -3397,27 +3700,46 @@ sub _run_item {
     return 1;
 }
 
+# Atomically admit a pending job only from the verified queue revision. This
+# closes the edit-vs-claim race after the optimistic check in _main.
+sub _claim_queue_item {
+    my ($number)=@_;
+    my $changed=0;
+    my $claimed=_update_run(sub {
+        my ($state)=@_;
+        if (!defined($state->{preflight_revision}) || $state->{preflight_revision}!=($state->{queue_revision}||0)) {
+            $changed=1;return;
+        }
+        if ($number>=@{$state->{items}}) {$state->{status}='completing';return;}
+        my $item=$state->{items}[$number];
+        return if ($item->{status}||'') =~ /^complete(?:-with-warnings)?$/;
+        if (!PGAutomationPlan::matches($item,$item->{preflight_contract})) {
+            delete $state->{preflight_revision};$changed=1;return;
+        }
+        $state->{active_item}=$number;$item->{status}='running';
+    });
+    die 'Unable to claim next queue item' if !ref($claimed);
+    return ($claimed,$changed);
+}
+
 sub _main {
     die "automation store unavailable\n" if !PGAutomation::ensure_store() || !-d $RUN_DIR;
     my $run = _run();
     die "run manifest unavailable\n" if ref($run) ne 'HASH' || ($run->{token} || '') ne $TOKEN;
-    $ETA_HISTORY=eval {PGAutomationETA::history($RUN_ID)} || [];
     return if ($run->{status} || '') eq 'paused';
     return if ($run->{status} || '') =~ /^(?:complete|failed|stopped)$/;
     if (!open($RUNNER_LOCK, '>>', $RUNNER_LOCK_FILE) || !flock($RUNNER_LOCK, LOCK_EX | LOCK_NB)) {
         _log('another automation runner owns the runner lock');
         return;
     }
-    die 'Unable to persist automation runner PID'
-        if !PGAutomation::write_atomic($RUN_DIR . '/runner.pid', "$$\n", 0664);
-    die 'Unable to persist automation runner startup' if !ref(_update_run(sub {
-        my ($state) = @_;
-        $state->{status} = 'running';
-        $state->{runner_pid} = $$;
-        $state->{started_at} ||= time();
-        $state->{heartbeat} = time();
-    }));
-    die 'Unable to claim automation execution' if !_write_execution();
+    # No device API, cleanup, or execution-state write is allowed before the
+    # launcher commits this unique attempt. A cancelled/delayed child exits
+    # without touching a different run or resurrecting a failed launch.
+    die "Runner launch was cancelled, expired, or superseded\n"
+        if !PGAutomationLaunch::worker_handshake($RUN_ID, $TOKEN, $LAUNCH_ATTEMPT);
+    $LAUNCH_ACCEPTED = 1;
+    $run = _run();
+    $ETA_HISTORY=eval {PGAutomationETA::history($RUN_ID)} || [];
     _heartbeat(1);
     _log_action('Automation runner started');
     if (_control()->{request} eq 'stop') {
@@ -3440,42 +3762,25 @@ sub _main {
         _finish('stopped');
         return;
     }
-    $ACTIVE_STAGE = 'readiness';
-    _log_action('Checking TV and meter readiness before preparing the first pending job');
-    _update_run(sub {
-        $_[0]{active_stage} = $ACTIVE_STAGE;
-        $_[0]{stage_started_at} = time();
-        $_[0]{worker_status} = {message => 'Rechecking TV and meter before the first pending job; measurement patterns have not started yet.'};
-    });
-    _ensure_lg_connection();
-    my $readiness = _api('POST', '/api/automation/readiness', {
-        items => [grep { ($_->{status} || '') !~ /^complete/ } @{$run->{items} || []}],
-    });
-    if ($STOP_REQUESTED) {
-        _stop_active();
-        _restore_run_hazards($run,$run->{items});
-        _finish('stopped');
+    my $preflight=_preflight_queue();
+    if (!$preflight->{ready} || $run->{preflight_only}) {
+        _finish($STOP_REQUESTED?'stopped':$preflight->{ready}?'complete':'failed',
+            $preflight->{ready}?undef:{stage=>'queue-preflight',message=>$preflight->{message},error_code=>'queue-preflight-blocked'});
         return;
     }
-    if (!$readiness->{ready}) {
-        _finish('failed', { stage => 'readiness', message => $readiness->{message} || 'Automation readiness failed' });
-        return;
-    }
-    $ACTIVE_STAGE = '';
-    _log_action('Runner readiness passed; preparing the first pending job');
-    _update_run(sub { $_[0]{readiness} = $readiness; $_[0]{active_stage} = ''; $_[0]{worker_status} = {}; });
-    my $items = ref($run->{items}) eq 'ARRAY' ? $run->{items}
-        : ref($run->{queue_snapshot}{items}) eq 'ARRAY' ? $run->{queue_snapshot}{items} : [];
+    my $items=_run()->{items}||[];
     my $aborted = 0;
     for (my $i = 0; ; $i++) {
-        my $claimed = _update_run(sub {
-            my ($state) = @_;
-            if ($i >= @{$state->{items}}) { $state->{status} = 'completing'; return; }
-            return if ($state->{items}[$i]{status} || '') =~ /^complete/;
-            $state->{active_item} = $i;
-            $state->{items}[$i]{status} = 'running';
-        });
-        die 'Unable to claim next queue item' if !ref($claimed);
+        my $current=_run();
+        if (!defined($current->{preflight_revision}) || $current->{preflight_revision}!=($current->{queue_revision}||0)) {
+            my $checked=_preflight_queue();
+            if (!$checked->{ready}) {
+                _finish('failed',{stage=>'queue-preflight',message=>$checked->{message},error_code=>'queue-preflight-blocked'});
+                return;
+            }
+        }
+        my ($claimed,$queue_changed)=_claim_queue_item($i);
+        if ($queue_changed) {$i--;next;} # Retry this index after full preflight.
         $items = $claimed->{items};
         last if $i >= @$items;
         _refresh_control();
@@ -3539,6 +3844,9 @@ if (!caller()) {
 eval { _main(); 1 } or do {
     my $error = $@ || 'automation runner failed';
     _log($error);
+    # A child which never received startup acceptance must not issue Stop,
+    # CAL_END, or any other device command as an error-handler side effect.
+    exit 1 if !$LAUNCH_ACCEPTED;
     my $run = eval { _run() } || {};
     _stop_active();
     _restore_run_hazards($run, ref($run->{items}) eq 'ARRAY' ? $run->{items} : []);

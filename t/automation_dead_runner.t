@@ -116,7 +116,8 @@ ok(!-f $execution_path, 'the claim is removed because nothing can act on that ru
 # A cleanup runner that never starts keeps the run parked for a later Stop retry.
 {
  no warnings 'redefine';
- local *main::webui_automation_launch_runner = sub { 1 };
+ my $launch_ok=1;
+ local *main::webui_automation_launch_runner = sub { $launch_ok };
  $id = PGAutomation::new_id();
  $path = write_run($id, status=>'interrupted', runner_pid=>0, failure=>{stage=>'greyscale-done',error_code=>'runner-died',message=>'m'});
  write_execution(run_id=>$id, status=>'interrupted', pid=>0);
@@ -127,6 +128,7 @@ ok(!-f $execution_path, 'the claim is removed because nothing can act on that ru
  is($run->{status}, 'stopping', 'cleanup runner is visibly stopping, not running calibration');
  write_execution(run_id=>$id, status=>'stopping', pid=>0, updated_at=>PGAutomation::now() - main::webui_automation_start_grace() - 1);
  is(main::webui_automation_reap_dead_runner(), 1, 'the cleanup runner that never started is reaped');
+ $launch_ok=0; # The explicit retry really fails to launch, rather than being permanently locked out.
  $reply = PGAutomation::decode_json(main::webui_automation_control($id, 'stop'));
  is($reply->{status}, 'error', 'failed cleanup is not reported as successful stop');
  like($reply->{message}, qr/calibration exit is unconfirmed/, 'operator is told TV cleanup did not run');
@@ -136,6 +138,9 @@ ok(!-f $execution_path, 'the claim is removed because nothing can act on that ru
  ok(!$run->{stop_cleanup}{verified}, 'TV exit remains explicitly unverified');
  is(PGAutomation::read_json_file($execution_path)->{run_id},$id,
   'claim remains until Stop cleanup can confirm TV exit');
+ $launch_ok=1;
+ $reply = PGAutomation::decode_json(main::webui_automation_control($id, 'stop'));
+ is($reply->{status}, 'ok', 'a later explicit cleanup retry is allowed after launch recovers');
  # Resume clears the counter so a later, unrelated interruption gets a fresh cleanup attempt.
  $id = PGAutomation::new_id();
  $path = write_run($id, status=>'interrupted', runner_pid=>0, stop_relaunches=>1, failure=>{error_code=>'runner-died'});
