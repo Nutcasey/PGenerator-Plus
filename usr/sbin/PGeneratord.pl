@@ -83,6 +83,8 @@ do "resolve.pm"       || die "Error";
 do "discovery.pm"     || die "Error";
 do "lg.pm"            || die "Error";
 do "webui.pm"         || die "Error";
+require PGAutomationLaunch;
+PGAutomationLaunch::install();
 do "bash.pm"          || die "Error";
 do "serial.pm"        || die "Error";
 
