@@ -177,6 +177,7 @@
    <div class="field"><label for="pgAutomationSavedQueueSelect">Selected queue</label><select id="pgAutomationSavedQueueSelect" onchange="pgAutomationQueueSelectionChanged(true)"></select></div>
    <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationNewQueue()">+ New queue</button>
   </div>
+  <div class="field"><label for="pgAutomationFinishPolicy">When the batch finishes</label><select id="pgAutomationFinishPolicy" onchange="pgAutomationFinishPolicyChanged()"><option value="restore-original">Restore original signal and picture mode where readable</option><option value="keep-last">Leave the final calibrated mode selected</option></select><small>Temporary protection settings are restored in both cases. An unreadable original picture mode is never guessed.</small></div>
   <div class="auto-toolbar auto-run-actions">
    <button class="btn btn-sm btn-danger" id="pgAutomationStartButton" type="button" onclick="pgAutomationStart()">Run queue</button>
    <button class="btn btn-sm btn-secondary" id="pgAutomationReadinessButton" type="button" onclick="pgAutomationReadiness()">Check Readiness</button>
@@ -184,7 +185,7 @@
   </div>
   <div id="pgAutomationActionBlocker" class="auto-muted" role="status" hidden></div>
   <div id="pgAutomationReadiness" aria-live="polite"></div>
-  <p class="auto-muted">Check Readiness checks every job by temporarily switching signals and picture modes, then restores them. Run queue performs those checks and continues into calibration.</p>
+  <p class="auto-muted">Check Readiness checks every job and restores any context it can independently read. On older TVs without mode readback, it checks compatibility without probing modes and reports limited verification. Run queue rechecks each job in its selected signal and mode before calibration.</p>
   <div class="auto-queue-header">
    <div><h3 id="pgAutomationJobsHeading">Jobs</h3><span id="pgAutomationQueueSaveState" class="auto-muted" aria-live="polite"></span></div>
    <div class="auto-actions">
@@ -330,7 +331,8 @@
    </div><p class="auto-muted">Meter settings are copied into this item, so later changes in the guided workflow will not alter the batch.</p></details>
    <details id="pgAutomationQualitySection"><summary>Post-Reading Quality Limits</summary>
     <label class="meter-toggle"><input id="pgAutomationQuality" type="checkbox"> Enable Quality Checks</label>
-    <p class="auto-muted">A missed limit flags the result and the batch continues. Uses the ΔE formula selected above.</p>
+    <div class="field"><label for="pgAutomationQualityPolicy">Acceptance policy</label><select id="pgAutomationQualityPolicy"><option value="audit">Audit only — retain existing workflow</option><option value="enforce">Enforce before Apply to All Inputs</option></select></div>
+    <p class="auto-muted">Audit flags missed limits and continues. Enforce measures first and blocks Apply to All Inputs unless every selected sweep passes. Uses the ΔE formula selected above.</p>
     <table><thead><tr><th>Sweep</th><th>Average ΔE</th><th>Maximum ΔE</th></tr></thead><tbody>
      <tr><td>Greyscale</td><td><input id="pgAutomationQualityAvg" type="number" min="0" step=".1" value="2" aria-label="Greyscale average limit"></td><td><input id="pgAutomationQualityMax" type="number" min="0" step=".1" value="5" aria-label="Greyscale maximum limit"></td></tr>
      <tr><td>ColorChecker</td><td><input id="pgAutomationQualityColorsAvg" type="number" min="0" step=".1" value="2" aria-label="ColorChecker average limit"></td><td><input id="pgAutomationQualityColorsMax" type="number" min="0" step=".1" value="5" aria-label="ColorChecker maximum limit"></td></tr>

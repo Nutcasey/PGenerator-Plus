@@ -32,6 +32,22 @@ sub _owns {
         && ($value->{token} || '') eq $token;
 }
 
+# The production command line contains only non-secret identifiers. This
+# small private journal is read before the potentially large run manifest.
+sub read_launch_token {
+    my ($run_id, $attempt) = @_;
+    return '' if !PGAutomation::safe_component($run_id) || !PGAutomation::safe_component($attempt);
+    my $file=_file($run_id);
+    my @st=lstat($file);
+    return '' if !@st || !-f _ || -l _ || ($st[2] & 0077) || $st[7]>8192;
+    my $read=PGAutomation::read_state($file);
+    return '' if $read->{state} ne 'ok';
+    my $launch=$read->{value};
+    return '' if ($launch->{run_id}||'') ne $run_id || ($launch->{attempt}||'') ne $attempt;
+    my $token=$launch->{token}||'';
+    return $token =~ /\A[A-Za-z0-9_.:-]{8,200}\z/ ? $token : '';
+}
+
 sub _live_attempt_pid {
     my ($pid, $run_id, $token, $attempt) = @_;
     return 0 if !defined($pid) || $pid !~ /^\d+$/ || $pid <= 1;
@@ -40,7 +56,7 @@ sub _live_attempt_pid {
     my @args = split(/\0/, $raw);
     for (my $i = 0; $i + 3 < @args; $i++) {
         return 1 if $args[$i] eq $RUNNER_PATH && $args[$i+1] eq $run_id
-            && $args[$i+2] eq $token && $args[$i+3] eq $attempt;
+            && $args[$i+2] eq '--launch' && $args[$i+3] eq $attempt;
     }
     return 0;
 }
@@ -48,7 +64,7 @@ sub _live_attempt_pid {
 sub _spawn_runner {
     my ($run_id, $token, $attempt, $log) = @_;
     my $command = 'setsid ' . join(' ', map { _quote($_) }
-        ($PERL_PATH, $RUNNER_PATH, $run_id, $token, $attempt))
+        ($PERL_PATH, $RUNNER_PATH, $run_id, '--launch', $attempt))
         . ' </dev/null >>' . _quote($log) . ' 2>&1 & printf "%s\\n" "$!"';
     # Reap only the short-lived shell. Its detached child must acknowledge the
     # unique attempt below; neither this PID nor exit 0 means it is ready.
@@ -140,7 +156,7 @@ sub launch_runner {
     my $attempt = PGAutomation::new_id();
     my $deadline = _clock() + $START_TIMEOUT;
     my ($saved) = PGAutomation::with_lock(_file($run_id), sub {
-        return {run_id=>$run_id, attempt=>$attempt, state=>'pending',
+        return {run_id=>$run_id, token=>$token, attempt=>$attempt, state=>'pending',
             created_at=>Time::HiRes::time(), expires_at=>Time::HiRes::time()+$START_TIMEOUT};
     });
     return 0 if !$saved;

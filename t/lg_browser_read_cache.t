@@ -71,4 +71,32 @@ is_deeply([sort keys %{$r->{setting_contracts}}],['brightness','pictureMode'],'a
  is(scalar(@uses),1,'the cache is consulted in one place');
  like($lg,qr/sub webui_lg_api .*?&lg_browser_picture_settings_while_automation\(/s,'and that place is the HTTP dispatcher');
 }
+
+# Partial reads merge only within one proven TV/input/mode/signal/category.
+{
+ execution('running','tok-1');
+ my $remember=sub {
+  my ($mode,$signal,$settings,$input,$profile)=@_;
+  my $payload={picture_mode=>$mode,signal_mode=>$signal,category=>'picture'};
+  my $response={status=>'ok',ip=>'192.0.2.2',current_input=>$input||'hdmi4',picture_settings=>{pictureMode=>$mode,%$settings},
+   generation_profile=>{capability_profile_hash=>($profile||'a')x64},supported_picture_keys=>[keys %$settings,'pictureMode']};
+  main::lg_remember_picture_settings(JSON::PP::encode_json($response),JSON::PP::encode_json($payload));
+ };
+ $remember->('filmMaker','sdr',{gamma=>'2.4',brightness=>50});
+ $remember->('dolbyHdrCinema','dv',{});
+ my $cached=JSON::PP::decode_json(main::lg_browser_picture_settings_while_automation(JSON::PP::encode_json({signal_mode=>'dv',picture_mode=>'dolbyHdrCinema'})));
+ is($cached->{picture_settings}{pictureMode},'dolbyHdrCinema','new context carries its own observed mode');
+ ok(!exists $cached->{picture_settings}{gamma},'SDR gamma cannot leak into a DV mode-only read');
+ ok(!grep($_ eq 'gamma',@{$cached->{supported_picture_keys}||[]}),'capability envelope does not cross signal modes either');
+ $cached=JSON::PP::decode_json(main::lg_browser_picture_settings_while_automation(JSON::PP::encode_json({signal_mode=>'sdr',picture_mode=>'filmMaker'})));
+ is_deeply($cached->{picture_settings},{},'an explicit other-mode request is not answered with the current-mode cache');
+ $remember->('dolbyHdrCinema','dv',{brightness=>49});
+ $remember->('dolbyHdrCinema','dv',{},'hdmi1');
+ $cached=JSON::PP::decode_json(main::lg_browser_picture_settings_while_automation('{}'));
+ ok(!exists $cached->{picture_settings}{brightness},'same mode on a different input has a separate cache');
+ $remember->('dolbyHdrCinema','dv',{brightness=>48},'hdmi1');
+ $remember->('dolbyHdrCinema','dv',{},'hdmi1','b');
+ $cached=JSON::PP::decode_json(main::lg_browser_picture_settings_while_automation('{}'));
+ ok(!exists $cached->{picture_settings}{brightness},'a changed compatibility profile cannot reuse old readings');
+}
 done_testing();

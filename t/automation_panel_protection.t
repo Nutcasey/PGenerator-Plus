@@ -48,7 +48,7 @@ $result=main::_panel_protection_disable(0,$item);
 ok(ref($result),'refusal still returns evidence');
 is($saved->{outcome},'failed','artifact records the failure');
 is_deeply($item->{warnings},['panel-protection-failed'],'job carries a visible warning');
-ok(!$run{panel_protection},'nothing to restore after a refused disable');
+ok($run{panel_protection}{restore_pending},'a refused compound disable may have partial effects and still requires restoration');
 
 # Restore when the run ends
 reset_state();
@@ -60,7 +60,7 @@ ok($requests[0][1]{enable},'restore sends enable:true');
 is_deeply($failed,[],'successful dispatch is not a restore failure');
 ok(!$run{panel_protection}{restore_pending},'restore is no longer pending');
 is($run{panel_protection}{restore_outcome},'sent-unverified','restore outcome is recorded as unverified');
-ok(!$run{hazard_restore_failures},'no failure list is written');
+is_deeply($run{hazard_restore_failures},[],'successful restoration clears any earlier failure list');
 
 # Restore failure is visible in history
 reset_state();

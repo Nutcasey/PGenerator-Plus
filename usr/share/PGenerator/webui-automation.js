@@ -564,7 +564,7 @@ function pgAutomationRecipeFromForm(){
   eotf:signal==='sdr'?'0':signal==='hlg'?'3':'2',primaries:signal==='sdr'?'0':signal==='dv'?'1':'2',colorimetry:signal==='sdr'?'2':'9',
   panel_light:{policy,key:panelKey,fixed_value:panelValue,target_luminance:target},
   panel_protection:{disable:pgAutomationChecked('PanelProtection')},
-  quality:{enabled:stages.post_readings&&pgAutomationChecked('Quality'),dE_formula:formula,limits},
+  quality:{enabled:stages.post_readings&&pgAutomationChecked('Quality'),policy:pgAutomationValue('QualityPolicy','audit'),dE_formula:formula,limits},
   patch_size:pgAutomationNumber('PatchSize',10,1,100),delay_ms:pgAutomationNumber('Delay',1000,0,30000),
   settle_seconds:pgAutomationNumber('Settle',8,0,600),
   signal_range:pgAutomationValue('Range','2'),pattern_signal_range:pgAutomationValue('Range','2'),
@@ -572,6 +572,7 @@ function pgAutomationRecipeFromForm(){
   max_bpc:signal==='dv'?8:pgAutomationNumber('BitDepth',10,8,10),display_type:pgAutomationValue('DisplayType','lcd'),ccss_override:pgAutomationValue('Ccss','')
  });
  if(signal==='dv')recipe.signal_range=recipe.pattern_signal_range=recipe.transport_signal_range=recipe.rgb_quant_range='2';
+ if(recipe.quality.policy==='enforce'&&!recipe.quality.enabled)throw new Error('Enforce requires After Readings and Enable Quality Checks.');
  const previous=recipe.reference_manual_checks||[];
  recipe.reference_manual_checks=Object.entries(pgAutomation.manualSettings||{}).map(([key,entry])=>'Set '+(pgAutomationSettingMetadata(key).label||key)+' to '+pgAutomationSettingValue(entry.value)+' in the TV menu for '+recipe.picture_mode+' ('+signal+'). '+entry.reason+'.');
  if(pgAutomation.settingsPlan?.panel_light&&!pgAutomation.settingsPlan.panel_light.writable)recipe.reference_manual_checks.push('Set '+pgAutomation.settingsPlan.panel_light.label+' manually to '+panelValue+' for '+recipe.picture_mode+' ('+signal+'). Automatic panel adjustment is unavailable.');
@@ -616,6 +617,7 @@ function pgAutomationFillRecipe(recipe){
   set(prefix+'Avg',limit.avg??2);set(prefix+'Max',limit.max??5);
  });
  check('Quality',recipe.quality?.enabled);
+ set('QualityPolicy',recipe.quality?.policy||'audit');
  set('PanelPolicy',panel.policy||'fixed');set('PanelKey',panel.key||'');pgAutomationRenderPanelKeyOptions();
  set('PanelValue',panel.fixed_value??panel.value??80);set('PanelTarget',panel.target_luminance??recipe.target_luminance??100);
  set('Gamma',recipe.target_gamma||cal.target_gamma||(recipe.signal_format==='sdr'?'bt1886':recipe.signal_format==='hlg'?'hlg':'st2084'));
@@ -726,9 +728,15 @@ function pgAutomationJobSummary(item){
  if(enabled('post_readings'))steps.push('After readings');
  return '<div class="auto-job-summary">'+pgAutomationEscape((signal==='dv'?'Dolby Vision':signal.toUpperCase())+' · '+pgAutomationModeLabel(item.picture_mode,signal))+'<br>'+pgAutomationEscape(steps.join(' → ')||'Settings only')+'</div>';
 }
+function pgAutomationFinishPolicyChanged(){
+ if(pgAutomation.editingRunId)return;
+ pgAutomation.queue.finish_policy=pgAutomationValue('FinishPolicy','restore-original')==='keep-last'?'keep-last':'restore-original';
+ pgAutomationSaveDraft();pgAutomationRenderQueue();
+}
 function pgAutomationRenderQueue(){
  pgAutomationDragCancel?.();
  pgAutomation.queue.items.forEach(pgAutomationUpgradeReference);
+ const finish=pgAutomationEl('FinishPolicy');if(finish){finish.value=pgAutomation.queue.finish_policy==='keep-last'?'keep-last':'restore-original';finish.disabled=!!pgAutomation.editingRunId;}
  pgAutomation.queue.name=pgAutomationQueueName(pgAutomation.queue.name);
  if(!pgAutomationEl('QueueDialog').open)pgAutomationEl('QueueName').value=pgAutomation.queue.name||'TV calibration queue';
  pgAutomationEl('QueueCount').textContent=pgAutomation.queue.items.length;
@@ -1319,7 +1327,7 @@ async function pgAutomationRecoverQueue(){
  let result;
  try{result=await pgAutomationRequest('runs/'+encodeURIComponent(run.id)+'/queue');if(!Array.isArray(result.queue?.items))throw new Error('Saved queue is unavailable.');if(before!==JSON.stringify(pgAutomation.queue))throw new Error('Your draft changed while loading. Retry recovery to replace it.');}
  catch(e){pgAutomationNotice(e.message,true);return;}
- pgAutomation.queue={name:pgAutomationQueueName(result.queue.name)||'Recovered queue',items:result.queue.items.map(pgAutomationSnapshot)};
+ pgAutomation.queue={name:pgAutomationQueueName(result.queue.name)||'Recovered queue',finish_policy:result.queue.finish_policy||'restore-original',items:result.queue.items.map(pgAutomationSnapshot)};
  pgAutomation.editingRunId='';pgAutomation.firstPending=0;pgAutomation.selectedQueue='';pgAutomation.loadedQueueSnapshot='';
  pgAutomationSaveDraft();pgAutomationRenderSavedQueues();pgAutomationRenderQueue();pgAutomationTab('queue');
  pgAutomationNotice('Jobs recovered from the Pi. Review and Save queue to keep a named copy. Nothing has started.');
@@ -1606,7 +1614,7 @@ if(typeof window!=='undefined')window.addEventListener('resize',()=>{
 
 function pgAutomationHistoryItemHtml(item,index){
  const apply=item&&item['apply-all'];
- const quality=item&&item.quality;
+ const quality=item&&(item.quality_result||item.quality);
  const panel=item&&item['panel-light'];
  const warningList=Array.isArray(item&&item.warnings)?item.warnings:[];
  const details=[pgAutomationEscape(item&&item.status||''),((item&&item.checkpoints)||[]).filter(x=>x&&x.status==='done').length+' checkpoints'];

@@ -129,7 +129,7 @@ like(main::_settings_failure_message('c1',{values=>{
  local *main::_refresh_control=sub {};
  local *main::_api=sub {return {status=>'ok',connected=>1} if $_[1] eq '/api/lg/status';return shift @statuses};
  local *main::_sleep_controlled=sub {1};
- local *main::_update_run=sub {};
+ local *main::_update_run=sub {return {}};
  local *main::_log=sub {push @logs,$_[0]};
  is(main::_wait_worker('/fake-status','greyscale',{})->{status},'complete','logging leaves worker completion unchanged');
  is(scalar @logs,2,'only changed worker progress is logged, not identical polls');

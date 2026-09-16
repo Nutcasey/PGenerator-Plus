@@ -14,7 +14,7 @@ local *main::_log=sub {};
 local *main::_log_worker_events=sub {};
 local *main::_worker_progress=sub {''};
 local *main::_active_item_number=sub {0};
-local *main::_update_run=sub {my $r={};$_[0]->($r);push @clocks,PGAutomation::clone($r->{worker_timing})};
+local *main::_update_run=sub {my $r={};$_[0]->($r);push @clocks,PGAutomation::clone($r->{worker_timing});return $r};
 local *main::_api=sub {
  return {status=>'ok'} if $_[1] eq '/api/lg/status';
  die 'unexpected API call' unless $_[1] eq '/test/status' && @statuses;

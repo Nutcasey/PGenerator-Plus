@@ -23,6 +23,7 @@ use PGCalibrationMath qw(
  target_luminance_for_context
 );
 use PGMeterReading qw(reading_xyz);
+use PGAutomation ();
 use PGSignalCode qw(signal_code_policy signal_percent_to_code);
 use PGLGCapabilities qw(lg_recipe lg_setting_values_agree lg_scoped_request_payload lg_setting_write_accepted);
 
@@ -12762,6 +12763,7 @@ sub autocal_activity_upload {
 sub write_state {
  my ($state)=@_;
  $state={} if(ref($state) ne "HASH");
+ PGAutomation::stamp_worker_state($state,$LG_AUTOCAL_CONFIG);
  $state->{"autocal"}=JSON::PP::true;
  write_file($state_file,$json->encode($state));
  # Per-write trace (opt-in via PGEN_AUTOCAL_TRACE=1). Captures every
