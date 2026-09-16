@@ -9836,7 +9836,11 @@ function meterRgbBalancePlotKey(greyMode,blackLevel,generation){
 function meterRgbBalanceNoiseFloor(){
  const sel=document.getElementById('meterRgbBalanceNoiseFloor');
  const floor=Number(sel&&sel.value);
- return (sel&&sel.value&&Number.isFinite(floor)&&floor>0)?floor:0;
+ // Cap at the control's declared max (10): a pref restored from an older
+ // client can carry anything, and the band/hover annotations would scale to
+ // an absurd envelope. Out-of-range garbage still resolves to Off below.
+ const capped=Math.min(10,floor);
+ return (sel&&sel.value&&Number.isFinite(capped)&&capped>0)?capped:0;
 }
 // chValue is a balance channel result (100-centered), gain the perceptual gain
 // applied to it (1 for the unweighted formula). Returns true when the raw L*
