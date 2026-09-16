@@ -1,0 +1,27 @@
+name: PR14 review workspace
+
+on:
+  push:
+    branches:
+      - review/pr14-hardening-20260916
+
+permissions:
+  contents: read
+
+jobs:
+  source-snapshot:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 6b929baec0aed06ac3a385c74239b056eb8b9dc3
+          persist-credentials: false
+      - name: Export the exact reviewed source without Git credentials
+        run: git archive --format=tar --output="$RUNNER_TEMP/pr14-source.tar" HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr14-source-6b929bae
+          path: ${{ runner.temp }}/pr14-source.tar
+          retention-days: 1
+          if-no-files-found: error
