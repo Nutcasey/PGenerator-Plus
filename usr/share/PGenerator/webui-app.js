@@ -9848,6 +9848,24 @@ function meterRgbBalanceWithinNoise(chValue,gain){
  if(!Number.isFinite(chValue)) return false;
  return Math.abs((chValue-100)/(Number.isFinite(gain)&&gain>0?gain:1))<=floor;
 }
+// The 'within meter noise' annotation is a Perceptual-view affordance: the
+// floor divides out the shadow gain, which only exists in that formula. When
+// another formula is selected the control would silently do nothing, so it
+// dims (but stays editable — the operator's saved value survives the toggle).
+function meterRgbBalanceNoiseFloorApplies(){
+ return meterRgbBalanceFormula()==='perceptual';
+}
+function meterUpdateNoiseFloorControlAvailability(){
+ const input=document.getElementById('meterRgbBalanceNoiseFloor');
+ if(!input) return;
+ const applies=meterRgbBalanceNoiseFloorApplies();
+ const label=input.closest('label');
+ const target=label||input;
+ target.style.opacity=applies?'':'0.45';
+ target.title=applies
+  ? 'Perceptual noise floor in L* points (pre-gain): deviations at or below this are labeled \'within meter noise\' in the tooltip at every IRE, because the shadow gain magnifies meter repeatability noise as much as signal. Type any value or pick a preset; empty or 0 = Off. Typical colorimeter repeatability is ~0.2-0.5 L* points near black. Plotted values never change.'
+  : 'Noise floor applies to the Perceptual RGB bal formula only — switch RGB bal to Perceptual to use it. The saved value is kept.';
+}
 
 // Dispatcher — keeps every existing caller working while honoring the
 // new <select id="meterRgbBalanceFormula"> selector. All three formulas here
@@ -9918,13 +9936,23 @@ function meterColorPatchRgbBalance(reading,whiteRef,blackRef,includeLuminance){
 
 function meterLiveRgbData(reading){
  if(!reading) return {mode:'balance',R:100,G:100,B:100};
+ // Per-channel 'within meter noise' flags for balance results, computed the
+ // same way the chart-hover tooltip does it: pre-gain L* deviation vs the
+ // operator floor. The live bar charts carry the flag per bar from here.
+ const tagBalNoise=bal=>{
+  if(meterRgbBalanceNoiseFloor()>0&&meterRgbBalanceFormula()==='perceptual'&&Number.isFinite(bal.R)){
+   const g=meterPerceptualRgbBalanceGain(reading);
+   bal.noise=[meterRgbBalanceWithinNoise(bal.R,g),meterRgbBalanceWithinNoise(bal.G,g),meterRgbBalanceWithinNoise(bal.B,g)];
+  }
+  return bal;
+ };
  const measured=meterReadingXYZ(reading);
  const isColorSeries=meterActiveSeriesType==='colors'||meterActiveSeriesType==='saturations';
  if(!isColorSeries){
   const whiteRef=meterEffectiveGreyscaleWhiteReference(Array.isArray(meterReadings)&&meterReadings.length?meterReadings:[reading]);
   const blackReadings=Array.isArray(meterReadings)&&meterReadings.length?meterReadings:[reading];
   const blackLevel=meterChartBlackLevel(blackReadings);
-  return whiteRef?{mode:'balance',...rgbBalance(reading,whiteRef,meterGreyRefMode(),blackLevel)}:{mode:'balance',R:100,G:100,B:100};
+  return whiteRef?tagBalNoise({mode:'balance',...rgbBalance(reading,whiteRef,meterGreyRefMode(),blackLevel)}):{mode:'balance',R:100,G:100,B:100};
  }
  // A neutral color-series patch uses the exact greyscale RGB-balance path.
  // This keeps the result centered on 100 (a +1% channel error is 101%) and
@@ -9936,7 +9964,7 @@ function meterLiveRgbData(reading){
   const grey=meterNeutralColorGreyscaleReading(reading);
   const whiteRef=meterGreyscaleRgbBalanceReference(neutralReadings);
   const blackLevel=meterChartBlackLevel(neutralReadings);
-  return whiteRef?{mode:'balance',...rgbBalance(grey,whiteRef,meterGreyRefMode(),blackLevel)}:{mode:'balance',R:100,G:100,B:100};
+  return whiteRef?tagBalNoise({mode:'balance',...rgbBalance(grey,whiteRef,meterGreyRefMode(),blackLevel)}):{mode:'balance',R:100,G:100,B:100};
  }
  if(!measured||!(measured.Y>0)) return {mode:'balance',R:null,G:null,B:null,noChroma:true};
  const readings=Array.isArray(meterReadings)&&meterReadings.length?meterReadings:[reading];
@@ -11538,8 +11566,18 @@ function meterQueueGreyAnalysisRefresh(){
 // its hit zones, and the live RGB companion immediately from one formula state
 // so the plotted lines cannot lag behind the hover values while the general
 // two-frame analysis refresh queue is yielding to browser input.
+// Changing the noise floor is also presentation-only, and the redraw effect
+// is identical to a formula change (chart band, hover annotations, live bars),
+// so reuse it. Debounced via rAF by the shared handler.
+function meterOnRgbBalanceNoiseFloorChange(){
+ meterOnRgbBalanceFormulaChange();
+}
+
 function meterOnRgbBalanceFormulaChange(){
  try{ meterSaveColorPrefs(); }catch(e){}
+ // The noise floor only annotates the Perceptual view; refresh its dimmed
+ // state first so it stays correct even when there are no readings to redraw.
+ try{ meterUpdateNoiseFloorControlAvailability(); }catch(e){}
  if(!Array.isArray(meterReadings)||!meterReadings.length) return;
  const isColor=meterActiveSeriesType==='colors'||meterActiveSeriesType==='saturations';
  if(isColor||meterIsTwoPointGreyscale()){
@@ -11665,6 +11703,7 @@ function meterLoadColorPrefs(){
   setVal('meterGrayWorld',   p.gray_world);
   setVal('meterRgbBalanceFormula', p.rgb_formula);
   setVal('meterRgbBalanceNoiseFloor', p.rgb_noise_floor);
+  try{ meterUpdateNoiseFloorControlAvailability(); }catch(e2){}
   setVal('meterDeltaEForm',  meterNormalizeSavedGreyDeltaEForm(p.de_form));
   setVal('meterColorDeltaEForm', p.color_de_form);
   setChk('meterColorIncludeLumError', p.color_incl_lum);
@@ -14278,10 +14317,13 @@ function meterRgbDeltasForLive(reading,bal,includeDeltaE){
  if(!bal) return null;
  const isDelta=(bal.mode==='delta');
  const center=isDelta?0:100;
+ // bal.noise (from meterLiveRgbData) carries the per-channel 'within meter
+ // noise' flags; the bar renderer dims a flagged bar to ~45% opacity.
+ const noise=Array.isArray(bal.noise)?bal.noise:null;
  const entries=[
-  {key:'R',label:'R',color:'#f44',v:(bal.R!=null)?bal.R-center:null,labelV:(bal.R!=null)?(isDelta?(bal.R-center):bal.R):null,showPlus:isDelta},
-  {key:'G',label:'G',color:'#4caf50',v:(bal.G!=null)?bal.G-center:null,labelV:(bal.G!=null)?(isDelta?(bal.G-center):bal.G):null,showPlus:isDelta},
-  {key:'B',label:'B',color:'#42a5f5',v:(bal.B!=null)?bal.B-center:null,labelV:(bal.B!=null)?(isDelta?(bal.B-center):bal.B):null,showPlus:isDelta}
+  {key:'R',label:'R',color:'#f44',v:(bal.R!=null)?bal.R-center:null,labelV:(bal.R!=null)?(isDelta?(bal.R-center):bal.R):null,showPlus:isDelta,noise:!!(noise&&noise[0])},
+  {key:'G',label:'G',color:'#4caf50',v:(bal.G!=null)?bal.G-center:null,labelV:(bal.G!=null)?(isDelta?(bal.G-center):bal.G):null,showPlus:isDelta,noise:!!(noise&&noise[1])},
+  {key:'B',label:'B',color:'#42a5f5',v:(bal.B!=null)?bal.B-center:null,labelV:(bal.B!=null)?(isDelta?(bal.B-center):bal.B):null,showPlus:isDelta,noise:!!(noise&&noise[2])}
  ];
  if(includeDeltaE&&reading){
   let de=null;
@@ -14426,7 +14468,9 @@ function drawDeltaBarsVertical(canvasId,spec){
    const left=Math.round(Math.min(cx,xV));
    const width=Math.max(Math.round(Math.abs(xV-cx)),1);
    const barH=Math.max(6,Math.min(14,rowH*0.42));
-   ctx.fillStyle=e.color;ctx.globalAlpha=0.88;
+   // e.noise: deviation sits inside the meter noise floor — dim the bar so
+   // it reads as "not a real error" without hiding the value.
+   ctx.fillStyle=e.color;ctx.globalAlpha=e.noise?0.4:0.88;
    ctx.fillRect(left,Math.round(cy-barH/2),width,Math.round(barH));
    ctx.globalAlpha=1;
    ctx.beginPath();ctx.arc(Math.round(xV),Math.round(cy),3,0,Math.PI*2);ctx.fillStyle=e.color;ctx.fill();
@@ -14479,7 +14523,8 @@ function drawDeltaBarsVertical(canvasId,spec){
   const width=Math.max(Math.round(barW),1);
   const height=Math.max(Math.round(Math.abs(yV-cy)),1);
   ctx.save();
-  ctx.fillStyle=e.color;ctx.globalAlpha=0.9;
+  ctx.globalAlpha=e.noise?0.4:0.9;
+  ctx.fillStyle=e.color;
   if(themedColorBars){ctx.shadowColor=e.color;ctx.shadowBlur=8;roundedRect(left,top,width,height,3);ctx.fill();}
   else {ctx.fillRect(left,top,width,height);ctx.beginPath();ctx.arc(Math.round(cx),yVPx,3,0,Math.PI*2);ctx.fill();}
   ctx.restore();

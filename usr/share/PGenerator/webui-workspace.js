@@ -15075,6 +15075,35 @@ function drawRGBChart(gs,allSteps,readingMap){
  // Reference line at 100%
  const refY=(100-yMin)/(yMax-yMin);
  drawDashedLine(ctx,chart,[[0,refY],[1,refY]],'#555');
+ // Noise-floor zone: under Perceptual the 'within meter noise' threshold at
+ // each IRE is floor x that point's shadow gain, so the zone widens toward
+ // black. Shading it shows where the hover tooltip will say 'within meter
+ // noise' before the operator has to hover. Pure annotation — plotted values
+ // and the axis scale are untouched; clipping keeps it inside the plot under
+ // a box-zoom.
+ const noiseFloor=meterRgbBalanceNoiseFloor();
+ if(noiseFloor>0&&meterRgbBalanceFormula()==='perceptual'){
+  const zone=[];
+  xSteps.forEach((step,idx)=>{
+   const bal=balMap[step.ire];
+   // Same point set as the trace: a noChroma (zero-light) step has no
+   // balance, so its noise threshold would annotate nothing.
+   if(!bal||bal.noChroma) return;
+   const gain=meterPerceptualRgbBalanceGain(step);
+   zone.push({x:meterGreyCategoryChartX(xSteps,idx),dev:noiseFloor*gain});
+  });
+  if(zone.length>1){
+   ctx.save();
+   ctx.beginPath();ctx.rect(chart.pad.l,chart.pad.t,chart.w,chart.h);ctx.clip();
+   ctx.beginPath();
+   zone.forEach((p,i)=>{const X=chart.toX(p.x),Y=chart.toY(100+p.dev);if(i)ctx.lineTo(X,Y);else ctx.moveTo(X,Y);});
+   for(let i=zone.length-1;i>=0;i--)ctx.lineTo(chart.toX(zone[i].x),chart.toY(100-zone[i].dev));
+   ctx.closePath();
+   ctx.fillStyle='rgba(160,190,255,0.10)';
+   ctx.fill();
+   ctx.restore();
+  }
+ }
  const rPts=[],gPts=[],bPts=[];
  // Off-scale tracking: a clamped point must never read as "error == axis
  // limit". The marker shows DIRECTION of the overflow; hover keeps the exact
@@ -21226,6 +21255,7 @@ async function loadMeterSettings(attempt){
  setVal('meterGreyRefMode', greyMode);
  setVal('meterGrayWorld',   s.gray_world);
  setVal('meterRgbBalanceFormula', s.rgb_formula);
+ try{ meterUpdateNoiseFloorControlAvailability(); }catch(e2){}
  setVal('meterDeltaEForm',  meterNormalizeSavedGreyDeltaEForm(s.de_form));
  setVal('meterColorDeltaEForm', s.color_de_form||'de2000');
  setChk('meterColorIncludeLumError', s.color_incl_lum);
