@@ -66,6 +66,94 @@ sub lg_automation_execution_file (@) {
  return $base."/execution.json";
 }
 
+sub lg_picture_settings_cache_path (@) {
+ return &lg_data_dir()."/last-picture-settings.json";
+}
+
+sub lg_read_picture_settings_cache (@) {
+ my $path=&lg_picture_settings_cache_path();
+ return {} if(!open(my $fh,"<:raw",$path));
+ my $raw="";
+ { local $/; $raw=<$fh>//""; }
+ close($fh);
+ my $cache=eval { JSON::PP::decode_json($raw) };
+ return (ref($cache) eq "HASH") ? $cache : {};
+}
+
+# Remember the last live picture-settings answer served over HTTP, merged per
+# control, so the browser can be answered from it while automation owns the TV.
+sub lg_remember_picture_settings (@) {
+ my ($json)=@_;
+ my $result=eval { JSON::PP::decode_json($json||"") };
+ return 0 if(ref($result) ne "HASH" || ($result->{"status"}||"") ne "ok" || ref($result->{"picture_settings"}) ne "HASH");
+ my $cache=&lg_read_picture_settings_cache();
+ $cache->{"picture_settings"}={} if(ref($cache->{"picture_settings"}) ne "HASH");
+ foreach my $key (keys(%{$result->{"picture_settings"}})) {
+  $cache->{"picture_settings"}{$key}=$result->{"picture_settings"}{$key};
+ }
+ foreach my $key (qw(current_input generation_profile lg_generation virtual_picture_settings)) {
+  $cache->{$key}=$result->{$key} if(exists($result->{$key}));
+ }
+ # Capability envelope: only a read that covered at least as many controls
+ # as the stored one may replace it; the runner's one-key mode reads must
+ # not shrink what the Display card is later shown.
+ my $width=(ref($result->{"supported_picture_keys"}) eq "ARRAY") ? scalar(@{$result->{"supported_picture_keys"}}) : 0;
+ if($width >= ($cache->{"capability_width"}||0)) {
+  $cache->{"capability_width"}=$width;
+  foreach my $key (qw(supported_picture_keys unsupported_picture_keys setting_contracts logical_controls)) {
+   $cache->{$key}=$result->{$key} if(exists($result->{$key}));
+  }
+ }
+ $cache->{"updated_at"}=time();
+ my $path=&lg_picture_settings_cache_path();
+ my $tmp=$path.".".$$.".".(eval { threads->tid() } || 0).".tmp";
+ return 0 if(!open(my $fh,">:raw",$tmp));
+ print $fh JSON::PP->new->canonical->encode($cache);
+ close($fh);
+ chmod(0644,$tmp);
+ return rename($tmp,$path) ? 1 : 0;
+}
+
+# While an automation run owns the TV, a picture-settings read that does not
+# carry the run's own token is the browser polling. Every such read spawned a
+# helper on the single TV lane (6 s under load, every ~30 s during a run) and
+# queued the runner's next call behind it. Answer from the last live read,
+# flagged, instead. The runner and the AutoCal workers send the token and
+# are never affected; an idle, paused or interrupted run does not gate.
+sub lg_browser_picture_settings_while_automation (@) {
+ my ($body)=@_;
+ my $execution_file=&lg_automation_execution_file();
+ return "" if(!-f $execution_file);
+ return "" if(!open(my $fh,"<:raw",$execution_file));
+ my $raw="";
+ { local $/; $raw=<$fh>//""; }
+ close($fh);
+ my $execution=eval { JSON::PP::decode_json($raw) };
+ return "" if(ref($execution) ne "HASH");
+ my $status=$execution->{"status"}||"";
+ return "" if($status !~ /^(?:starting|running|completing|stopping)$/);
+ my $payload=eval { JSON::PP::decode_json($body||"") };
+ $payload={} if(ref($payload) ne "HASH");
+ my $token=$payload->{"automation_token"}||"";
+ return "" if($token ne "" && $token eq ($execution->{"token"}||""));
+ my $cache=&lg_read_picture_settings_cache();
+ my $known=(ref($cache->{"picture_settings"}) eq "HASH") ? $cache->{"picture_settings"} : {};
+ my $keys=$payload->{"keys"};
+ $keys=[sort keys(%{$known})] if(ref($keys) ne "ARRAY" || !@{$keys});
+ my %settings=map { exists($known->{$_}) ? ($_=>$known->{$_}) : () } @{$keys};
+ my $run_id=$execution->{"run_id"}||"";
+ return &lg_encode_json({
+  status => "ok",
+  cached => &lg_json_true(),
+  automation_active => &lg_json_true(),
+  run_id => $run_id,
+  picture_settings => \%settings,
+  (map { exists($cache->{$_}) ? ($_=>$cache->{$_}) : () } qw(current_input generation_profile lg_generation virtual_picture_settings supported_picture_keys unsupported_picture_keys setting_contracts logical_controls)),
+  cached_at => $cache->{"updated_at"}||0,
+  message => "Values from the last read; the TV is in use by automation run ".($run_id ne "" ? $run_id : "in progress").".",
+ });
+}
+
 sub lg_automation_guard_json (@) {
  my ($body)=@_;
  my $execution_file=&lg_automation_execution_file();
@@ -1189,7 +1277,8 @@ sub lg_helper_timeout_message (@) {
   my $settings=$request->{"settings"};
   my @keys=(ref($settings) eq "HASH") ? keys(%{$settings}) : ();
   return "LG TV did not finish the picture-mode change within ${timeout}s." if(scalar(@keys) == 1 && $keys[0] eq "pictureMode");
-  return "LG TV did not finish the white-balance write within ${timeout}s.";
+  return "LG TV did not finish the white-balance write within ${timeout}s." if(grep { ref($settings->{$_}) eq "ARRAY" } @keys);
+  return "LG TV did not finish writing ".scalar(@keys)." picture control".(scalar(@keys) == 1 ? "" : "s")." within ${timeout}s.";
  }
  return "LG TV did not finish the 3D LUT command within ${timeout}s." if($action eq "3d_lut_probe" || $action eq "3d_lut_upload" || $action eq "3d_lut_reset");
  return "LG TV did not finish the HDR tone-map upload within ${timeout}s." if($action eq "hdr_tone_map_upload");
@@ -3685,7 +3774,14 @@ sub webui_lg_api (@) {
   return &webui_lg_pin_pair_submit($body);
  }
  if($path eq "/api/lg/picture-settings" && ($method eq "GET" || $method eq "POST")) {
-  return &webui_lg_picture_settings($body);
+  # Only requests that arrive over HTTP are answered from the cache: every
+  # in-process caller (readiness, the calibration-context freeze, hazard
+  # probes) reaches webui_lg_picture_settings directly and always reads live.
+  my $cached=&lg_browser_picture_settings_while_automation($body);
+  return $cached if($cached ne "");
+  my $json=&webui_lg_picture_settings($body);
+  &lg_remember_picture_settings($json);
+  return $json;
  }
  if($path eq "/api/lg/picture-settings/set" && $method eq "POST") {
   return &webui_lg_picture_settings_set($body);

@@ -9,7 +9,9 @@ local $ENV{PGEN_AUTOMATION_DIR}=tempdir(CLEANUP=>1);
 my (@checks,@writes,@logs,$response);
 local *main::_log=sub {push @logs,$_[0]};
 local *main::_append_setting_check=sub {push @checks,$_[2];1};
-local *main::_api=sub {push @writes,$_[2] if $_[1]=~/\/set$/; $response};
+local *main::_api=sub {
+ if($_[1]=~/\/set$/) { push @writes,$_[2]; $response->{picture_settings}{$_}=$_[2]{settings}{$_} for keys %{$_[2]{settings}||{}}; }
+ $response};
 local *main::_select_item_picture_mode=sub {1};
 local *main::_verify_live_capability_profile=sub {1}; # admitted-job gamma semantics
 sub item {
@@ -59,7 +61,7 @@ for my $override (
  {picture_settings=>{pictureMode=>'filmMaker',gamma=>'unknown',brightness=>50}},
 ) {is(check(item(),'c6',$override)->{verified},0,'LUT ownership cannot hide failed reads, wrong mode, missing/unknown values or brightness drift');}
 is(check(item(),'c6',{unsupported_picture_keys=>{gamma=>1}})->{verified},0,'unsupported readback without matrix permission blocks progression');
-check(item(),'c6');@writes=();
+check(item(),'c6');@writes=();$response->{picture_settings}{brightness}=40;
 ok(main::_apply_and_verify(0,item(),'c6-recovery',1),'settings recovery succeeds with verified 1D ownership');
 is_deeply([map {sort keys %{$_->{settings}}} @writes],['brightness'],'recovery never rewrites bypassed Gamma');
 {local *main::_append_setting_check=sub {0};is(check(item(),'c6')->{verified},0,'failed evidence storage still fails the boundary');}

@@ -45,6 +45,18 @@ my $HTTP = HTTP::Tiny->new(
 );
 my $API_RETRY_INTERVAL = 5;
 my $API_RETRY_WINDOW = 300;
+# The heartbeat rewrites run.json (0.9 s to decode on the appliance) and
+# execution.json. At 2 s it kept the runner at 75 % CPU and slowed every
+# helper spawn; the daemon reaps by pid, not heartbeat age, and the UI warns
+# only after 60 s, so 10 s is well inside every consumer.
+my $HEARTBEAT_INTERVAL = 10;
+# A healthy /api/lg/status answer is reused for this long before the next LG
+# action re-probes it; any LG connection failure drops it immediately.
+my $LG_STATUS_CACHE_SECONDS = 10;
+my $LG_STATUS_HEALTHY_AT = 0;
+# Settings passes whose pre-read is known to be pointless: a full SDR picture
+# reset has just restored factory values, so c4 must write regardless.
+my %SKIP_PREREAD;
 
 my $STOP_REQUESTED = 0;
 my $PAUSE_REQUESTED = 0;
@@ -182,7 +194,8 @@ sub _refresh_control {
 }
 
 sub _write_execution {
-    my $run = _run();
+    my ($run) = @_;
+    $run = _run() if ref($run) ne 'HASH';
     my $value = {
         owner     => 'automation',
         run_id    => $RUN_ID,
@@ -218,7 +231,7 @@ sub _release_execution {
 sub _heartbeat {
     my ($force) = @_;
     my $now = time();
-    return if !$force && $now - $LAST_HEARTBEAT < 2;
+    return if !$force && $now - $LAST_HEARTBEAT < $HEARTBEAT_INTERVAL;
     $LAST_HEARTBEAT = $now;
     my $saved = _update_run(sub {
         my ($run) = @_;
@@ -231,7 +244,7 @@ sub _heartbeat {
         $run->{active_stage} = $ACTIVE_STAGE if $ACTIVE_STAGE ne '';
     });
     die 'Unable to persist automation heartbeat' if !ref($saved);
-    die 'Unable to write automation execution heartbeat' if !_write_execution();
+    die 'Unable to write automation execution heartbeat' if !_write_execution($saved);
 }
 
 sub _sleep_controlled {
@@ -277,6 +290,14 @@ sub _api_once {
         $SIG{TERM} = 'DEFAULT'; $SIG{INT} = 'DEFAULT';
         my $timeout = ref($payload) eq 'HASH' && $payload->{helper_timeout}
             ? $payload->{helper_timeout} + 20 : 60;
+        # An LG action runs a helper the daemon may retry once after a
+        # connect refusal; the child must outlive the daemon's worst case or
+        # a still-running write gets re-posted. Without an explicit helper
+        # timeout the daemon's largest per-action default (180 s) applies.
+        if (_lg_action_path($path)) {
+            $timeout = ref($payload) eq 'HASH' && $payload->{helper_timeout}
+                ? 2 * $payload->{helper_timeout} + 25 : 2 * 180 + 25;
+        }
         $timeout = 300 if $path eq '/api/automation/readiness';
         my $client = HTTP::Tiny->new(agent => 'PGenerator-automation/1', timeout => $timeout);
         my $response = eval { $client->request($method, $url, \%options) };
@@ -329,10 +350,14 @@ sub _api_once {
 
 sub _ensure_lg_connection {
     my ($force) = @_;
+    return 1 if !$force && $LG_STATUS_HEALTHY_AT
+        && time() - $LG_STATUS_HEALTHY_AT < $LG_STATUS_CACHE_SECONDS;
+    $LG_STATUS_HEALTHY_AT = 0;
     my $status = _api_once('GET', '/api/lg/status', undef);
-    return 1 if !$force && ref($status) eq 'HASH'
-        && $status->{connected}
-        && !$status->{disconnected};
+    if (!$force && ref($status) eq 'HASH' && $status->{connected} && !$status->{disconnected}) {
+        $LG_STATUS_HEALTHY_AT = time();
+        return 1;
+    }
     my $ip = ref($status) eq 'HASH'
         ? ($status->{stored_ip} || $status->{manual_ip} || $status->{ip} || '') : '';
     if ($ip !~ /^[A-Za-z0-9_.:-]{1,120}$/) {
@@ -344,12 +369,14 @@ sub _ensure_lg_connection {
         if (ref($connect) eq 'HASH' && $connect->{connected} && !$connect->{disconnected}) {
             _log($force ? 'refreshed the paired LG TV connection for automation'
                 : 'reconnected the paired LG TV for automation');
+            $LG_STATUS_HEALTHY_AT = time();
             return 1;
         }
         my $check = _api_once('GET', '/api/lg/status', undef);
         if (ref($check) eq 'HASH' && $check->{connected} && !$check->{disconnected}) {
             _log($force ? 'refreshed the paired LG TV connection for automation'
                 : 'reconnected the paired LG TV for automation');
+            $LG_STATUS_HEALTHY_AT = time();
             return 1;
         }
         _sleep_controlled(1) or return 0;
@@ -374,8 +401,51 @@ sub _lg_connection_failure {
         @{$response}{qw(message error raw_error)}));
     return 1 if $message =~ /unable to connect to lg webos tv/;
     return 1 if $message =~ /connect the lg tv before/;
-    return 1 if $message =~ /lg tv did not (?:answer|finish)/;
+    # A helper that ran out of time ("LG TV did not finish ... within Ns") is
+    # not a refusal: the TV was reached. Treating it as one cost three pairing
+    # refreshes per settings pass.
     return 1 if $message =~ /lg webos tv.*(?:websocket|connection)/;
+    return 0;
+}
+
+# Helper timeouts the runner asks the daemon for. Only paths whose daemon
+# action is known are filled in; anything else keeps the daemon's own
+# per-action default and gets the widest child timeout instead.
+sub _lg_helper_timeout_for {
+    my ($path, $payload) = @_;
+    $payload = {} if ref($payload) ne 'HASH';
+    return 60 if $path eq '/api/lg/picture-settings';
+    return undef if $path ne '/api/lg/picture-settings/set';
+    my $settings = ref($payload->{settings}) eq 'HASH' ? $payload->{settings} : {};
+    # White-balance arrays are the DDC path with its own daemon default.
+    return undef if grep { ref($settings->{$_}) } keys %$settings;
+    # The helper writes and reads back each control inside one session at
+    # 5-7 s per control on the G3; 18 controls need ~2 min, not the 45 s the
+    # daemon assumes for a lone write.
+    my $timeout = 30 + 8 * scalar(keys %$settings);
+    $timeout = 45 if $timeout < 45;
+    $timeout = 180 if $timeout > 180;
+    return $timeout;
+}
+
+# Which LG actions may be re-posted after a transport error. Reads and
+# absolute-value control writes are idempotent (a retry queues behind the
+# still-running first request on the daemon's single TV lane). Everything
+# else, resets, uploads, run begin, panel-protection disable (a second reply
+# would overwrite the restore baseline) and CAL_START, gets one attempt; an
+# unlisted LG path fails closed to one attempt.
+sub _lg_retry_window {
+    my ($path, $payload) = @_;
+    $payload = {} if ref($payload) ne 'HASH';
+    if ($path eq '/api/lg/picture-settings/set') {
+        return 0 if $payload->{reset_ddc_baseline} || $payload->{clear_ddc_baseline} || $payload->{force_ddc_white_balance};
+        my $settings = ref($payload->{settings}) eq 'HASH' ? $payload->{settings} : {};
+        return 0 if grep { /^(?:whiteBalance|adjustingLuminance)/ && ref($settings->{$_}) } keys %$settings;
+        return $API_RETRY_WINDOW;
+    }
+    return $API_RETRY_WINDOW if $path eq '/api/lg/picture-settings';
+    # CAL_END is idempotent and Stop cleanup depends on it; CAL_START is not.
+    return $payload->{enabled} ? 0 : 30 if $path eq '/api/lg/calibration-mode';
     return 0;
 }
 
@@ -383,7 +453,15 @@ sub _api {
     my ($method, $path, $payload, $allow_stop, $retry_window) = @_;
     $allow_stop = $RESTORING_PREFLIGHT ? 1 : 0 if !defined($allow_stop);
     $allow_stop = 1 if $RESTORING_PREFLIGHT;
-    $retry_window = $API_RETRY_WINDOW if !defined($retry_window);
+    my $lg_action = _lg_action_path($path);
+    if ($lg_action && $method eq 'POST') {
+        $payload = {} if ref($payload) ne 'HASH';
+        if (!$payload->{helper_timeout}) {
+            my $helper_timeout = _lg_helper_timeout_for($path, $payload);
+            $payload = { %$payload, helper_timeout => $helper_timeout } if $helper_timeout;
+        }
+    }
+    $retry_window = $lg_action ? _lg_retry_window($path, $payload) : $API_RETRY_WINDOW if !defined($retry_window);
     $retry_window = 0 if $retry_window < 0;
     my $last;
     my $started = time();
@@ -393,7 +471,6 @@ sub _api {
     # retry is bounded (three pairing refreshes), so a transient websocket
     # refusal right after a picture-mode switch no longer turns a fully
     # checked queue into a "cleanup required" interruption.
-    my $lg_action = _lg_action_path($path);
     my $lg_preflighted = 0;
     my $lg_reconnects = 0;
     while (1) {
@@ -410,6 +487,7 @@ sub _api {
         $last = _api_once($method, $path, $payload, $allow_stop);
         if (!$last->{_transport_error}) {
             if ($lg_action && _lg_connection_failure($last) && $lg_reconnects < 3) {
+                $LG_STATUS_HEALTHY_AT = 0;
                 $lg_reconnects++;
                 _log("LG request $method $path reported a connection failure; refreshing the pairing (attempt $lg_reconnects)");
                 if (_ensure_lg_connection(1)) {
@@ -1658,9 +1736,59 @@ sub _calibration_settings_boundary {
         "$reason; requested settings restored, but their effect on measurements is not established", 0);
 }
 
+# A pre-read the mode selector may act on: an independent, no-echo read of
+# the active picture mode (no requested picture_mode, calibration mode
+# ignored, item context cleared so the daemon cannot echo the queued
+# selector). _preflight_read_mode's snapshot qualifies: it refused anything
+# that was not independently readable.
+sub _normalise_mode_read {
+    my ($pre) = @_;
+    # Only a read stamped no_echo qualifies; an automation item has the same
+    # fields and must never be mistaken for a readback of the TV.
+    return ref($pre) eq 'HASH' && $pre->{no_echo} ? $pre : undef;
+}
+
+sub _mode_read_from_response {
+    my ($live) = @_;
+    my $mode = ref($live) eq 'HASH' ? (_observed_settings($live)->{pictureMode} || '') : '';
+    my $trusted = ref($live) eq 'HASH' && _response_ok($live) && $mode ne ''
+        && !$live->{virtual_picture_settings} && !$live->{picture_mode_read_forbidden}
+        && !$live->{manual_confirmation_required} ? 1 : 0;
+    return { no_echo => 1, verified => $trusted, picture_mode => $mode,
+        current_input => ref($live) eq 'HASH' ? ($live->{current_input}||'') : '', response => $live };
+}
+
+sub _read_active_mode {
+    my ($item) = @_;
+    my $saved_item = $ACTIVE_ITEM; $ACTIVE_ITEM = undef;
+    my $live = eval { _api('POST', '/api/lg/picture-settings', {
+        keys => ['pictureMode'], include_current_input => JSON::PP::true,
+        ignore_calibration_picture_mode => JSON::PP::true, signal_mode => _signal($item),
+    }) };
+    my $error = $@; $ACTIVE_ITEM = $saved_item; die $error if $error;
+    return _mode_read_from_response($live);
+}
+
 sub _select_item_picture_mode {
-    my ($item_number,$item,$point)=@_;
+    my ($item_number,$item,$point,$pre)=@_;
     return 1 if _picture_mode($item) eq '';
+    # A mode the TV already reports on the expected input needs no write, no
+    # settle and no second read: the independent read is the verification.
+    # DV and ddc-only generations answer virtual settings, never verify here
+    # and always take the write path.
+    $pre = _normalise_mode_read($pre) || _read_active_mode($item);
+    if (($pre->{verified}||'') eq '1' && _mode_agrees(_picture_mode($item),$pre->{picture_mode})
+        && ($item->{tv_input}||'') ne '' && ($pre->{current_input}||'') eq $item->{tv_input}) {
+        _log_action('Picture mode '._picture_mode($item).' already active on '.$item->{tv_input}.'; confirmed by readback, no mode write needed ('.$point.'-mode)');
+        my $saved=_append_setting_check($item_number,$point.'-mode',{
+            key=>'pictureMode',expected=>_picture_mode($item),observed=>$pre->{picture_mode},
+            verified=>JSON::PP::true,result=>'verified',operation=>'readback',category=>'picture',
+            reason=>'TV reported the requested picture mode on the expected input before any write; no mode write was needed',
+            capability_profile_id=>$item->{capability_profile}{id},capability_profile_hash=>$item->{capability_profile}{hash},
+        });
+        if(!$saved) { $::LAST_ERROR='Unable to persist LG settings verification evidence'; return 0; }
+        return 1;
+    }
     _log_action('Selecting '.uc(_signal($item)).' picture mode '._picture_mode($item));
     my $result=_apply_one_setting($item,'pictureMode',_picture_mode($item),'picture');
     if (!$result || (($result->{status}||'') ne 'ok' && ($result->{status}||'') ne 'started')) {
@@ -1712,7 +1840,14 @@ sub _apply_settings_batched {
         my $ok=ref($result) eq 'HASH' && (($result->{status}||'') eq 'ok' || ($result->{status}||'') eq 'started')
             && (!exists($result->{verification_state}) || ($result->{verification_state}||'') eq 'verified');
         if (!$ok) {
-            _log_action('Batched write of '.scalar(@group).' '.$category.' controls was not confirmed; applying them one at a time');
+            # A readback mismatch still carries per-key verification; keep
+            # what verified and rewrite only the rest. A refused write carries
+            # nothing, so every control takes the per-control path.
+            my $verification=ref($result) eq 'HASH' && ref($result->{setting_verification}) eq 'HASH' ? $result->{setting_verification} : {};
+            my @kept=grep { ref($verification->{$_}) eq 'HASH' && ($verification->{$_}{status}||'') eq 'verified' } @group;
+            $done{$_}=1 for @kept;
+            _log_action('Batched write of '.scalar(@group).' '.$category.' controls was not confirmed; '
+                .(@kept ? scalar(@kept).' verified, applying the rest one at a time' : 'applying them one at a time'));
             next;
         }
         $done{$_}=1 for @group;
@@ -1723,16 +1858,55 @@ sub _apply_settings_batched {
 
 sub _apply_and_verify {
     my ($item_number, $item, $point, $mode_selected, $calibration_active) = @_;
-    return 0 if !_verify_live_capability_profile($item);
     my $settings = _item_settings($item);
     my @keys = sort grep { !_calibration_manages_setting($item, $_, $point)
         && !_expected_calibration_gamut_state($item, $_, $point) } keys %$settings;
     _log_action('Leaving LUT-managed picture controls unchanged during settings recovery') if @keys < keys %$settings;
     my $last;
+    my $profile_confirmed = 0;
     for my $cycle (1..3) {
         _log_action('Retrying TV settings after readback mismatch (attempt '.$cycle.'/3)') if $cycle>1;
-        return 0 if (!$mode_selected || $cycle>1) && !_select_item_picture_mode($item_number,$item,$point);
-        _log_action('Applying '.scalar(@keys).' queued TV settings to '._picture_mode($item)) if @keys;
+        if (!$mode_selected || $cycle>1) {
+            # One no-echo read serves both the compatibility check that must
+            # precede any write and the selector's "already active" decision.
+            my $pre_mode = _read_active_mode($item);
+            return 0 if !$profile_confirmed && !_verify_live_capability_profile($item, $pre_mode->{response});
+            $profile_confirmed = 1;
+            return 0 if !_select_item_picture_mode($item_number,$item,$point,$pre_mode);
+        }
+        # Read before writing: a control the TV already reports at the queued
+        # value is verified by that readback and never rewritten. After the
+        # HDR10 and DV calibration resets, which leave menu values alone, and
+        # at the panel-light pass this turns a full write pass into one read.
+        my @write_keys = @keys;
+        if ($cycle == 1 && @keys && !delete($SKIP_PREREAD{$item_number.':'.$point})) {
+            # The pre-read observes the TV before the write: a gamut left
+            # Wide by an earlier calibration is corrected below, so it must
+            # not become a job warning; only the post-write read records what
+            # still stands.
+            my @warnings_before = @{$item->{warnings} || []};
+            my $pre = _read_and_verify_settings($item_number, $item, $point.'-pre');
+            $item->{warnings} = \@warnings_before;
+            return 0 if !$profile_confirmed && !_verify_live_capability_profile($item, $pre->{response});
+            $profile_confirmed = 1;
+            my $values = $pre->{values} || {};
+            # @keys already excludes LUT-managed controls for this point; a
+            # matched readback is the only reason to leave a control unwritten.
+            @write_keys = grep { my $v = $values->{$_}; !(ref($v) eq 'HASH' && $v->{matched}) } @keys;
+            # A fresh matching readback supersedes any earlier accepted-
+            # without-readback acknowledgement; it must not license a later
+            # unverifiable read.
+            delete $item->{best_available_write_ack}{$_} for grep { !$values->{$_} || $values->{$_}{matched} } @keys;
+            if (!@write_keys && $pre->{verified}) {
+                _log_action('All '.scalar(@keys).' queued TV settings already match; nothing to write ('.$point.')');
+                return $pre->{verified};
+            }
+            _log_action((scalar(@keys)-scalar(@write_keys)).' of '.scalar(@keys).' queued TV settings already match; writing the other '.scalar(@write_keys).' ('.$point.')')
+                if @write_keys && @write_keys < @keys;
+        }
+        return 0 if !$profile_confirmed && !_verify_live_capability_profile($item);
+        $profile_confirmed = 1;
+        _log_action('Applying '.scalar(@write_keys).' queued TV settings to '._picture_mode($item)) if @write_keys;
         my $applied=0;
         my $next_setting_log=time()+15;
         # First pass: each category's controls in one TV session, confirmed by
@@ -1740,11 +1914,11 @@ sub _apply_and_verify {
         # per-control path. Every helper call registers a fresh TV session
         # (3-14 s on the G3), so 18 single writes made TV setup the slowest
         # stage of a job.
-        my %batched=$cycle==1 ? %{_apply_settings_batched($item_number,$item,$point,\@keys,$settings,$calibration_active)} : ();
+        my %batched=$cycle==1 ? %{_apply_settings_batched($item_number,$item,$point,\@write_keys,$settings,$calibration_active)} : ();
         $applied+=scalar(keys %batched);
-        foreach my $key (@keys) {
+        foreach my $key (@write_keys) {
             next if $batched{$key};
-            _update_run(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>$applied,total=>scalar(@keys)+1,unit=>'settings and verification',message=>'Applying '.$key.' ('.($applied+1).'/'.scalar(@keys).')'};});
+            _update_run(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>$applied,total=>scalar(@write_keys)+1,unit=>'settings and verification',message=>'Applying '.$key.' ('.($applied+1).'/'.scalar(@write_keys).')'};});
             delete $item->{best_available_write_ack}{$key};
             my $category = _setting_category($item, $key);
             my $result = _apply_one_setting($item, $key, $settings->{$key}, $category, $calibration_active);
@@ -1775,12 +1949,12 @@ sub _apply_and_verify {
                 }
             }
             $applied++;
-            if (time()>=$next_setting_log && $applied<@keys) {
-                _log_action('Applied '.$applied.'/'.scalar(@keys).' TV settings; last control: '.$key);
+            if (time()>=$next_setting_log && $applied<@write_keys) {
+                _log_action('Applied '.$applied.'/'.scalar(@write_keys).' TV settings; last control: '.$key);
                 $next_setting_log=time()+15;
             }
         }
-        _update_run(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>$applied,total=>scalar(@keys)+1,unit=>'settings and verification',message=>'Verifying all TV settings after writes'};});
+        _update_run(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>$applied,total=>scalar(@write_keys)+1,unit=>'settings and verification',message=>'Verifying all TV settings after writes'};});
         $last = _read_and_verify_settings($item_number, $item, $point);
         if ($last->{verified}) {
             return $last->{verified};
@@ -1919,7 +2093,7 @@ sub _begin_run {
 }
 
 sub _verify_live_capability_profile {
-    my ($item) = @_;
+    my ($item, $live) = @_;
     my $expected = ref($item->{capability_profile}) eq 'HASH'
         ? ($item->{capability_profile}{hash} || '') : '';
     $expected ||= ref($item->{generation_profile}) eq 'HASH'
@@ -1935,11 +2109,13 @@ sub _verify_live_capability_profile {
         $::LAST_ERROR='Calibration has no confirmed HDMI input. Run job readiness before changing TV calibration data.';
         return 0;
     }
-    my $live = _api('POST', '/api/lg/picture-settings', {
+    # A read the caller already holds (the settings pre-read or the no-echo
+    # mode read) carries the same signature; only spawn a helper without one.
+    $live = _api('POST', '/api/lg/picture-settings', {
         keys => ['pictureMode'], picture_mode => _picture_mode($item),
         signal_mode => _signal($item), include_current_input => JSON::PP::true,
         tv_input => $item->{tv_input}||'',
-    });
+    }) if ref($live) ne 'HASH' || ref($live->{generation_profile}) ne 'HASH';
     my $actual = ref($live) eq 'HASH' && ref($live->{generation_profile}) eq 'HASH'
         ? ($live->{generation_profile}{capability_profile_hash} || '') : '';
     if (ref($live) ne 'HASH' || ($live->{status} || '') ne 'ok' || $actual eq '' || $actual ne $expected
@@ -1977,6 +2153,9 @@ sub _reset_for_calibration {
             $::LAST_ERROR = $picture->{message} || 'Unable to reset the LG picture mode';
             return 0;
         }
+        # Factory values are back on every menu control: the c4 pre-read
+        # would only confirm that, so c4 writes without it.
+        $SKIP_PREREAD{$item_number.':c4'} = 1;
         my $slots = [ (0) x 22 ];
         _log_action('Picture reset complete; resetting the SDR greyscale controls');
         my $ddc = _api('POST', '/api/lg/picture-settings/set', {
@@ -3350,7 +3529,11 @@ sub _require_job_ready {
     # Readiness runs its own TV conversations inside the daemon, so the
     # runner's LG reconnect logic never sees a refusal that happens there.
     # A readiness verdict is idempotent: reconnect and ask once more.
-    if (!$result->{ready} && grep { _lg_connection_failure({status=>'error',message=>$_}) } @{$errors->($result)}) {
+    # Readiness verdicts are idempotent, so a daemon-internal helper timeout
+    # ("LG TV did not answer ... within Ns") also earns one more check here,
+    # although elsewhere a timeout is no longer treated as a refusal.
+    my $retryable=sub { my ($m)=@_; return 1 if _lg_connection_failure({status=>'error',message=>$m}); return $m=~/LG TV did not (?:answer|finish)/i ? 1 : 0; };
+    if (!$result->{ready} && grep { $retryable->($_) } @{$errors->($result)}) {
         _log_action('TV connection was refused during readiness checks; reconnecting and checking again');
         if (_ensure_lg_connection(1)) {
             $result=_api('POST','/api/automation/readiness',{items=>[$item],scope=>$scope});
@@ -3366,7 +3549,13 @@ sub _require_job_ready {
 
 sub _freeze_job_lg_context {
     my ($item)=@_;
-    my $live=_api('POST','/api/lg/picture-settings',{keys=>['pictureMode'],include_current_input=>JSON::PP::true,signal_mode=>_signal($item)});
+    # No-echo read: item context cleared and calibration mode ignored, so the
+    # daemon reports the active mode rather than the queued selector. The
+    # result doubles as the mode selector's pre-read.
+    my $saved_item=$ACTIVE_ITEM;$ACTIVE_ITEM=undef;
+    my $live=eval { _api('POST','/api/lg/picture-settings',{keys=>['pictureMode'],include_current_input=>JSON::PP::true,
+        ignore_calibration_picture_mode=>JSON::PP::true,signal_mode=>_signal($item)}) };
+    my $read_error=$@;$ACTIVE_ITEM=$saved_item;die $read_error if $read_error;
     my $profile=ref($live->{generation_profile}) eq 'HASH' ? $live->{generation_profile} : {};
     my $input=$live->{current_input}||'';
     die 'Unable to confirm LG input and compatibility profile before selecting picture mode'
@@ -3380,7 +3569,7 @@ sub _freeze_job_lg_context {
     $item->{tv_input}=$input;
     $item->{generation_profile}=$profile;
     $item->{capability_profile}={id=>$profile->{capability_profile_id},hash=>$profile->{capability_profile_hash}};
-    return 1;
+    return _mode_read_from_response($live);
 }
 
 sub _prepare_job_context {
@@ -3393,8 +3582,8 @@ sub _prepare_job_context {
     _log_action('Checking TV, meter and calibration mode for '.($item->{name}||'this job'));
     _require_job_ready($number,$item,'batch');
     die($::LAST_ERROR||'Unable to activate job signal') if !_apply_signal($item);
-    _freeze_job_lg_context($item);
-    die($::LAST_ERROR||'Unable to select job picture mode') if !_select_item_picture_mode($number,$item,'job-start');
+    my $frozen=_freeze_job_lg_context($item);
+    die($::LAST_ERROR||'Unable to select job picture mode') if !_select_item_picture_mode($number,$item,'job-start',$frozen);
     _log_action('Signal and picture mode selected; checking this job\'s TV controls');
     my $contract=PGAutomation::clone($item->{preflight_contract});
     my $ready=_require_job_ready($number,$item,'job');
@@ -3461,9 +3650,12 @@ sub _preflight_read_mode {
             || !$mode || !_signal_mode_compatible($signal,$mode);
     die 'Cannot safely probe modes: TV input or compatibility signature is unavailable'
         if ($live->{current_input}||'') !~ /^hdmi[1-4](?:_pc)?$/ || ($profile->{capability_profile_hash}||'') !~ /^[a-f0-9]{64}$/;
+    # Stamped as an independent no-echo read so the mode selector may act on
+    # it; verified only because every unreadable case died above.
     return {picture_mode=>$mode,signal_format=>$signal,tv_input=>$live->{current_input},
         capability_profile=>{hash=>$profile->{capability_profile_hash},id=>$profile->{capability_profile_id}},
-        generation_profile=>$profile,settle_seconds=>1,stages=>{calibration=>0}};
+        generation_profile=>$profile,settle_seconds=>1,stages=>{calibration=>0},
+        no_echo=>1,verified=>1,current_input=>$live->{current_input}};
 }
 
 sub _preflight_save_context {
@@ -3527,7 +3719,7 @@ sub _restore_preflight_context {
                     || $live->{capability_profile}{hash} ne $item->{capability_profile}{hash};
             if (!_mode_agrees($item->{picture_mode},$live->{picture_mode})) {
                 die($::LAST_ERROR||'Unable to restore picture mode')
-                    if !_select_item_picture_mode(0,$item,'preflight-restore');
+                    if !_select_item_picture_mode(0,$item,'preflight-restore',$live);
                 $live=_preflight_read_mode($signal);
                 die 'Original picture mode restoration was not independently verified'
                     if !_mode_agrees($item->{picture_mode},$live->{picture_mode});
@@ -3604,9 +3796,9 @@ sub _preflight_queue {
                     $context->{modes}{$signal}=$before;push @{$context->{order}},$signal;
                     _preflight_save_context($context);
                 }
-                _freeze_job_lg_context($item);
+                my $frozen=_freeze_job_lg_context($item);
                 die($::LAST_ERROR||'Unable to select preflight picture mode')
-                    if !_select_item_picture_mode($number,$item,'queue-preflight');
+                    if !_select_item_picture_mode($number,$item,'queue-preflight',$frozen);
                 my $selected=_preflight_read_mode($signal);
                 die 'Target picture mode was not independently confirmed during preflight'
                     if !_mode_agrees(_picture_mode($item),$selected->{picture_mode});

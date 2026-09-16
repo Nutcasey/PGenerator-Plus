@@ -1591,7 +1591,13 @@ sub webui_handle_request (@) {
          # the previous mode with a stale/empty HDR blob.
          &webui_complete_renderer_restart($restart_id);
         }
-        exit(0);
+        # Both children are forks of a threaded interpreter: a normal exit
+        # runs global destruction against mutexes copied in whatever state
+        # another thread held them, and has deadlocked in futex_wait, which
+        # leaves the parent lane stuck in waitpid and every /api/config call
+        # timing out (16 Sep 2026, run 20260916-214743). Leave without
+        # destructors; the flock is released by the kernel.
+        POSIX::_exit(0);
        } else {
         # Parent: reap the intermediate child (it exits at once;
         # the worker it spawned belongs to init now) and return to
@@ -10178,11 +10184,20 @@ sub webui_apply_config (@) {
   min_luma max_luma max_cll max_fall color_format max_bpc rgb_quant_range
     dv_status is_ll_dovi is_std_dovi dv_interface dv_profile dv_metadata dv_color_space dv_map_mode dv_transport);
 
+  # SET_PGENERATOR_CONF writes dv_metadata and dv_map_mode as a pair (and
+  # removes the partner when its value is empty), so either changing means
+  # both must be written. Decided before the loop updates the in-memory copy.
+  my $dv_pair_changed=grep { exists($changes{$_}) && "$changes{$_}" ne (defined($pgenerator_conf{$_}) ? "$pgenerator_conf{$_}" : "") } qw(dv_metadata dv_map_mode);
   foreach my $k (sort keys %changes) {
    next if($k eq "ip_pattern" || $k eq "port_pattern"); # read-only
    my $cur=defined($pgenerator_conf{$k}) ? "$pgenerator_conf{$k}" : "";
    my $value_changed=("$changes{$k}" ne $cur);
-   &sudo("SET_PGENERATOR_CONF",$k,$changes{$k});
+   # Every POST derives 7-14 keys beyond what the caller sent and each sudo is
+   # a shell, a timeout wrapper and a privileged Perl process (~1 s on the
+   # appliance); an unchanged key needs none of that. The in-memory copy was
+   # reloaded from disk at the top of this call, so an equal value is already
+   # on disk. Callers still confirm by GET.
+   &sudo("SET_PGENERATOR_CONF",$k,$changes{$k}) if($value_changed || ($dv_pair_changed && ($k eq "dv_metadata" || $k eq "dv_map_mode")));
    $pgenerator_conf{$k}=$changes{$k};
    $webui_rgb_quant_range_preferred=$changes{$k} if($k eq "rgb_quant_range");
    # Only a restart-key whose value actually CHANGED bounces the renderer.

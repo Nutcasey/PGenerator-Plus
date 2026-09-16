@@ -116,8 +116,9 @@ like(main::_settings_failure_message('c1',{values=>{
  @checks=();
  local *main::_apply_one_setting=sub {return {status=>'error',message=>'TV rejected this setting',error_code=>'rejected'}};
  ok(!main::_apply_and_verify(0,{stages=>{calibration=>0},settings=>{brightness=>50}},'c4'),'failed setting write stops apply stage');
- is($checks[0]{result},'apply-failed','failed write is distinct from readback mismatch');
- is($checks[0]{reason},'TV rejected this setting','write failure saves driver reason');
+ my ($failed_write)=grep {($_->{operation}||'') eq 'write'} @checks;
+ is($failed_write->{result},'apply-failed','failed write is distinct from readback mismatch');
+ is($failed_write->{reason},'TV rejected this setting','write failure saves driver reason');
 }
 {
  no warnings 'redefine';
@@ -159,13 +160,15 @@ like(main::_settings_failure_message('c1',{values=>{
  no warnings 'redefine';
  my @logs;
  local *main::_log=sub {push @logs,$_[0]};
+ my $brightness_written=0;
  local *main::_apply_one_setting=sub {
   like($logs[-1],qr/Selecting SDR picture mode filmMaker/,'picture-mode action is announced before the blocking write') if $_[1] eq 'pictureMode';
+  $brightness_written=1 if $_[1] eq 'brightness';
   return {status=>'ok'};
  };
  local *main::_sleep_controlled=sub {1};
  local *main::_append_setting_check=sub {1};
- local *main::_api=sub {{status=>'ok',picture_settings=>{pictureMode=>'filmMaker',brightness=>50,energySaving=>'off'}}};
+ local *main::_api=sub {{status=>'ok',picture_settings=>{pictureMode=>'filmMaker',brightness=>$brightness_written?50:40,energySaving=>'off'}}};
  ok(main::_apply_and_verify(0,{stages=>{calibration=>0},signal_format=>'sdr',picture_mode=>'filmMaker',settle_seconds=>8,settings=>{brightness=>50}},'settings-applied'),'settings application still succeeds with logging');
  like(join("\n",@logs),qr/write accepted; allowing 8 s.*\n.*Applying \d+ queued TV settings.*\n.*Reading back.*\n.*matched/s,'log distinguishes acceptance, settling, application and actual verification');
 }

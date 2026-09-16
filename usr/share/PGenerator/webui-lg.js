@@ -354,6 +354,16 @@ let lgDisplayControlValues={};
 let lgDisplayControlCapabilities={supportedKeys:[],unsupportedKeys:{},settingContracts:{}};
 let lgDisplayControlLoaded=false;
 let lgDisplayControlError='';
+// While an automation run owns the TV the daemon answers picture-settings
+// reads from its last live read (flagged cached) instead of spawning a TV
+// helper. Hold the periodic pollers for a minute after such an answer so they
+// stop queueing behind the runner; a forced refresh still goes through.
+let lgAutomationCachedUntil=0;
+function lgNoteAutomationCached(r){
+ if(r&&r.cached&&r.automation_active){lgAutomationCachedUntil=Date.now()+60000;return true;}
+ return false;
+}
+function lgAutomationHoldsPollers(){return Date.now()<lgAutomationCachedUntil;}
 let lgDisplayControlSnapshot=null;
 let lgVerification={busy:false,complete:false,rows:{},message:''};
 
@@ -1221,7 +1231,7 @@ function lgDisplayControlRender(){
  // Status polling must not replace focused controls or open native dropdowns
  // when the rendered values and availability have not changed.
  if(grid.dataset.renderedHtml!==html){grid.innerHTML=html;grid.dataset.renderedHtml=html;}
- lgDisplayControlSetStatus(lgDisplayControlError||(lgDisplayControlLoaded?'Picture controls loaded':'Refresh settings'),!!lgDisplayControlError);
+ lgDisplayControlSetStatus(lgDisplayControlError||(lgAutomationHoldsPollers()?'Values from the last read; refresh paused while automation runs':(lgDisplayControlLoaded?'Picture controls loaded':'Refresh settings')),!!lgDisplayControlError);
 }
 
 function lgDisplayControlSyncNumber(key,value){
@@ -1245,6 +1255,7 @@ async function lgDisplayControlRefresh(force){
   return;
  }
  if(!force&&lgDisplayControlLoaded) return;
+ if(!force&&lgAutomationHoldsPollers()) return;
  lgDisplayControlPending=true;
  lgDisplayControlSnapshot=null;
  lgDisplayControlError='';
@@ -1257,8 +1268,14 @@ async function lgDisplayControlRefresh(force){
    _quiet:true,
    _timeoutMs:65000
   });
+	  const cached=lgNoteAutomationCached(r);
 	  if(r&&r.status==='ok'&&r.picture_settings){
 	   lgUpdateCurrentInput(r);
+	   if(cached){
+	    // Remembered values only: they must not redefine what this TV can do
+	    // nor count as a load, so the next live refresh rebuilds the card.
+	    lgDisplayControlValues={...lgDisplayControlValues,...r.picture_settings};
+	   }else{
 	   lgDisplayControlValues=r.picture_settings||{};
 	   lgDisplayControlSnapshot=r;
 	   lgDisplayControlCapabilities={
@@ -1268,6 +1285,7 @@ async function lgDisplayControlRefresh(force){
      logicalControls:r.logical_controls||{}
 	   };
 	   lgDisplayControlLoaded=true;
+	   }
    lgDisplayControlError='';
    // Same rule as lgRefreshPictureMode: a ddc_only set answers
    // virtual_picture_settings, where pictureMode is PGenerator's own resolved
@@ -1279,7 +1297,7 @@ async function lgDisplayControlRefresh(force){
     const signal=lgPictureModeEffectiveSignal(mode);
     lgPictureModeValue=mode;
     lgPictureModeSignalMode=signal;
-    lgRememberPictureMode(mode,signal);
+    if(!cached) lgRememberPictureMode(mode,signal);
     lgPopulatePictureModeSelect(mode);
    }
   }else{
@@ -1819,6 +1837,7 @@ async function lgRefreshPictureMode(force){
 	 if(typeof lgIsCommandBusy==='function'&&lgIsCommandBusy()) return;
  if(lgDisplayControlPending||lgVerification.busy||document.activeElement?.closest?.('#lgDisplayControlGrid')) return;
 	 if(lgPictureModePending) return;
+	 if(!force&&lgAutomationHoldsPollers()) return;
 	 const currentInputFresh=!!(state.currentInputChecked&&state.currentInputUpdatedAt&&(Date.now()-state.currentInputUpdatedAt)<15000);
 	 if(!force&&currentInputFresh&&lgPictureModeValue&&lgPictureModeSignalMode===configured
     && lgPictureModeMatchesSignal(lgPictureModeValue,configured)){
@@ -1835,6 +1854,7 @@ async function lgRefreshPictureMode(force){
    _quiet:true,
    _timeoutMs:9000
   });
+  const cached=lgNoteAutomationCached(r);
   if(r&&r.status==='ok'&&r.picture_settings){
    const previousInput=state.currentInput||'';
    lgUpdateCurrentInput(r);
@@ -1860,8 +1880,12 @@ async function lgRefreshPictureMode(force){
       &&lgDisplayControlSnapshot.generation_profile.capability_profile_hash!==r.generation_profile.capability_profile_hash);
     lgPictureModeValue=readback;
     lgPictureModeSignalMode=configured;
-    lgRememberPictureMode(readback,configured);
-    if(changed){lgDisplayControlInvalidate();setTimeout(()=>lgDisplayControlRefresh(true),650);}
+    // A remembered value is display-only: never persist it as the operator's
+    // preference and never let it trigger a forced capability reload.
+    if(!cached){
+     lgRememberPictureMode(readback,configured);
+     if(changed){lgDisplayControlInvalidate();setTimeout(()=>lgDisplayControlRefresh(true),650);}
+    }
    } else if(readback){
     // Keep DV/HDR options visible; fall back to per-signal stored preference.
     const stored=lgPictureModeCanonicalValue(lgStoredPictureMode(configured));

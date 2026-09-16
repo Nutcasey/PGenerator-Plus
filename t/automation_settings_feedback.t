@@ -7,7 +7,7 @@ use JSON::PP ();
 use Test::More;
 local $ENV{PGEN_AUTOMATION_DIR}=tempdir(CLEANUP=>1);
 {local @ARGV=('feedback-test','test-token');do "$Bin/../usr/bin/pgen_automation_runner.pl";die $@ if $@;}
-my (@calls,@checks,@logs,$mode,$gamut,$read_error,$write_error);
+my (@calls,@checks,@logs,$mode,$gamut,$read_error,$write_error,$tv_brightness);
 local *main::_verify_live_capability_profile=sub {1}; # admitted-job feedback ordering
 local *main::_log=sub {push @logs,$_[0]};
 local *main::_sleep_controlled=sub {push @calls,'settle';1};
@@ -16,21 +16,25 @@ local *main::_api=sub {
  my ($method,$path,$p)=@_;
  if($path eq '/api/lg/picture-settings/set') {
   push @calls,'write:'.join(',',sort keys %{$p->{settings}});
-  return $write_error ? {status=>'error',message=>'Write rejected'} : {status=>'ok'};
+  return {status=>'error',message=>'Write rejected'} if $write_error;
+  $tv_brightness=$p->{settings}{brightness} if exists $p->{settings}{brightness};
+  return {status=>'ok'};
  }
  if($path eq '/api/lg/picture-settings') {
   push @calls,'read:'.join(',',@{$p->{keys}});
-  return {status=>$read_error?'error':'ok',message=>$read_error?'Read failed':'',picture_settings=>{pictureMode=>$mode,colorGamut=>$gamut,brightness=>50}};
+  return {status=>$read_error?'error':'ok',message=>$read_error?'Read failed':'',picture_settings=>{pictureMode=>$mode,colorGamut=>$gamut,brightness=>$tv_brightness},current_input=>'hdmi4'};
  }
  die "Unexpected $path";
 };
 sub item {return {signal_format=>'sdr',picture_mode=>'cinema',settings=>{colorGamut=>'auto',brightness=>50},settle_seconds=>0,stages=>{calibration=>1}};}
-sub reset_fixture {@calls=();@checks=();@logs=();$mode='cinema';$gamut='auto';$read_error=0;$write_error=0;}
+# The stub TV starts with brightness off target so the write path is
+# exercised; colorGamut already matches and must not be rewritten.
+sub reset_fixture {@calls=();@checks=();@logs=();$mode='cinema';$gamut='auto';$read_error=0;$write_error=0;$tv_brightness=40;}
 reset_fixture();
 ok(main::_apply_and_verify(0,item(),'c1'),'setup succeeds');
-is_deeply(\@calls,['write:pictureMode','settle','read:pictureMode','write:brightness,colorGamut','read:brightness,colorGamut,pictureMode'],'mode confirmed before settings; controls written together in one TV session, then all read back');
+is_deeply(\@calls,['read:pictureMode','write:pictureMode','settle','read:pictureMode','read:brightness,colorGamut,pictureMode','write:brightness','read:brightness,colorGamut,pictureMode'],'mode read then confirmed before settings; controls read first, only the mismatched one written, then all read back');
 is($checks[0]{checkpoint},'c1-mode','mode confirmation saved separately');
-like(join('\n',@logs),qr/Picture mode confirmed: cinema.*Applying 2 queued TV settings to cinema.*TV settings readback: 3\/3 matched/s,'feedback names the confirmed mode, writes, then measured readback result');
+like(join('\n',@logs),qr/Picture mode confirmed: cinema.*1 of 2 queued TV settings already match; writing the other 1.*Applying 1 queued TV settings to cinema.*TV settings readback: 3\/3 matched/s,'feedback names the confirmed mode, the pre-read, the write, then the measured readback result');
 is(scalar(grep {/TV settings readback: 3\/3 matched/} @logs),1,'one settings outcome instead of duplicate all-matched messages');
 for my $case (qw(wrong-mode read-failure write-failure)) {
  reset_fixture();$mode='filmMaker' if $case eq 'wrong-mode';$read_error=1 if $case eq 'read-failure';$write_error=1 if $case eq 'write-failure';
