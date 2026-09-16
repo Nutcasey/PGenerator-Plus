@@ -605,12 +605,35 @@ sub sdr26_merge_dark_detail_ladder {
  return scalar(@add);
 }
 
+# The panel's DDC white-balance array is a fixed-length hardware structure:
+# 20 points on the hdr20 ladder, 26 on sdr26. Its length never changes with
+# Dark Detail -- the fillers ddc_slots_for_layout merges in are extra *meter
+# reading* IREs interpolated between these slots, not additional DDC storage.
+# The webOS setSystemSettings schema caps whiteBalance/adjustingLuminance at 26
+# items for exactly this reason. Anything that uploads a whole DDC array to the
+# TV (the baseline resets) must size it from this base ladder, NOT from the
+# Dark-Detail-merged ddc_slot_count(); measurement-domain masks and per-slot
+# loops keep using the merged count.
+sub ddc_baseline_slots_for_layout {
+ my ($layout)=@_;
+ $layout=lc($layout||$LG_AUTOCAL_DDC_LAYOUT||"sdr26");
+ return ($layout eq "hdr20")
+  ? (1.4,2,2.7,4,5,7,10,15,20,25,30,35,40,45,50,60,70,80,90,100)
+  : (2.3,3,4,5,7,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,99,105,109);
+}
+
+sub ddc_baseline_slot_count {
+ my ($layout)=@_;
+ # Force list context before counting: scalar() on a list-returning sub yields
+ # the list's last element via the comma operator, not its length.
+ my @slots=ddc_baseline_slots_for_layout(defined($layout) ? $layout : $LG_AUTOCAL_DDC_LAYOUT);
+ return scalar(@slots);
+}
+
 sub ddc_slots_for_layout {
  my ($layout)=@_;
  $layout=lc($layout||$LG_AUTOCAL_DDC_LAYOUT||"sdr26");
- my @base=($layout eq "hdr20")
-  ? (1.4,2,2.7,4,5,7,10,15,20,25,30,35,40,45,50,60,70,80,90,100)
-  : (2.3,3,4,5,7,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,99,105,109);
+ my @base=ddc_baseline_slots_for_layout($layout);
  return @base if(!ddc_dark_detail_enabled());
  # Merge the fillers in ascending order. The caller that drives the run sorts
  # descending itself, and every other consumer treats this as an unordered set
@@ -21816,7 +21839,10 @@ sub reset_hdr20_luminance_baseline_if_needed {
  # cycle and race the first 0% read). Skipping this leaves the previous run's
  # adjustingLuminance on the panel (e.g. -30 at the 5% slot -> ~0.06 cd/m2 against a
  # ~1.0 target -> dE ~80 on the first read, then minutes spent climbing out).
- my @zero=map { 0 } (1..ddc_slot_count());
+ # Size the array from the base DDC ladder, not ddc_slot_count(): with Dark
+ # Detail on the merged count is 31 (hdr20), which the 26-item webOS schema
+ # rejects as "array has too many items" and aborts the whole HDR10 job.
+ my @zero=map { 0 } (1..ddc_baseline_slot_count());
  my $picture_mode=$config->{"picture_mode"}||"";
  my $last_message="Unable to reset LG HDR luminance baseline";
  for(my $attempt=1;$attempt<=3;$attempt++) {
@@ -21875,7 +21901,11 @@ sub reset_ddc_baseline_for_autocal {
  # DV also does its DDC/identity reset via the JS preflight (dv-calman-reset),
  # so skip the worker-side reset here too and avoid racing the first read.
  return undef if(lc(($config->{"signal_mode"}||"")) eq "hdr10" || lc(($config->{"signal_mode"}||"")) eq "dv");
-	 my @zero=map { 0 } (1..ddc_slot_count());
+	 # Base DDC ladder, not the Dark-Detail-merged ddc_slot_count(): sdr26 merges
+	 # to 32 slots, over the 26-item schema cap. This path is reached only when a
+	 # config sets reset_ddc_baseline=true (the automation runner keeps it false),
+	 # but keep it schema-safe so a manual or hand-edited SDR reset cannot abort.
+	 my @zero=map { 0 } (1..ddc_baseline_slot_count());
  my $picture_mode=$config->{"picture_mode"}||"";
  my $last_message="Unable to reset LG DDC baseline";
  if(ref($state) eq "HASH") {
