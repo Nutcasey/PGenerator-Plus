@@ -3508,9 +3508,13 @@ function syncMeterLgRgbBusyIndicator(){
 function meterGreyTvColumnHtml(channelKey,label,color,tvValue,liveEntry,halfRange,disabled,readOnly){
 	 const delta=(liveEntry&&liveEntry.v!=null)?Number(liveEntry.v):null;
  const magnitude=(delta!=null&&halfRange>0)?Math.min(50,Math.abs(delta)/halfRange*50):0;
+	 // liveEntry.noise: deviation is inside the meter noise floor (Perceptual)
+	 // — dim the fill so it reads as "not a real error", same convention as the
+	 // canvas live-RGB bars.
+	 const noiseOpacity=(liveEntry&&liveEntry.noise)?'opacity:.45;':'';
 	 const fillStyle=(delta==null)
 		  ? 'display:none;'
-		  : 'top:'+(delta>=0?(50-magnitude):50)+'%;height:'+magnitude+'%;background:'+color+';color:'+color+';border-radius:'+(delta>=0?'4px 4px 0 0':'0 0 4px 4px')+';';
+		  : 'top:'+(delta>=0?(50-magnitude):50)+'%;height:'+magnitude+'%;background:'+color+';color:'+color+';border-radius:'+(delta>=0?'4px 4px 0 0':'0 0 4px 4px')+';'+noiseOpacity;
 	 const inputValue=meterGreyTvFormatInputValue(tvValue);
 	 if(readOnly){
 		 return `
