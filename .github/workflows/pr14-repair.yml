@@ -1,4 +1,4 @@
-name: PR14 safety repair workspace
+name: PR14 safety repair verification
 on:
   push:
     branches: [repair/pr14-safety-20260916]
@@ -6,24 +6,99 @@ on:
 permissions:
   contents: read
 jobs:
-  snapshot:
+  verify:
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        pass: [1, 2]
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 620af0b43fb5a5552b2e3c9cc6a23b615c673674
+          ref: ${{ github.sha }}
+          path: inputs
           persist-credentials: false
-      - name: Archive the exact reviewed tree
+      - uses: actions/checkout@v4
+        with:
+          ref: 620af0b43fb5a5552b2e3c9cc6a23b615c673674
+          path: source
+          persist-credentials: false
+      - name: Apply and verify exact candidate files
         run: |
-          git rev-parse HEAD > /tmp/pr14-head.txt
-          git archive --format=tar HEAD | gzip > /tmp/pr14-source.tar.gz
-          sha256sum /tmp/pr14-source.tar.gz > /tmp/pr14-source.sha256
+          set -euo pipefail
+          mkdir -p evidence
+          cat inputs/repair-input/edits.part* | base64 -w0 > /tmp/pr14-edits.b64
+          python3 inputs/repair-input/apply_edits.py /tmp/pr14-edits.b64 source | tee evidence/source-checksums.log
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install test dependencies
+        working-directory: source
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libio-socket-ssl-perl
+          npm install --no-save --no-package-lock puppeteer@24.43.1
+      - name: Syntax and complete Perl suite
+        working-directory: source
+        env:
+          VERIFY_PASS: ${{ matrix.pass }}
+        run: |
+          set -euo pipefail
+          {
+            for file in usr/bin/meter_lg_autocal.pl usr/bin/meter_lg_3d_autocal.pl usr/sbin/pgenerator-lg usr/share/PGenerator/lg.pm usr/share/PGenerator/webui.pm usr/share/PGenerator/PGAutomation.pm usr/share/PGenerator/PGAutomationLaunch.pm usr/share/PGenerator/PGAutomationPlan.pm usr/share/PGenerator/PGAutomationProcessing.pm usr/share/PGenerator/PGAutomationETA.pm usr/share/PGenerator/PGLGCapabilities.pm usr/share/PGenerator/PGLGVerification.pm usr/bin/pgen_automation_runner.pl; do
+              perl -Iusr/share/PGenerator -c "$file"
+            done
+            node -c usr/share/PGenerator/webui-lg.js
+            node -c usr/share/PGenerator/webui-automation.js
+          } 2>&1 | tee ../evidence/syntax.log
+          jobs=4
+          if [ "$VERIFY_PASS" = 2 ]; then jobs=1; fi
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy prove -j "$jobs" t/ 2>&1 | tee ../evidence/perl.log
+      - name: All ten configured browser suites
+        working-directory: source
+        run: |
+          set -euo pipefail
+          for suite in automation_activity automation_history automation_refresh automation_editor automation_settings_plan automation_review_fixes automation_dismiss_readiness automation_job_detail automation_calibration_observer automation_design_states; do
+            echo "Running $suite"
+            node "t/browser/$suite.cjs"
+          done 2>&1 | tee ../evidence/browser.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr14-safety-verification-${{ matrix.pass }}
+          path: evidence/
+          retention-days: 7
+  candidate:
+    needs: verify
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Create clean candidate commit only after both verification passes
+        run: |
+          set -euo pipefail
+          cp repair-input/apply_edits.py /tmp/pr14-apply.py
+          cat repair-input/edits.part* | base64 -w0 > /tmp/pr14-edits.b64
+          git checkout --detach 620af0b43fb5a5552b2e3c9cc6a23b615c673674
+          python3 /tmp/pr14-apply.py /tmp/pr14-edits.b64 .
+          git diff --check
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Fix automation cleanup, startup handshake and whole-queue preflight'
+          git push origin HEAD:refs/heads/repair/pr14-verified-20260916
+          git rev-parse HEAD | tee /tmp/pr14-verified-commit.txt
+          git show --stat --oneline HEAD | tee /tmp/pr14-verified-summary.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: pr14-source-620af0b4
+          name: pr14-verified-candidate
           path: |
-            /tmp/pr14-source.tar.gz
-            /tmp/pr14-head.txt
-            /tmp/pr14-source.sha256
-          retention-days: 2
+            /tmp/pr14-verified-commit.txt
+            /tmp/pr14-verified-summary.txt
+          retention-days: 7
