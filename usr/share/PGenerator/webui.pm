@@ -1609,6 +1609,9 @@ sub webui_handle_request (@) {
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$r";
    }
    elsif($path eq "/api/ping") {
+    # Computed lazily as well as at boot: a worker thread cloned before the
+    # boot check ran would otherwise answer with an empty digest forever.
+    $_webui_ui_build=&webui_ui_build_digest() if($_webui_ui_build eq "");
     my $r='{"ok":1,"ui_build":"'.$_webui_ui_build.'"}';
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ".length($r)."\r\n$cors\r\n$r";
    }
