@@ -1368,7 +1368,7 @@
           "scope": "Public settings request model and category/key/value structure."
         },
         {
-          "source_id": "bscpylgtv-firmware-catalogues",
+          "source_id": "lg-firmware-settings-catalogues",
           "strength": "library_implementation",
           "scope": "Observed LG setting key names, values and per-firmware inventories."
         },

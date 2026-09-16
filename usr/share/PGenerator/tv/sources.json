@@ -19,21 +19,33 @@
       "license": "user-provided",
       "use": "Reported five-key successful queue configuration and 13 refused read/capability keys. Not proof that the refused keys cannot be written; webOS release 6.5.3 is not an exact firmware version."
     },
-    "bscpylgtv-platform-table": {
-      "title": "bscpylgtv calibration platform table",
-      "url": "https://github.com/chros73/bscpylgtv/blob/master/bscpylgtv/webos_client.py",
+    "lg-calibration-platform-table": {
+      "title": "LG calibration platform table",
+      "url": "local:docs/Reference (third-party LG calibration client, gitignored snapshot)",
       "license": "MIT",
-      "version": "0.5.4",
       "retrieved_at": "2026-09-15",
-      "use": "Internal platform token to 3D LUT size and Dolby Vision configuration generation."
+      "use": "Internal HE_DTV_WxxH/O/G platform token to 3D LUT size and Dolby Vision configuration generation."
     },
-    "bscpylgtv-firmware-catalogues": {
-      "title": "bscpylgtv firmware settings catalogues",
-      "url": "https://github.com/chros73/bscpylgtv/tree/master/docs",
+    "lg-firmware-settings-catalogues": {
+      "title": "LG webOS firmware settings catalogues",
+      "url": "local:docs/Reference (available_settings_*.md extracted from firmware defaultSettings.json, description.json and valid-settings.js; gitignored snapshot)",
       "license": "MIT",
-      "local_snapshot_revision": "008ebbb605e60a66de7d4f0d6d2217e966888731",
-      "retrieved_at": "2026-09-15",
+      "retrieved_at": "2026-09-16",
       "use": "Firmware-scoped inputs, modes, defaults, and separate public get/set allowlists."
+    },
+    "lg-control-clients-panel-protection": {
+      "title": "Third-party LG control clients: OLED panel-protection Luna toggles",
+      "url": "local:docs/Reference (LG calibration client endpoint table, gitignored snapshot; corroborated by two other open-source LG control tools)",
+      "license": "MIT",
+      "retrieved_at": "2026-09-16",
+      "use": "com.webos.service.oledepl setTemporalPeakControl / setGlobalStressReduction with an enable boolean on 2020 and newer OLEDs. Write-only; no readback exists."
+    },
+    "calman-forum-asbl-practice": {
+      "title": "Calibrator practice: disable ASBL (TPC/GSR) during LG OLED measurement",
+      "url": "local:ColoursTrue/References/Calman/Forum",
+      "license": "user-provided",
+      "retrieved_at": "2026-09-16",
+      "use": "Static patterns dim after about 60 s with panel protection on; calibrators switch TPC and GSR off for the session and back on afterwards. Pattern insertion is the alternative mitigation."
     },
     "lg-settings-service": {
       "title": "LG webOS TV Settings service",

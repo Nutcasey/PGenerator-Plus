@@ -19,7 +19,7 @@ my $root="$Bin/../usr/share/PGenerator/tv";
 my $validation=validate_lg_library($root);
 ok($validation->{ok},'the shipped LG capability library validates')
  or diag(join("\n",@{$validation->{errors}||[]}));
-is($validation->{version},'2026.09.15.5','library version is explicit');
+is($validation->{version},'2026.09.16.2','library version is explicit');
 is(lg_platform_token('HE_DTV_W23O_AFABATAA'),'W23O','internal platform token is extracted');
 is(lg_platform_token('W26G'),'W26G','bare platform token is accepted');
 
@@ -53,6 +53,16 @@ my $cx=resolve_lg_capabilities({series=>'CX',platform_model=>'HE_DTV_W20O_AFABAT
 is(scalar(@{$cx->{data}{settings}{public_routes}{read}{picture_keys}}),4,'CX exact firmware lists four public read keys');
 is(scalar(@{$cx->{data}{settings}{public_routes}{write}{picture_keys}}),0,'CX exact firmware lists no public write keys');
 is($cx->{data}{settings}{public_routes}{write}{support_state},'not_listed_in_firmware_inventory','empty public list is not represented as universal unsupported');
+
+my $panel=PGLGCapabilities::lg_operation_contract({platform_model=>'HE_DTV_W23O_AFABATAA'},'panel_protection',root=>$root);
+is($panel->{support_state},'inventory','panel-protection operation is reviewed for the 2020-2026 platforms');
+is($panel->{verification},'acknowledged_unverified','panel-protection contract never claims readback');
+is_deeply([sort keys %{$panel->{controls}}],['gsr','tpc'],'both panel-protection controls are catalogued');
+is(PGLGCapabilities::lg_operation_contract({platform_model=>'HE_DTV_W19O_AFABATAA'},'panel_protection',root=>$root)->{support_state},'unknown','pre-2020 platforms stay unknown');
+my $g6=resolve_lg_capabilities({series=>'G6',platform_model=>'HE_DTV_W26G_AFABATAA',software_version=>'43.11.77'},root=>$root);
+is($g6->{match_status},'exact_firmware','G6 43.11.77 exact firmware overlay is selected');
+is(scalar(@{$g6->{data}{settings}{public_routes}{read}{picture_keys}}),62,'G6 has 62 firmware-inventory public read keys');
+is(scalar(@{$g6->{data}{settings}{public_routes}{write}{picture_keys}}),62,'G6 has 62 firmware-inventory public write-list keys');
 
 my $model_fallback=resolve_lg_capabilities({series=>'B4',platform_year=>2024},root=>$root);
 is($model_fallback->{match_status},'retail_model_fallback','retail model is an explicit fallback');

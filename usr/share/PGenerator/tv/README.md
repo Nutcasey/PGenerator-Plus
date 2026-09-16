@@ -115,6 +115,14 @@ still necessary. An unavailable or untrusted LUT reply is not hardware proof.
 Apply-to-all has a separate operation contract. A fresh action transition can
 confirm completion, but does not prove that every destination setting matches.
 
+Panel protection (TPC and GSR, the static-brightness limiter) is another
+operation contract, `panel_protection`, reviewed for the 2020-2026 platforms.
+Both controls are write-only Luna methods with no readback anywhere in the
+settings or calibration APIs. Automation may switch them off during a job's
+TV setup and switches them back on when the run ends, stops or fails; every
+result is `acknowledged_unverified`, restoration failures are listed with the
+other unrestored protections, and an unreviewed platform receives nothing.
+
 Device observations live in `/var/lib/PGenerator/lg/capabilities`, outside
 the reviewed library. They are written atomically under a lock. Missing device
 identity prevents persistence; observed refusals remain probeable because
@@ -200,7 +208,7 @@ shown prominently with the original value. The test never resets modes or LUTs.
 Exact firmware value profiles can be reproduced for review with:
 
 ```
-node t/fixtures/lg-capabilities/import-catalogue-values.cjs /path/to/bscpylgtv/docs
+node t/fixtures/lg-capabilities/import-catalogue-values.cjs /path/to/catalogue-docs
 ```
 
 The importer only emits JSON. Review its output before updating

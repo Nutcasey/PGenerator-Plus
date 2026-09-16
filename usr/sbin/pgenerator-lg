@@ -8016,6 +8016,84 @@ sub lg_apply_all_inputs_outcome (@) {
  return ($confirmed,$acknowledged,$message);
 }
 
+# Panel protection: TPC (Temporal Peak Luminance Control) and GSR (Global
+# Stress Reduction) are the OLED's static-brightness limiter, which dims a
+# pattern that stays on screen for about a minute and so corrupts long
+# measurements. 2020 and newer sets expose two write-only Luna methods for
+# them, reached through the alert bridge like the other internal services.
+# Nothing reads the state back, so a dispatched request is the only evidence
+# there is; the matrix decides which platforms may receive one at all.
+sub lg_panel_protection_generation_support (@) {
+ my ($generation)=@_;
+ return -1 if(ref($generation) ne "HASH");
+ my $operation=lg_operation_contract($generation,"panel_protection");
+ my $state=$operation->{support_state}||"unknown";
+ return 0 if($state eq "unsupported");
+ return -1 if($state !~ /^(?:inventory|supported|verified)$/);
+ return &lg_generation_profile($generation)->{"capability_platform_profile_applied"} ? 1 : -1;
+}
+
+sub lg_panel_protection_workflow (@) {
+ my ($ip,$client_key,$connect_timeout,$enable)=@_;
+ $enable=$enable ? 1 : 0;
+ my $auth=&lg_authenticated_session($ip,$client_key,$connect_timeout,$DEFAULT_PAIR_TIMEOUT,0);
+ return $auth if(($auth->{"status"}||"") ne "ok");
+ my $session=$auth->{"session"};
+ my $timeout=$connect_timeout + 2;
+ my $generation=&lg_generation_info($auth->{"system_info"},$auth->{"software_info"},$auth->{"hello_info"});
+ my $support=&lg_panel_protection_generation_support($generation);
+ my $operation=lg_operation_contract($generation,"panel_protection");
+ if($support != 1) {
+  &websocket_close($session);
+  return &json_error("Panel protection (TPC/GSR) control is not reviewed for this LG TV. Nothing was sent.",{
+   ip => $ip,
+   error_code => "panel-protection-unsupported",
+   enable => &json_bool($enable),
+   lg_generation => $generation,
+   operation_contract => $operation,
+  });
+ }
+ my $controls=(ref($operation->{"controls"}) eq "HASH") ? $operation->{"controls"} : {};
+ my (%results,@failed);
+ foreach my $name (sort keys %{$controls}) {
+  my $control=$controls->{$name};
+  next if(ref($control) ne "HASH" || ($control->{"luna_uri"}||"") eq "");
+  my $key=$control->{"payload_key"}||"enable";
+  my $response=&lg_luna_request($session,"panel_protection_$name",$control->{"luna_uri"},{ $key => &json_bool($enable) },$timeout);
+  my ($failed,$message)=&response_is_app_failure_or_missing($response);
+  # The bridge only reports that the alert carrying the request was created
+  # and closed; that is a dispatch, never an acknowledgement from the service.
+  $results{$name}={
+   label => $control->{"label"}||$name,
+   luna_uri => $control->{"luna_uri"},
+   dispatched => &json_bool(!$failed),
+   acknowledged => &json_false(),
+   error => $failed ? $message : "",
+  };
+  push(@failed,$name) if($failed);
+ }
+ &websocket_close($session);
+ my $verb=$enable ? "enable" : "disable";
+ &diag_log_append("panel_protection:".(@failed ? "rejected" : "sent"),{ ip => $ip, enable => $enable, controls => \%results });
+ my %common=(
+  ip => $ip,
+  client_key => $auth->{"client_key"},
+  enable => &json_bool($enable),
+  transport => "luna",
+  controls => \%results,
+  readback_available => &json_false(),
+  acknowledged => &json_false(),
+  verification_state => "acknowledged_unverified",
+  operation_contract => $operation,
+  generation_profile => &lg_generation_profile($generation),
+  lg_generation => $generation,
+ );
+ if(@failed) {
+  return &json_error("LG TV rejected the panel-protection $verb request for ".join(", ",@failed).".",{ %common, error_code => "panel-protection-rejected", failed_controls => \@failed });
+ }
+ return &json_ok({ %common, message => "Panel protection $verb request sent (".join(", ",sort keys %results)."). The TV offers no readback, so this remains unverified." });
+}
+
 sub lg_picture_apply_all_inputs_workflow (@) {
  my ($ip,$client_key,$connect_timeout)=@_;
  my $auth=&lg_authenticated_session($ip,$client_key,$connect_timeout,$DEFAULT_PAIR_TIMEOUT,0);
@@ -8462,6 +8540,9 @@ sub main (@) {
  local $LG_EXPECTED_PROFILE_HASH=$request->{"expected_profile_hash"}||"";
  # Cleanup must remain available after a context change.
  if($action eq "calibration_mode" && !$enable) {$LG_EXPECTED_TV_INPUT="";$LG_EXPECTED_PROFILE_HASH="";}
+ # Re-enabling panel protection is cleanup too: it must reach the TV even
+ # after the input or compatibility signature has changed.
+ if($action eq "panel_protection" && $enable) {$LG_EXPECTED_TV_INPUT="";$LG_EXPECTED_PROFILE_HASH="";}
 	 my $keep_calibration_mode=$request->{"keep_calibration_mode"} ? 1 : 0;
 	 my $calibration_mode_active=$request->{"calibration_mode_active"} ? 1 : 0;
 	 my $reset_ddc_baseline=$request->{"reset_ddc_baseline"}||$request->{"clear_ddc_baseline"} ? 1 : 0;
@@ -8500,6 +8581,8 @@ sub main (@) {
   $result=&lg_picture_reset_workflow($ip,$client_key,$connect_timeout,$tv_input,$picture_mode,$signal_mode,$require_white_balance_reset,$reset_ddc_state,$last_written_picture_mode);
  } elsif($action eq "picture_apply_all_inputs") {
   $result=&lg_picture_apply_all_inputs_workflow($ip,$client_key,$connect_timeout);
+ } elsif($action eq "panel_protection") {
+  $result=&lg_panel_protection_workflow($ip,$client_key,$connect_timeout,$enable);
    } elsif($action eq "remote_enter") {
     $result=&lg_remote_enter_workflow($ip,$client_key,$connect_timeout);
  } elsif($action eq "remote_control") {

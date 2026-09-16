@@ -58,7 +58,7 @@
           "firmware_defaults": { "brightness": "50", "backlight": "100", "contrast": "80", "color": "50", "energySaving": "off", "pictureMode": "dolbyHdrCinemaBright", "dynamicContrast": "off", "peakBrightness": "off", "gamma": "medium", "hdrDynamicToneMapping": "on", "colorTemperature": "-50", "sharpness": "10" }
         }
       },
-      "evidence": [{ "source_id": "bscpylgtv-firmware-catalogues", "strength": "firmware_inventory", "scope": "CX firmware 4.63.25 catalogue. Empty public-write list does not mean every other write route is unsupported." }]
+      "evidence": [{ "source_id": "lg-firmware-settings-catalogues", "strength": "firmware_inventory", "scope": "CX firmware 4.63.25 catalogue. Empty public-write list does not mean every other write route is unsupported." }]
     },
     {
       "profile_id": "lg/firmware/C1/3.53.45",
@@ -74,7 +74,7 @@
           "firmware_defaults": { "brightness": "50", "backlight": "100", "contrast": "80", "color": "50", "energySaving": "off", "pictureMode": "dolbyHdrCinemaBright", "dynamicContrast": "off", "peakBrightness": "off", "gamma": "medium", "hdrDynamicToneMapping": "on", "colorTemperature": "-50", "sharpness": "10" }
         }
       },
-      "evidence": [{ "source_id": "bscpylgtv-firmware-catalogues", "strength": "firmware_inventory", "scope": "C1 firmware 3.53.45 catalogue. The five public read keys match the reported C1 control subset." }]
+      "evidence": [{ "source_id": "lg-firmware-settings-catalogues", "strength": "firmware_inventory", "scope": "C1 firmware 3.53.45 catalogue. The five public read keys match the reported C1 control subset." }]
     },
     {
       "profile_id": "lg/firmware/C2/33.31.20",
@@ -90,7 +90,7 @@
           "firmware_defaults": { "brightness": "50", "backlight": "100", "contrast": "80", "color": "50", "energySaving": "off", "pictureMode": "dolbyHdrCinemaBright", "dynamicContrast": "off", "peakBrightness": "off", "gamma": "medium", "hdrDynamicToneMapping": "on", "colorTemperature": "-50", "sharpness": "10" }
         }
       },
-      "evidence": [{ "source_id": "bscpylgtv-firmware-catalogues", "strength": "firmware_inventory", "scope": "C2 firmware 33.31.20 public settings inventory; availability remains context-dependent." }]
+      "evidence": [{ "source_id": "lg-firmware-settings-catalogues", "strength": "firmware_inventory", "scope": "C2 firmware 33.31.20 public settings inventory; availability remains context-dependent." }]
     },
     {
       "profile_id": "lg/firmware/G3/23.25.55",
@@ -108,7 +108,7 @@
           "firmware_defaults": { "brightness": "50", "backlight": "100", "contrast": "80", "color": "50", "energySaving": "off", "pictureMode": "dolbyHdrCinemaBright", "dynamicContrast": "off", "peakBrightness": "off", "gamma": "medium", "hdrDynamicToneMapping": "on", "colorTemperature": "-50", "sharpness": "10" }
         }
       },
-      "evidence": [{ "source_id": "bscpylgtv-firmware-catalogues", "strength": "firmware_inventory", "scope": "G3 firmware 23.25.55 public settings inventory; no live write claim is inferred." }]
+      "evidence": [{ "source_id": "lg-firmware-settings-catalogues", "strength": "firmware_inventory", "scope": "G3 firmware 23.25.55 public settings inventory; no live write claim is inferred." }]
     },
     {
       "profile_id": "lg/firmware/G4/23.23.30",
@@ -124,7 +124,7 @@
           "firmware_defaults": { "brightness": "50", "backlight": "100", "contrast": "80", "color": "50", "energySaving": "off", "pictureMode": "dolbyHdrCinemaBright", "dynamicContrast": "off", "peakBrightness": "off", "gamma": "medium", "hdrDynamicToneMapping": "on", "colorTemperature": "-50", "sharpness": "10" }
         }
       },
-      "evidence": [{ "source_id": "bscpylgtv-firmware-catalogues", "strength": "firmware_inventory", "scope": "G4 firmware 23.23.30 public settings inventory; availability remains context-dependent." }]
+      "evidence": [{ "source_id": "lg-firmware-settings-catalogues", "strength": "firmware_inventory", "scope": "G4 firmware 23.23.30 public settings inventory; availability remains context-dependent." }]
     },
     {
       "profile_id": "lg/firmware/G5/33.21.81",
@@ -140,7 +140,23 @@
           "firmware_defaults": { "brightness": "50", "backlight": "100", "contrast": "80", "color": "50", "energySaving": "off", "pictureMode": "dolbyHdrCinemaBright", "dynamicContrast": "off", "peakBrightness": "off", "gamma": "mediumHavingLevel", "hdrDynamicToneMapping": "on", "colorTemperature": "-40", "sharpness": "10" }
         }
       },
-      "evidence": [{ "source_id": "bscpylgtv-firmware-catalogues", "strength": "firmware_inventory", "scope": "G5 firmware 33.21.81 public settings inventory; availability remains context-dependent." }]
+      "evidence": [{ "source_id": "lg-firmware-settings-catalogues", "strength": "firmware_inventory", "scope": "G5 firmware 33.21.81 public settings inventory; availability remains context-dependent." }]
+    },
+    {
+      "profile_id": "lg/firmware/G6/43.11.77",
+      "priority": 50,
+      "match": { "retail_series": ["G6"], "firmware_versions": ["43.11.77"] },
+      "data": {
+        "firmware_inventory": { "catalogue_model": "G6", "firmware": "43.11.77", "webos": "11.1.0" },
+        "settings": {
+          "public_routes": {
+            "read": { "support_state": "firmware_inventory", "picture_key_set": "public-picture-62" },
+            "write": { "support_state": "firmware_inventory", "picture_key_set": "public-picture-62" }
+          },
+          "firmware_defaults": { "brightness": "50", "backlight": "100", "contrast": "80", "color": "50", "energySaving": "off", "pictureMode": "dolbyHdrCinemaBright", "dynamicContrast": "off", "peakBrightness": "off", "gamma": "mediumHavingLevel", "hdrDynamicToneMapping": "on", "colorTemperature": "-40", "sharpness": "10" }
+        }
+      },
+      "evidence": [{ "source_id": "lg-firmware-settings-catalogues", "strength": "firmware_inventory", "scope": "G6 firmware 43.11.77 (webOS 11.1.0) public settings inventory; availability remains context-dependent. The 2026-specific firmware version never matches a 2016 G6." }]
     }
   ]
 }

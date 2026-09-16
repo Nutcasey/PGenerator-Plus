@@ -1279,7 +1279,7 @@ sub _calibration_manages_setting {
         return 0 if (_tv_gamma_value($item->{settings}{$key}) || '') !~ /^(?:low|medium|high1|high2)$/;
         # Uploaded 1D LUT data bypasses LG's menu gamma. Only this job's
         # completed, verified upload owns it; a later reset invalidates that.
-        # https://github.com/chros73/bscpylgtv (LUT uploads and greyed-out controls)
+        # (Third-party LG calibration clients document that LUT uploads grey out the menu control.)
         my $grey;
         for my $record (@{$item->{checkpoints} || []}) {
             next if ref($record) ne 'HASH';
@@ -2682,6 +2682,78 @@ sub _apply_all {
         settings_verified => $check};
 }
 
+# Panel protection (TPC/GSR) is the OLED's static-brightness limiter; it dims
+# a pattern that stays on screen for about a minute, so calibrators switch it
+# off for the session. The TV offers no readback: a sent request is evidence
+# of a dispatch only, and the run re-enables both controls when it ends
+# because the factory state is the only state this runner can know.
+sub _panel_protection_wanted {
+    my ($item) = @_;
+    my $config = ref($item->{panel_protection}) eq 'HASH' ? $item->{panel_protection} : {};
+    return 0 if exists($config->{disable}) && !$config->{disable};
+    # Readiness stamps the matrix verdict; without that review nothing is sent.
+    return 0 if !defined($item->{panel_protection_supported}) || "$item->{panel_protection_supported}" ne '1';
+    return 1;
+}
+
+sub _panel_protection_disable {
+    my ($item_number, $item) = @_;
+    return { skipped => JSON::PP::true } if !_panel_protection_wanted($item);
+    my $response = _api('POST', '/api/lg/panel-protection', {
+        enable => JSON::PP::false,
+        picture_mode => _picture_mode($item), tv_input => $item->{tv_input} || '', signal_mode => _signal($item),
+    });
+    my $ok = ref($response) eq 'HASH' && ($response->{status} || '') eq 'ok';
+    my $record = { %{ref($response) eq 'HASH' ? $response : {}}, outcome => $ok ? 'sent-unverified' : 'failed', completed_at => time() };
+    return 0 if !_write_artifact(PGAutomation::item_dir($RUN_ID, $item_number) . '/panel-protection.json', $record);
+    if ($ok) {
+        _update_run(sub {
+            my ($run) = @_;
+            $run->{panel_protection} = {
+                restore_pending => JSON::PP::true, disabled_at => time(), item_number => $item_number,
+                controls => $response->{controls} || {},
+                verification_state => $response->{verification_state} || 'acknowledged_unverified',
+            };
+        });
+        _log_action('Panel protection (TPC/GSR) disable sent - the TV offers no readback, so it stays unverified');
+        return $record;
+    }
+    my $message = (ref($response) eq 'HASH' && $response->{message}) || 'panel-protection request failed';
+    $item->{warnings} ||= [];
+    push @{$item->{warnings}}, 'panel-protection-failed'
+        if !grep { !ref($_) && $_ eq 'panel-protection-failed' } @{$item->{warnings}};
+    _log_action('Panel protection (TPC/GSR) could not be disabled: ' . $message);
+    return $record;
+}
+
+# Re-enable after a run, whatever its outcome. Returns a restore-failure
+# record for the unrestored-protections list, or undef.
+sub _restore_panel_protection {
+    my ($run) = @_;
+    my $latest = eval { _run() } || {};
+    my $state = ref($latest) eq 'HASH' && ref($latest->{panel_protection}) eq 'HASH' ? $latest->{panel_protection}
+        : (ref($run) eq 'HASH' && ref($run->{panel_protection}) eq 'HASH' ? $run->{panel_protection} : undef);
+    return undef if !$state || !$state->{restore_pending};
+    my $response = _api('POST', '/api/lg/panel-protection', { enable => JSON::PP::true }, 1, 0);
+    my $ok = ref($response) eq 'HASH' && ($response->{status} || '') eq 'ok';
+    my $message = (ref($response) eq 'HASH' && $response->{message}) || 'restoration request failed';
+    _update_run(sub {
+        my ($state) = @_;
+        $state->{panel_protection} = {} if ref($state->{panel_protection}) ne 'HASH';
+        $state->{panel_protection}{restore_pending} = $ok ? JSON::PP::false : JSON::PP::true;
+        $state->{panel_protection}{restore_attempted_at} = time();
+        $state->{panel_protection}{restore_outcome} = $ok ? 'sent-unverified' : 'failed';
+        $state->{panel_protection}{restore_message} = $message;
+        $state->{panel_protection}{restored_at} = time() if $ok;
+    });
+    if ($ok) {
+        _log_action('Panel protection (TPC/GSR) re-enable sent - the TV offers no readback, so it stays unverified');
+        return undef;
+    }
+    _log("Panel protection restoration failed: $message");
+    return { key => 'panel_protection', value => 'enabled', message => $message };
+}
+
 sub _checkpoint_record {
     my ($item_number, $item, $name, $verified, $evidence, $status) = @_;
     $status = 'done' if !defined($status);
@@ -3062,12 +3134,13 @@ sub _restore_run_hazards {
             }
         }
     }
-    return if !%restore;
     my $context = ref($ACTIVE_ITEM) eq 'HASH' ? $ACTIVE_ITEM
         : (ref($items) eq 'ARRAY' && ref($items->[0]) eq 'HASH' ? $items->[0] : {});
-    my $failed = _restore_hazards({ %$context, hazard_restore => \%restore });
-    # A TV left with its power-off or screen-saver protection disabled must
-    # be visible in history, not only in runner.log.
+    my $failed = %restore ? _restore_hazards({ %$context, hazard_restore => \%restore }) : [];
+    my $panel_failure = _restore_panel_protection($run);
+    push @$failed, $panel_failure if $panel_failure;
+    # A TV left with its power-off, screen-saver or panel protection disabled
+    # must be visible in history, not only in runner.log.
     _update_run(sub { $_[0]{hazard_restore_failures} = $failed; }) if @$failed;
     return $failed;
 }
@@ -3633,10 +3706,12 @@ sub _run_item {
     return 0 if !_stage($item_number, $item, 'tv-setup-verified', sub {
         my $verified = _apply_and_verify($item_number, $item, 'c1', 1);
         die($::LAST_ERROR || 'TV settings failed') if !$verified && $verified ne 'unverifiable';
+        my $panel_protection = _panel_protection_disable($item_number, $item);
+        die($::LAST_ERROR || 'Unable to persist panel-protection evidence') if !$panel_protection;
         my $settle=0+($item->{settle_seconds}//8);
         _log_action('TV setup applied; settling for '.$settle.' s before measurements') if $settle>0;
         _sleep_controlled($settle) or die('Automation stopped');
-        return { verified => $verified, signal_mode => _signal($item), picture_mode => _picture_mode($item) };
+        return { verified => $verified, signal_mode => _signal($item), picture_mode => _picture_mode($item), panel_protection => $panel_protection };
     });
     return 0 if _pause_after_checkpoint();
     if ($stages->{pre}) {

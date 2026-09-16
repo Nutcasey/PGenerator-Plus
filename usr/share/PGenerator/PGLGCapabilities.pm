@@ -602,7 +602,7 @@ sub lg_settings_selection_plan {
 sub lg_scoped_request_payload {
  my ($path,$payload,$config)=@_;
  return $payload if(ref($payload) ne 'HASH' || ref($config) ne 'HASH'
-  || ($path||'') !~ m{^/api/lg/(?:picture-settings(?:/|$)|(?:sdr|hdr|dv)-calman-reset$|(?:1d-dpg|3d-lut|hdr-tone-map|dv-profile)/|calibration-mode$)});
+  || ($path||'') !~ m{^/api/lg/(?:picture-settings(?:/|$)|(?:sdr|hdr|dv)-calman-reset$|(?:1d-dpg|3d-lut|hdr-tone-map|dv-profile)/|calibration-mode$|panel-protection$)});
  my $copy={%$payload};
  my $input=$config->{tv_input}||'';
  if($input =~ /^hdmi[1-4](?:_pc)?$/) {

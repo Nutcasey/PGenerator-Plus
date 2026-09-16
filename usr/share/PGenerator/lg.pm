@@ -1174,6 +1174,7 @@ sub lg_helper_timeout (@) {
  return 180 if($action eq "3d_lut_probe" || $action eq "3d_lut_upload" || $action eq "3d_lut_reset");
  return 130 if($action eq "picture_reset");
  return 60 if($action eq "picture_apply_all_inputs");
+ return 45 if($action eq "panel_protection");
  return 75 if($action eq "calibration_mode" || $action eq "hdr_tone_map_upload" || $action eq "hdr_calman_reset" || $action eq "1d_dpg_read");
  return 80 if($action eq "1d_dpg_upload");
  return 60 if($action eq "picture_get");
@@ -2236,6 +2237,55 @@ sub webui_lg_picture_apply_all_inputs (@) {
  return &lg_encode_json({ status => "error", message => "Connect the LG TV before applying picture settings to all inputs." }) if($client_key eq "");
  my $result=&lg_helper_run({
   action => "picture_apply_all_inputs",
+  expected_tv_input => $payload->{"expected_tv_input"}||"",
+  expected_profile_hash => $payload->{"expected_profile_hash"}||"",
+  tv_input => $payload->{"tv_input"}||"",
+  ip => $ip,
+  client_key => $client_key,
+  connect_timeout => 5,
+ });
+ &lg_update_connect_metadata($result,$clients->{"manual_ip"} || $ip) if(($result->{"status"}||"") eq "ok");
+ if(&lg_picture_needs_repair($result)) {
+  $result->{"message"}="The saved LG client key does not have picture-control permission. Use Display -> Pair With PIN once, enter the TV PIN, then reconnects will use the saved key without another PIN.";
+  $result->{"repair_hint"}="Use Display -> Pair With PIN once, then submit the PIN shown on the TV.";
+ }
+ return &lg_encode_json($result);
+}
+
+# Panel protection (TPC/GSR) on or off. Write-only on the TV: the helper can
+# only report that the alert-bridge request was dispatched.
+sub webui_lg_panel_protection (@) {
+ my $body=shift;
+ my $automation_guard=&lg_automation_guard_json($body);
+ return $automation_guard if($automation_guard ne "");
+ my $payload=&lg_decode_json($body);
+ $payload={} if(ref($payload) ne "HASH");
+ return &lg_encode_json({ status => "error", error_code => "panel-protection-invalid-request", message => "Specify enable as true or false for panel protection." })
+  if(!exists($payload->{"enable"}));
+ my $enable=$payload->{"enable"} ? 1 : 0;
+ my $clients=&lg_load_clients();
+ ($clients,my $pin_state)=&lg_reconcile_pin_pairing($clients);
+ if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
+  return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing first by entering the PIN shown on the TV.", needs_repair => &lg_json_true() });
+ }
+ # The helper conversation shares the serialised TV lane with AutoCal workers.
+ if(&lg_autocal_worker_running(1)) {
+  return &lg_encode_json({
+   status => "error",
+   message => "LG Auto Cal is still running. Stop it before changing panel protection.",
+   error_code => "lg-calibration-session-active",
+  });
+ }
+ my $connect_message="Connect the LG TV before changing panel protection.";
+ return &lg_encode_json({ status => "error", message => $connect_message }) if(&lg_clients_disconnected($clients));
+ my $ip=&lg_target_ip($payload,$clients);
+ return &lg_encode_json({ status => "error", message => $connect_message }) if($ip eq "");
+ my $client=&lg_primary_client($clients);
+ my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
+ return &lg_encode_json({ status => "error", message => $connect_message }) if($client_key eq "");
+ my $result=&lg_helper_run({
+  action => "panel_protection",
+  enable => $enable,
   expected_tv_input => $payload->{"expected_tv_input"}||"",
   expected_profile_hash => $payload->{"expected_profile_hash"}||"",
   tv_input => $payload->{"tv_input"}||"",
@@ -3648,6 +3698,9 @@ sub webui_lg_api (@) {
  }
  if($path eq "/api/lg/picture-settings/apply-all-inputs" && $method eq "POST") {
   return &webui_lg_picture_apply_all_inputs($body);
+ }
+ if($path eq "/api/lg/panel-protection" && $method eq "POST") {
+  return &webui_lg_panel_protection($body);
  }
  if($path eq "/api/lg/forget" && $method eq "POST") {
   return &webui_lg_forget($body);

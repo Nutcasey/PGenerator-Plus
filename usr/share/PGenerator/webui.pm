@@ -13431,6 +13431,20 @@ sub webui_automation_apply_all_support (@) {
  return -1;
 }
 
+# 1 when the matrix reviews the panel-protection (TPC/GSR) operation for this
+# TV's internal platform, 0 when it is marked unsupported, -1 when unknown or
+# the platform itself is unreviewed. Never a claim that the write succeeded.
+sub webui_automation_panel_protection_support (@) {
+ my ($generation)=@_;
+ return -1 if(ref($generation) ne "HASH" || !%$generation);
+ my $operation=lg_operation_contract($generation,"panel_protection");
+ my $state=$operation->{support_state}||"unknown";
+ return 0 if($state eq "unsupported");
+ return -1 if($state !~ /^(?:inventory|supported|verified)$/);
+ my $resolved=eval { PGLGCapabilities::resolve_lg_capabilities($generation) };
+ return (ref($resolved) eq "HASH" && $resolved->{platform_profile_applied}) ? 1 : -1;
+}
+
 sub webui_automation_mode_signal_ok (@) {
  my ($signal,$mode)=@_;
  $signal=lc($signal||"");
@@ -13551,6 +13565,8 @@ sub webui_automation_normalize_item (@) {
   post_readings => defined($stages->{post_readings}) ? ($stages->{post_readings}?1:0) : 0,
   apply_all => defined($stages->{apply_all}) ? ($stages->{apply_all}?1:0) : 1,
  };
+ my $protection=ref($item->{panel_protection}) eq "HASH" ? $item->{panel_protection} : {};
+ $item->{panel_protection}={ disable => defined($protection->{disable}) ? ($protection->{disable}?1:0) : 1 };
  foreach my $phase (qw(pre_series post_series)) {
   my $list=$item->{$phase};
   $list=$item->{series} if(ref($list) ne "ARRAY");
@@ -14220,6 +14236,15 @@ sub webui_automation_readiness_data (@) {
   $item->{apply_all_supported}=$apply_support;
   if($item->{stages}{apply_all} && $item->{stages}{calibration}) {
    $check->($apply_support==1,"item-$index-apply-all",$apply_support==1 ? "Apply to all inputs is supported" : $apply_support==0 ? "Apply to all inputs is unavailable on this LG generation" : "LG apply-to-all capability is unknown",$index);
+  }
+  my $protection_support=&webui_automation_panel_protection_support($generation);
+  $item->{panel_protection_supported}=$protection_support;
+  if($item->{panel_protection}{disable}) {
+   $check->(0,"item-$index-panel-protection",
+    $protection_support==1 ? "Panel protection (TPC/GSR) will be switched off for this job's measurements and back on when the run ends; the TV offers no readback, so both requests remain unverified."
+    : $protection_support==0 ? "Panel protection (TPC/GSR) control is unavailable on this LG generation; switch ASBL off manually before measuring if required."
+    : "Panel protection (TPC/GSR) control is not reviewed for this TV and will not be changed; switch ASBL off manually before measuring if required.",
+    $index,"warning");
   }
   my @hazards=@{&webui_automation_probe_item_hazards($item,$payload->{automation_token},$progress,$index)};
   foreach my $hazard (@hazards) {

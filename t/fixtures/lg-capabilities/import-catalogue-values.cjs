@@ -1,8 +1,8 @@
 // Emits a profile document for review; does not modify the library.
-// node t/fixtures/lg-capabilities/import-catalogue-values.cjs /path/to/bscpylgtv/docs
+// node t/fixtures/lg-capabilities/import-catalogue-values.cjs /path/to/catalogue-docs
 const fs=require('fs'),path=require('path');
 const docs=process.argv[2];
-if(!docs)throw new Error('Supply the bscpylgtv docs directory');
+if(!docs)throw new Error('Supply the directory containing available_settings_*.md');
 const root=path.resolve(__dirname,'../../../usr/share/PGenerator/tv/lg');
 const catalogues=JSON.parse(fs.readFileSync(path.join(root,'firmware/known-oled-catalogues.json')));
 const profiles=[];
@@ -34,7 +34,7 @@ for(const profile of catalogues.profiles){
    verify:{comparator,tolerance:0.1}};
  }
  profiles.push({profile_id:profile.profile_id+'/values',priority:60,match:profile.match,
-  data:{settings:{controls}},evidence:[{source_id:'bscpylgtv-firmware-catalogues',strength:'firmware_inventory',
+  data:{settings:{controls}},evidence:[{source_id:'lg-firmware-settings-catalogues',strength:'firmware_inventory',
    scope:model+' exact firmware picture value catalogue. Value types do not prove live transport support.'}]});
 }
 process.stdout.write(JSON.stringify({schema_version:1,profiles},null,2)+'\n');

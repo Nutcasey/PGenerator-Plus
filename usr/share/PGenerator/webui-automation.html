@@ -252,6 +252,8 @@
     <tr><td>Saturation · 24 patches</td><td><input id="pgAutomationSeriesSats" type="checkbox" aria-label="Before saturation"></td><td><input id="pgAutomationPostSeriesSats" type="checkbox" aria-label="After saturation"></td></tr>
    </tbody></table></details>
    <div id="pgAutomationWorkflowOptions">
+    <label class="meter-toggle"><input id="pgAutomationPanelProtection" type="checkbox"> Switch off panel protection (TPC/GSR) while measuring</label>
+    <p class="auto-muted">Stops the OLED's static-brightness limiter dimming long test patterns. Sent to 2020 and newer LG OLEDs only; the TV gives no readback, and both controls are switched back on when the run ends.</p>
     <label class="meter-toggle"><input id="pgAutomationDarkDetail" type="checkbox"> Dark Detail</label>
     <p class="auto-muted">Measures additional shadow patches between the standard greyscale points. Adds roughly 20 minutes.</p>
     <div id="pgAutomationShadowFixField"><label class="meter-toggle"><input id="pgAutomationShadowFix" type="checkbox"> Tone Mapping Shadow Fix</label><p class="auto-muted">HDR10 only. Measures and trims the 5–30% shadow band after tone mapping. Adds roughly 20 minutes.</p></div>
