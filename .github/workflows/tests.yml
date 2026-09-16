@@ -23,12 +23,14 @@ jobs:
       - name: Syntax-check the changed Perl
         run: |
           perl -c usr/sbin/pgenerator-lg
-          perl -c usr/share/PGenerator/lg.pm
-          perl -c usr/share/PGenerator/webui.pm
-          perl -c usr/share/PGenerator/PGAutomation.pm
-          perl -c usr/share/PGenerator/PGAutomationProcessing.pm
+          perl -Iusr/share/PGenerator -c usr/share/PGenerator/lg.pm
+          perl -Iusr/share/PGenerator -c usr/share/PGenerator/webui.pm
+          perl -Iusr/share/PGenerator -c usr/share/PGenerator/PGAutomation.pm
+          perl -Iusr/share/PGenerator -c usr/share/PGenerator/PGAutomationProcessing.pm
           perl -Iusr/share/PGenerator -c usr/share/PGenerator/PGAutomationETA.pm
-          perl -c usr/bin/pgen_automation_runner.pl
+          perl -Iusr/share/PGenerator -c usr/share/PGenerator/PGLGCapabilities.pm
+          perl -Iusr/share/PGenerator -c usr/share/PGenerator/PGLGVerification.pm
+          perl -Iusr/share/PGenerator -c usr/bin/pgen_automation_runner.pl
       - name: Check the Web UI JS and confirm Node is present
         # t/lg_display_control_support_state.t drives webui-lg.js through a Node
         # vm sandbox and SKIPS if node is missing -- assert it here so that test
