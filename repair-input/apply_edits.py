@@ -29,8 +29,14 @@ for entry in bundle['files']:
         assert text.count(old) == 1 and text.count('pgAutomation.current={run:') == 3
         text = text.replace(old, "if(url==='/api/automation/runs/current')return window.mockCurrent||{status:'ok'};")
         text = text.replace('pgAutomation.current={run:', 'pgAutomation.current=window.mockCurrent={run:')
+        # Define fetchJSON before the production script can schedule initialisation.
+        early = "+'</script><script>'+read('webui-automation.js')+'</script><script>'+`"
+        late = "`+'</script>';"
+        assert text.count(early) == 1 and text.count(late) == 1
+        text = text.replace(early, "+'</script><script>'+`")
+        text = text.replace(late, "`+'</script><script>'+read('webui-automation.js')+'</script>';")
         after = text.encode('utf-8')
-        assert hashlib.sha256(after).hexdigest() == 'a264dc3440fd32c68f7e5c1a8bfa74f5ef03a7fb413107715e9a29148f18eff8'
+        assert hashlib.sha256(after).hexdigest() == 'fe0c1de0667fae23791f24865fa922791024889d5eb14a4c148fc1aa9c12c409'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(after)
     paths.append(str(relative))
