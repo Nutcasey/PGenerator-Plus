@@ -28,7 +28,7 @@ sub item {return {signal_format=>'sdr',picture_mode=>'cinema',settings=>{colorGa
 sub reset_fixture {@calls=();@checks=();@logs=();$mode='cinema';$gamut='auto';$read_error=0;$write_error=0;}
 reset_fixture();
 ok(main::_apply_and_verify(0,item(),'c1'),'setup succeeds');
-is_deeply(\@calls,['write:pictureMode','settle','read:pictureMode','write:brightness','write:colorGamut','read:brightness,colorGamut,pictureMode'],'mode confirmed before settings; all settings read back immediately after writes');
+is_deeply(\@calls,['write:pictureMode','settle','read:pictureMode','write:brightness,colorGamut','read:brightness,colorGamut,pictureMode'],'mode confirmed before settings; controls written together in one TV session, then all read back');
 is($checks[0]{checkpoint},'c1-mode','mode confirmation saved separately');
 like(join('\n',@logs),qr/Picture mode confirmed: cinema.*Applying 2 queued TV settings to cinema.*TV settings readback: 3\/3 matched/s,'feedback names the confirmed mode, writes, then measured readback result');
 is(scalar(grep {/TV settings readback: 3\/3 matched/} @logs),1,'one settings outcome instead of duplicate all-matched messages');
@@ -39,7 +39,7 @@ for my $case (qw(wrong-mode read-failure write-failure)) {
 }
 reset_fixture();$gamut='wide';my $i=item();
 is(main::_apply_and_verify(0,$i,'c5'),'unverifiable','Auto/Wide warning permits calibration with explicit uncertainty');
-is(scalar(grep {$_ eq 'write:colorGamut'} @calls),1,'warning does not trigger repeated setting writes');
+is(scalar(grep {/^write:(?:.*,)?colorGamut(?:,|$)/} @calls),1,'warning does not trigger repeated setting writes');
 is(scalar @{$i->{warnings}},1,'warning persists on the job');
 is((grep {$_->{key} eq 'colorGamut'} @checks)[0]{observed},'wide','raw feedback retained');
 

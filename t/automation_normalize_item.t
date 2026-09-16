@@ -3,6 +3,7 @@ use warnings;
 use FindBin qw($Bin);
 use File::Temp qw(tempdir);
 use Test::More;
+no warnings qw(redefine once);
 require "$Bin/../usr/share/PGenerator/webui.pm";
 local $ENV{PGEN_AUTOMATION_DIR} = tempdir(CLEANUP => 1);
 for my $signal (qw(sdr hdr10 dv)) {
@@ -89,4 +90,42 @@ my $item_path=PGAutomation::item_dir($legacy->{id},0).'/item.json';
 ok(PGAutomation::write_json_atomic($item_path,$legacy->{items}[0]),'legacy item artifact saved');
 my $artifact=main::webui_automation_artifact($legacy->{id},'items/0/item.json');
 unlike($artifact->{data},qr/owner-token|panel-secret/,'public item artifact does not disclose saved credentials');
+
+# Run evidence merged into history items (calibration reset transcripts,
+# worker state, measurement series) is not recipe input. Copied into a queue
+# it once reached run.json three times over and stalled the runner launch.
+my $bloated=main::webui_automation_normalize_item({
+ signal_format=>'sdr',name=>'Copied job',
+ calibration=>{target_gamma=>'bt1886',reset=>{responses=>[({picture_reset=>{status=>'ok'}}) x 50]},'grey-state'=>{data=>[1..10]},
+  '3d-state'=>{x=>1},'dv-profile-state'=>{x=>1},'dv-profile-measurements'=>{x=>1},'dv-profile-upload'=>{x=>1}},
+ series=>{pre=>{'greyscale-21'=>{points=>[1..21]}}},'apply-all'=>{verified=>1},'panel-light'=>{value=>80},
+});
+is($bloated->{calibration}{target_gamma},'bt1886','recipe calibration targets survive evidence stripping');
+ok(!exists($bloated->{calibration}{$_}),"merged calibration/$_ artifact is stripped") for qw(reset grey-state 3d-state dv-profile-state dv-profile-measurements dv-profile-upload);
+ok(!exists($bloated->{$_}),"merged $_ evidence is stripped") for qw(series apply-all panel-light);
+my $history={id=>'history-evidence',token=>'history-token',status=>'stopped',queue_name=>'Old batch',
+ items=>[{id=>'job-a',name=>'Job A',signal_format=>'sdr',calibration=>{target_gamma=>'bt1886'},status=>'complete'}]};
+ok(PGAutomation::write_json_atomic(PGAutomation::run_dir($history->{id}).'/run.json',$history),'history run saved');
+ok(PGAutomation::write_json_atomic(PGAutomation::item_dir($history->{id},0).'/calibration/reset.json',
+ {completed_at=>1,responses=>[({picture_reset=>{status=>'ok'}}) x 50]}),'reset transcript artifact saved');
+my $recovered=PGAutomation::decode_json(main::webui_automation_api('/api/automation/runs/history-evidence/queue','GET',''));
+is($recovered->{status},'ok','history run can be copied to an editable queue');
+is($recovered->{queue}{items}[0]{calibration}{target_gamma},'bt1886','copied job keeps its calibration recipe');
+ok(!exists($recovered->{queue}{items}[0]{calibration}{reset}),'copied job does not carry the reset transcript');
+ok(!exists($recovered->{queue}{items}[0]{status}),'copied job does not carry execution status');
+{
+ local *main::webui_automation_checked_readiness=sub {
+  my ($payload)=@_;
+  return {ready=>1,status=>'ok',message=>'ready',items=>[map { main::webui_automation_normalize_item($_) } @{$payload->{items}}],checks=>[],events=>[],hazard_restore=>{}};
+ };
+ local *main::webui_automation_launch_runner=sub {1};
+ my $reply=PGAutomation::decode_json(main::webui_automation_start({queue=>{name=>'Copied batch',
+  items=>[{name=>'Job A',signal_format=>'sdr',calibration=>{target_gamma=>'bt1886',reset=>{responses=>[({x=>1}) x 50]}}}]}}));
+ is($reply->{status},'started','a payload carrying old evidence still starts');
+ my $manifest=PGAutomation::read_json_file(PGAutomation::run_dir($reply->{run_id}).'/run.json');
+ ok(!exists($manifest->{items}[0]{calibration}{reset}),'manifest items carry no reset transcript');
+ ok(!exists($manifest->{queue_snapshot}{items}[0]{calibration}{reset}),'queue snapshot carries no reset transcript');
+ ok(!$manifest->{readiness}{items},'manifest does not store a second copy of every item under readiness');
+ is($manifest->{items}[0]{calibration}{target_gamma},'bt1886','manifest items keep the recipe');
+}
 done_testing();

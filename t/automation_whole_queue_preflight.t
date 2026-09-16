@@ -82,6 +82,8 @@ my %original=%config;my %original_modes=%modes;
 my $r=run_check();
 ok($r->{ready},'every job passes against its actual signal and selected picture mode') or diag explain $r;
 is($r->{checked_items},4,'not just the first job is live checked');
+is($r->{progress_total},15,'four-job preflight includes equipment, snapshot, three checks per job and restoration');
+is($r->{progress_done},15,'successful real preflight completes every reported progress operation');
 is_deeply([map {$_->{status}} @{$r->{jobs}}],[('checked')x4],'all four jobs carry individual results');
 # requested_signal_mode is input-only; compare all saved generator fields.
 is_deeply({map {$_=>$config{$_}} keys %original},\%original,'original generator output is restored');
@@ -147,6 +149,15 @@ ok(PGAutomation::read_json_file($run_file)->{preflight_restore_required},'restor
  ok(!PGAutomationPlan::matches($changed,$contract),'future execution options invalidate old plans by default');
  $changed=PGAutomation::clone($original);$changed->{device_identity}{firmware}='2';
  ok(!PGAutomationPlan::matches($changed,$contract),'device identity changes invalidate plans');
+ my $numeric={%$original,calibration=>{solve_cube_size=>17,shadow_fix=>0,target_delta_e=>0.5},delay_ms=>1000};
+ my $numeric_contract=PGAutomationPlan::contract($numeric);
+ my $drifted=PGAutomation::clone($numeric);
+ $drifted->{calibration}={solve_cube_size=>'17',shadow_fix=>'0',target_delta_e=>'0.50'};$drifted->{delay_ms}='1000';$drifted->{settings}{brightness}='50';
+ ok(PGAutomationPlan::matches($drifted,$numeric_contract),'numbers that come back as numeric strings still match the plan');
+ $drifted->{calibration}{solve_cube_size}='33';
+ ok(!PGAutomationPlan::matches($drifted,$numeric_contract),'a genuinely different value still invalidates the plan');
+ ok(!main::_replan_exhausted(7)&&!main::_replan_exhausted(7)&&main::_replan_exhausted(7),'a job that keeps failing its claim after re-checks stops the run instead of looping');
+ ok(!main::_replan_exhausted(8),'the re-check budget is per job');
  my $normalized=main::webui_automation_normalize_item({%$original,preflight_contract=>$contract});
  ok(!exists($normalized->{preflight_contract}),'HTTP input cannot forge a server preflight contract');
 }

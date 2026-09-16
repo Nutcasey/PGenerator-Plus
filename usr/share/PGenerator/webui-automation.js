@@ -117,6 +117,9 @@ function pgAutomationSnapshot(source){
  ['readiness','setting_contracts','generation_profile','capability_profile','preflight_contract','best_available_settings','best_available_write_ack','tv_input','worker_status','started_at','completed_at'].forEach(key=>delete item[key]);
  pgAutomationUpgradeReference(item);
  ['item_number','status','checkpoints','checkpoint','checkpoint_status','active_stage','stage_started_at','failure','warnings','recheck','hazards','hazard_capabilities','hazard_restore','device_identity','fault_injected','drift_recovery_attempts','drift_recovery_pending','series','apply-all','panel-light'].forEach(key=>delete item[key]);
+ // Run evidence merged into history items (webui_automation_item_artifacts);
+ // the server strips it again on save, but it must not sit in the draft either.
+ if(item.calibration&&typeof item.calibration==='object'){['reset','grey-state','3d-state','dv-profile-state','dv-profile-measurements','dv-profile-upload'].forEach(key=>delete item.calibration[key]);}
  return item;
 }
 function pgAutomationUpgradeReference(item){
@@ -851,7 +854,7 @@ async function pgAutomationDeleteQueue(){
 function pgAutomationStageLabel(stage){
  if(stage==='greyscale-settings-verified')return 'Checking TV settings after 1D calibration';
  if(stage==='volume-settings-verified')return 'Checking TV settings after profile / LUT upload';
- return {'readiness':'Checking TV and meter','job-readiness':'Checking this job’s devices and picture mode','item-started':'Checking this job before measurements','tv-setup-verified':'Applying TV settings','pre-readings-done':'Before readings','reset-and-reapply-verified':'Resetting calibration and reapplying settings','panel-light-settled':'Setting 100% white luminance','greyscale-done':'Calibrating the 1D LUT','volume-done':'3D LUT / Dolby Vision profiling','session-closed':'Closing calibration','apply-all-done':'Applying calibration to all inputs','post-readings-done':'After readings','item-complete':'Saving job results'}[stage]||String(stage||'').replace(/-/g,' ');
+ return {'queue-preflight':'Initial checks','greyscale-settings-verified':'Verifying 1D LUT settings','volume-settings-verified':'Verifying color calibration settings','readiness':'Checking TV and meter','job-readiness':'Checking this job’s devices and picture mode','item-started':'Checking this job before measurements','tv-setup-verified':'Applying TV settings','pre-readings-done':'Before readings','reset-and-reapply-verified':'Resetting calibration and reapplying settings','panel-light-settled':'Setting 100% white luminance','greyscale-done':'Calibrating the 1D LUT','volume-done':'3D LUT / Dolby Vision profiling','session-closed':'Closing calibration','apply-all-done':'Applying calibration to all inputs','post-readings-done':'After readings','item-complete':'Saving job results'}[stage]||String(stage||'').replace(/-/g,' ');
 }
 function pgAutomationIssueText(issue){
  const raw=typeof issue==='string'?issue:issue?.message||'';
@@ -953,44 +956,142 @@ async function pgAutomationDismissReadiness(button){
  }catch(e){pgAutomationNotice(e.message,true);}
  finally{if(button)button.disabled=false;}
 }
-function pgAutomationEstimateText(run,now){
- if(!run)return '';
- if(run.status==='paused')return 'Time estimate paused';
- if(run.status!=='running')return '';
- if(pgAutomation.statusError||run.heartbeat_age>60)return 'Time estimate unavailable — waiting for live progress';
+function pgAutomationEstimateModel(run,now){
+ // Everything the progress card says about time, decided once. Ranges are in
+ // seconds; the card rounds them so a display left on for hours stays calm.
+ const model={state:'none',preflight:false,job:null,batch:null,pass:null,jobLabel:'this job left',jobPartial:false,batchPartial:false,note:''};
+ if(!run||!['running','starting','stopping','completing','paused'].includes(run.status))return model;
+ model.preflight=run.active_stage==='queue-preflight';
+ if(model.preflight)model.jobLabel='checks left';
+ if(run.status==='paused'){model.state='paused';return model;}
+ if(run.status!=='running'){model.state='estimating';return model;}
+ if(pgAutomation.statusError||pgAutomationHeartbeatAge(run)>60){model.state='unavailable';return model;}
  const eta=run.time_estimate,at=now??Date.now()/1000;
- if(!eta)return 'Estimating time remaining…';
- if(Number(eta.active_item)!==Number(run.active_item)||eta.stage!==run.active_stage)return 'Estimating time remaining…';
- const age=at-Number(eta.calculated_at),seconds=Number(eta.remaining_seconds);
- const duration=value=>{
-  let minutes=Math.max(1,Math.ceil(value/60));if(minutes>=10)minutes=Math.ceil(minutes/5)*5;
-  const hours=Math.floor(minutes/60),rest=minutes%60;
-  return hours?hours+'h'+(rest?' '+rest+'m':''):minutes+'m';
+ if(!eta){model.state='estimating';return model;}
+ if((!model.preflight&&Number(eta.active_item)!==Number(run.active_item))||eta.stage!==run.active_stage){model.state='estimating';return model;}
+ const age=at-Number(eta.calculated_at),stale=!Number.isFinite(age)||age<0||age>180;
+ const range=(value,countdown)=>{
+  value=Number(value);
+  if(!Number.isFinite(value)||value<=0)return null;
+  // Only time the current stage consumes can count down between server
+  // recalculations; work not yet started cannot consume the estimate.
+  const elapsed=countdown?age:0;
+  return {low:Math.max(60,value*.75-elapsed),high:Math.max(60,value*1.5-elapsed)};
  };
  if(eta.batch_unknown_stages!=null){
-  if(!Number.isFinite(age)||age<0||age>180)return 'Updating time estimate…';
-  const range=value=>{
-   if(!Number.isFinite(Number(value))||Number(value)<=0)return '';
-   // Only time the current stage consumes can count down; unknown stages
-   // cannot consume the estimate for future work while we wait for evidence.
-   const elapsed=Number(eta.stage_remaining_seconds)>0?age:0;
-   const low=duration(Math.max(60,Number(value)*.75-elapsed));
-   const high=duration(Math.max(60,Number(value)*1.5-elapsed));
-   return '~'+low+(low===high?'':'–'+high);
-  };
-  const job=range(eta.job_remaining_seconds),batch=range(eta.batch_known_seconds);
-  const parts=[job?'Current job: '+job+(eta.job_unknown_stages>0?' + untimed stages':' remaining'):'Current job: collecting stage timings'];
-  parts.push(batch?'Batch: '+batch+(eta.batch_unknown_stages>0?' of timed work ('+eta.known_stages+'/'+eta.remaining_stages+' remaining stages estimated)':' remaining'):'Batch: collecting stage timings');
-  if(eta.approximate_history)parts.push('Uses similar-job timings');
-  return parts.join(' · ');
+  if(stale){model.state='updating';return model;}
+  const countdown=Number(eta.stage_remaining_seconds)>0;
+  model.job=model.preflight?range(eta.stage_remaining_seconds,true):range(eta.job_remaining_seconds,countdown);
+  model.jobPartial=!model.preflight&&eta.job_unknown_stages>0;
+  model.batch=range(eta.batch_known_seconds,countdown);
+  model.batchPartial=eta.batch_unknown_stages>0;
+  model.pass=range(eta.pass_remaining_seconds,true);
+  if(model.batch&&eta.batch_unknown_stages>0)model.note='Batch estimate covers '+eta.known_stages+' of '+eta.remaining_stages+' remaining stages';
+  else if(eta.approximate_history)model.note='Estimates use timings from similar jobs';
+  model.state='ready';return model;
  }
- if(eta.scope==='unknown'||!['batch','stage','pass'].includes(eta.scope))return 'Estimating time remaining…';
- if(!Number.isFinite(age)||!Number.isFinite(seconds)||seconds<=0||age<0||age>180)return 'Updating time estimate…';
- const upper=seconds*1.5-age;
- if(upper<=0)return 'Updating time estimate…';
- const lower=duration(Math.max(60,seconds*.75-age)),higher=duration(upper);
- return (eta.scope==='batch'?'Estimated batch remaining: ':'Estimated current '+eta.scope+': ')+'~'+lower+(lower===higher?'':'–'+higher)
-  +(eta.scope==='batch'?'':' · Batch estimate still learning');
+ if(!['batch','stage','pass'].includes(eta.scope)){model.state='estimating';return model;}
+ const seconds=Number(eta.remaining_seconds);
+ if(stale||!Number.isFinite(seconds)||seconds<=0||seconds*1.5-age<=0){model.state='updating';return model;}
+ const legacy={low:Math.max(60,seconds*.75-age),high:seconds*1.5-age};
+ if(eta.scope==='batch')model.batch=legacy;else{model.job=legacy;model.jobLabel='this stage left';model.note='Batch estimate still learning';}
+ model.state='ready';return model;
+}
+function pgAutomationEstimateRange(range){
+ // Rounded up, in 5-minute steps beyond 10 minutes and half hours beyond an
+ // hour: estimates carry ±25–50% anyway, and coarse figures stop the display
+ // from changing every time the server recalculates.
+ if(!range)return '';
+ const minutes=value=>{let m=Math.max(1,Math.ceil(value/60));if(m>=10)m=Math.ceil(m/5)*5;return m;};
+ const unit=m=>{if(m<60)return m+' min';const h=Math.ceil(m/30)/2;return (Number.isInteger(h)?h:h.toFixed(1))+' h';};
+ const low=minutes(range.low),high=Math.max(minutes(range.high),minutes(range.low));
+ if(unit(low)===unit(high))return unit(low);
+ if(low<60&&high<60)return low+'–'+high+' min';
+ if(low>=60&&high>=60)return unit(low).replace(' h','')+'–'+unit(high);
+ return unit(low)+'–'+unit(high);
+}
+function pgAutomationEstimateText(run,now){
+ const m=pgAutomationEstimateModel(run,now);
+ if(m.state==='none')return '';
+ if(m.state==='paused')return 'Time estimate paused';
+ if(m.state==='unavailable')return 'Time estimate unavailable — waiting for live progress';
+ if(m.state==='estimating')return 'Estimating time remaining…';
+ if(m.state==='updating')return 'Updating time estimate…';
+ const subject=m.preflight?'Initial checks':m.jobLabel==='this stage left'?'Current stage':'Current job';
+ const parts=[subject+': '+(m.job?'about '+pgAutomationEstimateRange(m.job)+' left'+(m.jobPartial?' plus untimed stages':''):'estimating'),
+  'Whole batch: '+(m.batch?'about '+pgAutomationEstimateRange(m.batch)+' left':'estimating')];
+ if(m.note)parts.push(m.note);
+ return parts.join('. ')+'.';
+}
+function pgAutomationHeartbeatAge(run){
+ return Number(run?.heartbeat_age||0)+Math.max(0,Date.now()/1000-(pgAutomation.receivedAt||Date.now()/1000));
+}
+function pgAutomationClock(seconds){
+ // Whole minutes only. Seconds are noise on a job measured in hours, and a
+ // value that changes once a minute never pulls the eye.
+ seconds=Math.max(0,Math.floor(Number(seconds)||0));
+ const h=Math.floor(seconds/3600),m=Math.floor(seconds%3600/60);
+ return h?h+'h '+String(m).padStart(2,'0')+'m':m+'m';
+}
+function pgAutomationReadouts(run,pre,now){
+ now=now??Date.now()/1000;
+ const active=run&&['running','starting','stopping','completing'].includes(run.status);
+ const end=run&&!active?(run.completed_at||run.heartbeat||now):!run&&pre?.status!=='checking'?(pre?.completed_at||pre?.updated_at||now):now;
+ const start=run?.created_at||pre?.started_at;
+ const model=pgAutomationEstimateModel(run,now);
+ const slot=(value,label)=>({value,label});
+ const pending={paused:', paused',updating:', updating',unavailable:', waiting for the runner'}[model.state]||', estimating';
+ const jobLabel=!run&&pre?'checks left':model.jobLabel;
+ const liveState=!active?'':pgAutomation.statusError?'lost':pgAutomationHeartbeatAge(run)>60?'delayed':'live';
+ return {
+  elapsed:slot(start?pgAutomationClock(end-start):'—','elapsed'),
+  stage:slot(active&&run.stage_started_at?pgAutomationClock(now-run.stage_started_at):'—','this stage'),
+  job:model.job?slot(pgAutomationEstimateRange(model.job),jobLabel+(model.jobPartial?', timed stages only':'')):slot('—',jobLabel+pending),
+  batch:model.batch?slot(pgAutomationEstimateRange(model.batch),'whole batch left'):slot('—','whole batch left'+pending),
+  note:model.note,liveState,
+  live:{live:'Live',delayed:'Updates delayed',lost:'Connection lost'}[liveState]||'',
+ };
+}
+function pgAutomationReadoutsHtml(run,pre,completed,total,showRun){
+ const r=pgAutomationReadouts(run,pre);
+ const cell=(key,s)=>'<div class="auto-readout"><span class="auto-readout-value" data-automation-'+key+'>'+pgAutomationEscape(s.value)+'</span><span class="auto-readout-label" data-automation-'+key+'-label>'+pgAutomationEscape(s.label)+'</span></div>';
+ return '<div class="auto-readouts" aria-live="off">'+cell('clock',r.elapsed)+cell('stage-clock',r.stage)
+  +'<div class="auto-readouts-left" data-automation-eta>'+cell('eta-job',r.job)+cell('eta-batch',r.batch)+'</div></div>'
+  +'<div class="auto-progress-status auto-muted"><span class="auto-live" data-automation-live data-state="'+r.liveState+'">'+pgAutomationEscape(r.live)+'</span>'
+  +(showRun?'<span>'+completed+' of '+total+' jobs complete</span>':'')+'<span data-automation-eta-note>'+pgAutomationEscape(r.note)+'</span></div>';
+}
+function pgAutomationProgressMeters(run,pre){
+ const p=run?.progress;
+ const checks=run?.active_stage==='queue-preflight'||(!run&&pre);
+ // Older runner manifests report only the worker's patch counter.
+ const worker=!p?.stage_total&&run?.worker_status?.total_steps?{stage_completed:run.worker_status.current_step||0,stage_total:run.worker_status.total_steps,unit:'patches'}:null;
+ const done=Number(p?.stage_completed??worker?.stage_completed??pre?.progress_done??0),total=Number(p?.stage_total??worker?.stage_total??pre?.progress_total??0);
+ const unit=p?.unit||worker?.unit||(checks?'checks':'steps');
+ const label=checks?'Initial checks':pgAutomationStageLabel(run?.active_stage||'Preparing');
+ const measured=Number.isFinite(total)&&total>0;
+ const value=Math.max(0,Math.min(total,done));
+ const held=(run&&['paused','interrupted','stopped','failed'].includes(run.status))||pgAutomation.statusError||(!run&&pre?.status!=='checking');
+ let html='<div class="auto-progress-label"><span>'+pgAutomationEscape(label)+'</span><span>'+pgAutomationEscape(measured?value+' of '+total+' '+unit:held?'Paused':'In progress')+'</span></div>'
+  +'<progress aria-label="'+pgAutomationEscape(label)+'" '+(measured?'value="'+value+'" max="'+total+'"':held?'value="0" max="1"':'')+'></progress>';
+ if(p?.total>0&&!run.preflight_only){
+  const fraction=Math.max(0,Math.min(1,Number(p.completed)/Number(p.total)));
+  html+='<div class="auto-progress-label auto-muted"><span>Whole queue</span><span>'+Math.floor(Number(p.completed))+' of '+Number(p.total)+' stages</span></div>'
+   +'<progress class="auto-progress-overall" aria-label="Whole queue stages" value="'+fraction+'" max="1"></progress>';
+ }
+ return html;
+}
+function pgAutomationTickProgress(){
+ // Runs every second but only writes what changed, which with whole-minute
+ // clocks and rounded estimates is about once a minute.
+ const box=pgAutomationEl('Progress');if(!box||!box.querySelector('[data-automation-clock]'))return;
+ const run=pgAutomation.current?.run,pre=pgAutomation.pendingChecks||pgAutomation.current?.preflight;
+ const r=pgAutomationReadouts(run,pre);
+ const set=(selector,text)=>{const el=box.querySelector(selector);if(el&&el.textContent!==text)el.textContent=text;};
+ set('[data-automation-clock]',r.elapsed.value);set('[data-automation-stage-clock]',r.stage.value);
+ set('[data-automation-eta-job]',r.job.value);set('[data-automation-eta-job-label]',r.job.label);
+ set('[data-automation-eta-batch]',r.batch.value);set('[data-automation-eta-batch-label]',r.batch.label);
+ set('[data-automation-eta-note]',r.note);set('[data-automation-live]',r.live);
+ const live=box.querySelector('[data-automation-live]');if(live&&live.dataset.state!==r.liveState)live.dataset.state=r.liveState;
 }
 function pgAutomationRunWarnings(run){
  return [...new Set([...(run?.warnings||[]).map(pgAutomationIssueText),...(run?.items||[]).flatMap((item,index)=>(item.warnings||[]).map(w=>pgAutomationIssueText({message:pgAutomationIssueText(w),item_number:index})))].filter(Boolean))];
@@ -1008,7 +1109,7 @@ function pgAutomationRenderProgress(){
  const showRun=run&&(!preActive||['running','starting','stopping','completing','paused','interrupted'].includes(run.status));
  if(showRun&&pgAutomationTerminal(run)){
   box.style.display='';box.dataset.error=String(run.status==='failed'||!!pgAutomation.statusError);box.setAttribute('role',run.status==='failed'?'alert':'status');
-  box.innerHTML='<strong>Last batch '+pgAutomationEscape(run.status.replace(/-/g,' '))+' · '+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Calibration queue')+'</strong><p class="auto-muted">No calibration is running. Jobs and results are saved in History.</p>'
+  box.innerHTML='<strong>Last batch '+pgAutomationEscape(run.status.replace(/-/g,' '))+' · '+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Calibration queue')+'</strong><p class="auto-muted">'+(run.preflight_only?'No calibration has started. Return to Queue and select Run queue to begin.':'No calibration is running. Jobs and results are saved in History.')+'</p>'
    +(run.status==='failed'?pgAutomationFailureHtml(run):'')
    +(pgAutomation.statusError?'<p>'+pgAutomationEscape(pgAutomation.statusError)+'</p>':'')
    +pgAutomationRunWarningsHtml(run)
@@ -1020,9 +1121,10 @@ function pgAutomationRenderProgress(){
   const items=run.items||[],index=run.active_item==null?-1:Number(run.active_item);total=items.length;
   completed=items.filter(item=>/^complete(?:-with-warnings)?$/.test(item.status)).length;
   title=(index>=0?'Job '+(index+1)+' of '+total+': '+(items[index]?.name||''):(run.queue_name||'Queue'))+' · '+run.status;
-  message=[pgAutomationStageLabel(run.active_stage),run.worker_status?.current_name,run.worker_status?.message].filter(Boolean).join(' · ');
-  if(run.worker_status?.total_steps)message+=' · Patch '+(run.worker_status.current_step||0)+' / '+run.worker_status.total_steps;
-  if(run.stage_started_at&&['running','starting','stopping','completing'].includes(run.status))message+=' · '+Math.max(0,Math.floor(Date.now()/1000-run.stage_started_at))+' s in this stage';
+  const latest=(pgAutomation.current?.activity?.entries||[]).filter(entry=>entry.source==='Runner').at(-1);
+  message=(run.status==='running'?run.operation_progress?.message:null)||(run.active_stage==='queue-preflight'?latest?.message:null)||run.worker_status?.message||latest?.message||run.worker_status?.current_name||pgAutomationStageLabel(run.active_stage);
+  message=String(message).replace(/^Job \d+ \| /,'');
+  if(run.active_stage==='queue-preflight')title='Checking the whole queue'+(index>=0?' · Job '+(index+1)+' of '+total:'');
   if(run.failure){
    error=true;
    // The runner saves the same stage failure on both the job and the run.
@@ -1050,15 +1152,14 @@ function pgAutomationRenderProgress(){
  box.style.display='';box.dataset.error=String(error);box.setAttribute('role',error?'alert':'status');
  const unique=[...new Set(issues.map(pgAutomationIssueText).filter(Boolean))];
  box.innerHTML='<strong>'+pgAutomationEscape(title||(error?'Automation needs attention':'Automation'))+'</strong><div class="auto-muted">'+pgAutomationEscape(message)+'</div>'
-  +(total?'<progress aria-label="'+(showRun?'Completed jobs':'Validated queue configurations')+'" value="'+completed+'" max="'+total+'"></progress><div class="auto-muted auto-progress-footer"><span>'+completed+' / '+total+' '+(showRun?'jobs complete':'queue configurations validated; TV settings checked per job')+'</span>'
-   +(showRun?'<span data-automation-eta title="Rough estimate from live patch pace and comparable saved stage timings. Recalculated every two minutes and when the stage changes. Calibration speed varies; the range is not a guarantee.">'+pgAutomationEscape(pgAutomationEstimateText(run))+'</span>':'')+'</div>':'')
+  +((showRun||pre)?pgAutomationProgressMeters(showRun?run:null,pre)+pgAutomationReadoutsHtml(showRun?run:null,pre,completed,total,showRun):'')
   +(unique.length?'<details '+(error?'open':'')+'><summary>'+(error?'Problems requiring attention':'Warnings and manual checks')+' ('+unique.length+')</summary><div class="auto-issues">'+unique.map(text=>'<p class="auto-muted"'+(issues.some(issue=>pgAutomationIssueText(issue)===text&&issue.level==='warning')?' data-level="warning"':'')+'>'+pgAutomationEscape(text)+'</p>').join('')+'</div></details>':'')
   +(!showRun&&pre?.id&&['ready','blocked','failed','interrupted'].includes(pre.status)?'<p class="auto-muted">This is a saved check result, not an active calibration lock. After correcting the issue, check again or dismiss this result. Dismissing does not bypass future safety checks.</p><button id="pgAutomationDismissReadiness" type="button" class="btn btn-sm btn-secondary" onclick="pgAutomationDismissReadiness(this)">Dismiss previous check</button>':'');
 }
 function pgAutomationBeginChecks(intent){
  const id='ui-'+Date.now()+'-'+Math.random().toString(36).slice(2,10);
  pgAutomation.lastProblem='';pgAutomation.statusError='';
- pgAutomation.pendingChecks={id,status:'checking',intent,queue_name:pgAutomation.queue.name,total_items:pgAutomation.queue.items.length,message:'Waiting for the generator to begin startup checks. No calibration has started.',items:[]};
+ pgAutomation.pendingChecks={id,status:'checking',intent,started_at:Date.now()/1000,queue_name:pgAutomation.queue.name,total_items:pgAutomation.queue.items.length,message:'Waiting for the generator to begin startup checks. No calibration has started.',items:[]};
  pgAutomationRenderProgress();pgAutomationRenderActivity();pgAutomationPollLive();return id;
 }
 function pgAutomationRenderReadiness(result){
@@ -1067,7 +1168,8 @@ function pgAutomationRenderReadiness(result){
  const problems=checks.filter(check=>!check.ok);
  box.innerHTML='<p class="auto-muted">'+pgAutomationEscape(result.message||'Readiness')+' · '+checks.length+' checks. See the activity log for details.</p>'
   +(problems.length?'<ul class="auto-readiness-problems">'+problems.map(check=>'<li data-level="'+(check.level==='warning'?'warning':'error')+'">'+pgAutomationEscape(pgAutomationIssueText(check))+'</li>').join('')+'</ul>':'');
- pgAutomation.current={...pgAutomation.current,activity:{entries:checks.map(check=>({...check,source:'Startup check',level:check.ok?'ok':check.level||'error'}))}};pgAutomationRenderActivity();
+ // Readiness is a saved result. Rendering it must never replace the live
+ // activity payload supplied by runs/current (including runner events).
  if(result.scope!=='queue')box.scrollIntoView({block:'nearest'});
 }
 async function pgAutomationReadiness(){
@@ -1133,7 +1235,7 @@ function pgAutomationRenderLiveRun(run,execution){
  const live=pgAutomationEl('Live');
  if(run?.preflight_result)pgAutomationRenderReadiness(run.preflight_result);
  if(!run){live.innerHTML='<div class="auto-empty">'+(checking?'Checking the whole queue against the connected TV before calibration. Signal and picture modes are temporarily switched and restored.':pre&&['blocked','failed','interrupted'].includes(pre.status)?'Calibration has not started. Resolve the startup problems shown above, then retry.':'No active batch. Completed and stopped runs are in History.')+'</div>';pgAutomationEl('LiveDetail').innerHTML='';delete pgAutomation.jobViews.live;return;}
- const terminal=pgAutomationTerminal(run),active=run.active_item!=null?Number(run.active_item):-1,items=run.items||[],worker=terminal?{}:run.worker_status||{};
+ const terminal=pgAutomationTerminal(run),active=run.active_item!=null?Number(run.active_item):-1,items=run.items||[],worker=terminal?{}:{...(run.worker_status||{}),message:(run.status==='running'?run.operation_progress?.message:null)||run.worker_status?.message};
  if(terminal){
   live.innerHTML='<h3>'+(run.preflight_only?'Last whole-queue check · ':'Last batch · ')+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Batch')+'</h3><p class="auto-muted">'+pgAutomationEscape(status.replace(/-/g,' '))+' · Nothing is running. Results remain available below and in History.</p>'
    +pgAutomationRunWarningsHtml(run)
@@ -1156,14 +1258,16 @@ async function pgAutomationPollLive(){
   if(result&&result.status!=='error'){
    if(pgAutomation.dismissedCheck&&result.preflight?.id===pgAutomation.dismissedCheck.id&&result.preflight?.started_at===pgAutomation.dismissedCheck.started_at&&result.preflight?.status!=='checking')result.preflight=null;
    if(pgAutomation.current?.preflight?.id&&!result.preflight&&!pgAutomation.pendingChecks)pgAutomationEl('Readiness').innerHTML='';
-   pgAutomation.statusError='';pgAutomation.current=result;pgAutomationRenderLiveRun(result.run,result.execution);
+   pgAutomation.statusError='';pgAutomation.receivedAt=Date.now()/1000;pgAutomation.current=result;pgAutomationRenderLiveRun(result.run,result.execution);
   }
   else{pgAutomation.statusError='Cannot refresh run status. Showing the last known state; progress is unconfirmed. Do not start another run.';pgAutomationRenderProgress();}
  }catch(e){pgAutomation.statusError='Run status connection failed: '+e.message+'. Showing the last known state.';pgAutomationRenderProgress();
  }finally{
-  pgAutomationRenderActivity();
-  pgAutomationSyncCalibrationView(pgAutomation.current?.run);
+  // Release the guard before rendering: an unexpected presentation error
+  // must not permanently stop polling. Always schedule the next attempt.
   pgAutomation.polling=false;
+  try{pgAutomationRenderActivity();pgAutomationSyncCalibrationView(pgAutomation.current?.run);}
+  catch(e){pgAutomation.statusError='Display update failed: '+e.message;}
   if(pgAutomation.liveTimer)clearTimeout(pgAutomation.liveTimer);
   // Poll fast while a runner should be alive or the Live tab is showing;
   // otherwise a slow poll keeps the header badge honest about a batch started
@@ -1263,7 +1367,7 @@ function pgAutomationSyncCalibrationView(run){
  const badge=pgAutomationEl('CalibrationBadge');
  badge.dataset.state=run.status;
  badge.textContent='Automation '+({running:'active',starting:'starting',paused:'paused',interrupted:'interrupted',stopping:'stopping',completing:'finishing',complete:'complete','complete-with-warnings':'complete with warnings',stopped:'stopped',failed:'failed'}[run.status]||run.status)+' · Read-only';
- const index=Math.max(0,Math.min(Number(run.active_item??0),(run.items?.length||1)-1)),item=run.items?.[index],worker=pgAutomationTerminal(run)?{}:run.worker_status||{};
+ const index=Math.max(0,Math.min(Number(run.active_item??0),(run.items?.length||1)-1)),item=run.items?.[index],worker=pgAutomationTerminal(run)?{}:{...(run.worker_status||{}),message:(run.status==='running'?run.operation_progress?.message:null)||run.worker_status?.message};
  const terminal=pgAutomationTerminal(run),esc=pgAutomationEscape;
  const stage=terminal?({stopped:'Run stopped',failed:'Run failed',complete:'Run complete','complete-with-warnings':'Run complete with warnings'}[run.status]||'Saved results'):pgAutomationStageLabel(run.active_stage||'Preparing job');
  const held=['paused','interrupted'].includes(run.status);
@@ -1604,8 +1708,9 @@ async function pgAutomationRefresh(){
 
 function pgAutomationInit(){
  if(pgAutomation.loaded)return;pgAutomation.loaded=true;
- try{const saved=JSON.parse(localStorage.getItem('pgen.automation.queueDraft')||'null');if(saved&&Array.isArray(saved.queue?.items)){pgAutomation.queue=saved.queue;pgAutomation.editingRunId=saved.editingRunId||'';pgAutomation.firstPending=saved.firstPending||0;pgAutomation.selectedQueue=saved.selectedQueue||'';pgAutomation.loadedQueueSnapshot=saved.loadedQueueSnapshot||'';}}catch(e){}
+ try{const saved=JSON.parse(localStorage.getItem('pgen.automation.queueDraft')||'null');if(saved&&Array.isArray(saved.queue?.items)){saved.queue.items=saved.queue.items.map(pgAutomationSnapshot);pgAutomation.queue=saved.queue;pgAutomation.editingRunId=saved.editingRunId||'';pgAutomation.firstPending=saved.firstPending||0;pgAutomation.selectedQueue=saved.selectedQueue||'';pgAutomation.loadedQueueSnapshot=saved.loadedQueueSnapshot||'';}}catch(e){}
  pgAutomationRenderQueue();pgAutomationRenderRecipeList();pgAutomationRenderSavedQueues();
  pgAutomationRefresh();pgAutomationTab('queue');pgAutomationPollLive();
+ if(!pgAutomation.clockTimer)pgAutomation.clockTimer=setInterval(pgAutomationTickProgress,1000);
 }
 setTimeout(pgAutomationInit,0);

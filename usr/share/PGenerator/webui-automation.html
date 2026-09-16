@@ -14,7 +14,29 @@
  #automationCard .auto-progress>strong{display:block;font-size:.95rem;font-weight:600;margin-bottom:4px}
  #automationCard .auto-progress>.btn{margin-top:10px}
  #automationCard .auto-progress progress{width:100%;height:10px;margin:8px 0;accent-color:var(--accent)}
- #automationCard .auto-progress-footer{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px 16px}
+ #automationCard .auto-progress-label{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px 16px;margin-top:10px;font-size:.8rem}
+ #automationCard .auto-progress progress.auto-progress-overall{height:4px;margin-top:5px;opacity:.7}
+ /* Time readouts: fixed slots that never appear or disappear during a run,
+    whole-minute clocks and rounded estimates. Built to be left on screen. */
+ #automationCard .auto-readouts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px 18px;margin-top:16px;padding-top:12px;border-top:1px solid var(--border)}
+ #automationCard .auto-readouts-left{display:contents}
+ #automationCard .auto-readouts-left>.auto-readout:first-child{border-left:1px solid var(--border);padding-left:18px}
+ #automationCard .auto-readout{min-width:0;display:flex;flex-direction:column;gap:3px}
+ #automationCard .auto-readout-value{font-size:clamp(1.15rem,3.2vw,1.5rem);font-weight:500;line-height:1.15;letter-spacing:-.01em;font-variant-numeric:tabular-nums;color:var(--text);overflow-wrap:anywhere}
+ #automationCard .auto-readout-label{font-size:.72rem;line-height:1.35;color:var(--text2)}
+ #automationCard .auto-progress-status{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:12px}
+ #automationCard .auto-progress-status>span:empty{display:none}
+ #automationCard .auto-live{display:inline-flex;align-items:center;gap:7px}
+ #automationCard .auto-live::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--text2);flex:none}
+ #automationCard .auto-live[data-state=live]::before{background:var(--green);animation:pgAutomationBreathe 4s ease-in-out infinite}
+ #automationCard .auto-live[data-state=delayed]::before{background:var(--orange)}
+ #automationCard .auto-live[data-state=lost]::before{background:var(--red)}
+ @keyframes pgAutomationBreathe{0%,100%{opacity:1}50%{opacity:.35}}
+ @media (prefers-reduced-motion:reduce){#automationCard .auto-live::before{animation:none}}
+ @media (max-width:700px){
+  #automationCard .auto-readouts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  #automationCard .auto-readouts-left>.auto-readout:first-child{border-left:0;padding-left:0}
+ }
  #automationCard .auto-progress[data-error=true]{border-color:var(--red)}
  #automationCard .auto-progress[data-error=true]>strong{color:var(--red)}
  #automationCard .auto-run-current{border-left:3px solid var(--accent);padding-left:10px;background:var(--surface-inset)}
@@ -162,7 +184,7 @@
   </div>
   <div id="pgAutomationActionBlocker" class="auto-muted" role="status" hidden></div>
   <div id="pgAutomationReadiness" aria-live="polite"></div>
-  <p class="auto-muted">Check Readiness validates the queue and checks the first job’s TV controls in the current signal and picture mode. It does not switch the TV. Other jobs are checked when they start.</p>
+  <p class="auto-muted">Check Readiness checks every job by temporarily switching signals and picture modes, then restores them. Run queue performs those checks and continues into calibration.</p>
   <div class="auto-queue-header">
    <div><h3 id="pgAutomationJobsHeading">Jobs</h3><span id="pgAutomationQueueSaveState" class="auto-muted" aria-live="polite"></span></div>
    <div class="auto-actions">

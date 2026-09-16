@@ -805,8 +805,8 @@ sub _control_for_key {
 sub lg_readback_unavailable_reason {
  my ($reason)=@_;
  return 0 if(!defined($reason) || ref($reason)
-  || $reason =~ /(?:timeout|timed out|socket|disconnect|permission|unauthori|authentication|\b40[13]\b|service unavailable|connection closed)/i);
- return $reason =~ /(?:not allowed|not support|unsupported|no value|no matched|(?:readback|settings?|controls?)\s+(?:is |are )?unavailable)/i ? 1 : 0;
+  || $reason =~ /(?:\btimeout\b|\btimed out\b|socket|disconnect|permission|unauthori|authentication|\b40[13]\b|service unavailable|connection closed)/i);
+ return $reason =~ /(?:not allowed|not support|doesn'?t support|unsupported|no value|no matched|(?:readback|settings?|controls?)\s+(?:is |are )?unavailable)/i ? 1 : 0;
 }
 
 sub lg_best_settings_plan {

@@ -1586,7 +1586,12 @@ sub lg_picture_get_workflow (@) {
   if($get_failure_message =~ /insufficient permissions/i) {
    return &json_permission_error("LG client key cannot read picture settings. Pair With PIN once to mint a fresh PIN-paired key; future reconnects will reuse it.",{ ip => $ip, raw_error => $get_failure_message });
   }
-  return &json_error($get_failure_message,{ ip => $ip, raw_response => $response });
+  # Keep the TV's per-key refusals on the error path too: when a whole
+  # category is refused (e.g. "category, power doesn't support the key(s)")
+  # the automation readiness check remembers those controls as absent on
+  # this TV instead of asking again on every job.
+  my $refused=(ref($response->{"payload"}) eq "HASH" && ref($response->{"payload"}{"unsupported_keys"}) eq "HASH") ? $response->{"payload"}{"unsupported_keys"} : {};
+  return &json_error($get_failure_message,{ ip => $ip, raw_response => $response, requested_picture_keys => $keys, unsupported_picture_keys => $refused });
  }
  my $payload=(ref($response->{"payload"}) eq "HASH") ? $response->{"payload"} : {};
 	 my $picture_settings=(ref($supported_settings) eq "HASH") ? $supported_settings : ((ref($payload->{"settings"}) eq "HASH") ? $payload->{"settings"} : {});

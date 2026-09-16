@@ -30,10 +30,12 @@ is($r->{time_estimate}{remaining_seconds},1260,'five completed points in 300 sec
 $r->{worker_status}{current_step}=7;
 PGAutomationETA::update($r,1350,[]);
 is($r->{time_estimate}{calculated_at},1350,'advancing to the next calibrated point recalculates immediately');
-PGAutomationETA::update($r,1420,[]);
-is($r->{time_estimate}{calculated_at},1350,'same-point polls remain throttled');
+PGAutomationETA::update($r,1360,[]);
+is($r->{time_estimate}{calculated_at},1350,'same-point polls remain throttled within 15 seconds');
+PGAutomationETA::update($r,1365,[]);
+is($r->{time_estimate}{calculated_at},1365,'same-point estimates refresh after 15 seconds');
 PGAutomationETA::update($r,1470,[]);
-is($r->{time_estimate}{remaining_seconds},1566,'pace is recomputed after two minutes on a slow point');
+is($r->{time_estimate}{remaining_seconds},1566,'pace is recomputed while a slow point is still running');
 
 $r=run();$r->{worker_timing}{start_step}=3;
 PGAutomationETA::update($r,1300,[]);
@@ -141,4 +143,19 @@ is($r->{time_estimate}{stage_remaining_seconds},3780,'slower recent near-black p
 $r->{worker_timing}{recent_point_seconds}=[10,20,30];
 PGAutomationETA::update($r,1310,[]);
 is($r->{time_estimate}{stage_remaining_seconds},1302,'a few fast points do not erase the overall measured pace');
+
+# The appliance runs Perl 5.20 with JSON::PP 2.27, which writes a number as a
+# string once anything has read it in string context. ETA runs inside every
+# manifest write, so it must leave the manifest's own scalars untouched.
+{
+ require B;
+ my $pok=sub { B::svref_2object(\$_[0])->FLAGS & B::SVp_POK() ? 1 : 0 };
+ my $r=run();$r->{active_stage}='queue-preflight';$r->{active_item}=undef;
+ $r->{items}[0]{calibration}={%{$r->{items}[0]{calibration}},solve_cube_size=>17,shadow_fix=>0};
+ ok(!$pok->($r->{items}[0]{calibration}{solve_cube_size}),'fixture value starts numeric');
+ PGAutomationETA::update($r,1100,[]);
+ PGAutomationETA::timing_profile($r->{items}[0],'volume-done');
+ ok(!$pok->($r->{items}[0]{calibration}{solve_cube_size}),'ETA leaves solve_cube_size numeric in the manifest');
+ ok(!$pok->($r->{items}[0]{calibration}{shadow_fix}),'ETA leaves shadow_fix numeric in the manifest');
+}
 done_testing();

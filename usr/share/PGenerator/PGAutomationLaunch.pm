@@ -10,6 +10,12 @@ use PGAutomation ();
 our $RUNNER_PATH = '/usr/bin/pgen_automation_runner.pl';
 our $PERL_PATH = '/usr/bin/perl';
 our $START_TIMEOUT = 10;
+# Once a worker has flagged itself ready inside the start window, the
+# launcher may already be inside _accept_ready rewriting run.json, which on
+# the appliance takes several seconds per megabyte of manifest. The worker
+# keeps waiting for that decision (accepted or cancelled) for this long past
+# the attempt deadline; a launcher that never decides still fails closed.
+our $ACCEPT_GRACE = 120;
 
 sub _quote {
     my ($value) = @_;
@@ -164,7 +170,7 @@ sub worker_handshake {
         return {%$launch, state=>'ready', pid=>$$};
     });
     return 0 if !$ok || ref($ready) ne 'HASH';
-    my $deadline = _clock() + ($ready->{expires_at} - Time::HiRes::time());
+    my $deadline = _clock() + ($ready->{expires_at} - Time::HiRes::time()) + $ACCEPT_GRACE;
     while (1) {
         my $launch = PGAutomation::read_json_file(_file($run_id));
         return 0 if ref($launch) ne 'HASH' || ($launch->{attempt} || '') ne $attempt

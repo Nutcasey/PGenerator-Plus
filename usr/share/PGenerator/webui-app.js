@@ -1283,6 +1283,19 @@ function updateDropdowns(){
  checkSettingsChanged();
 }
 
+// The generator reports a digest of its interface files. The first value a
+// page sees is the interface it is running; a later, different value means
+// the files were redeployed and the daemon restarted, and this page is now
+// running stale JavaScript against a newer server. Offer a reload; never
+// force one, the operator may be mid-edit.
+let _uiBuildSeen=null;
+function noteUiBuild(build){
+ if(typeof build!=='string'||!build) return;
+ if(_uiBuildSeen===null){_uiBuildSeen=build;return;}
+ if(build===_uiBuildSeen) return;
+ const notice=document.getElementById('uiUpdateNotice');
+ if(notice&&notice.hidden) notice.hidden=false;
+}
 async function checkPing(){
 	 if(isCalibrationWorkflowActive()){
 	  setConnectionBusyStatus(lgIsCommandBusy()?'LG TV':'Busy');
@@ -1293,7 +1306,7 @@ async function checkPing(){
  try{
   const r=await fetch(API+'/api/ping',{signal:AbortSignal.timeout(8000)});
   if(!r.ok) throw new Error(r.status);
-  await r.json();
+  noteUiBuild((await r.json()).ui_build);
   const wasOffline=_pingFailCount>=3||_uiOffline;
   _pingFailCount=0;
   setUiOffline(false);

@@ -60,6 +60,7 @@ jobs:
       - name: Run UI regression checks without appliance access
         run: |
           node t/browser/automation_activity.cjs
+          node t/browser/automation_progress.cjs
           node t/browser/automation_history.cjs
           node t/browser/automation_refresh.cjs
           node t/browser/automation_editor.cjs

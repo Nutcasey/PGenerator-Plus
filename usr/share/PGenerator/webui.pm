@@ -29,6 +29,8 @@ use Fcntl qw(O_NONBLOCK O_WRONLY LOCK_EX LOCK_UN);
 use File::Path qw(make_path);
 use JSON::PP ();
 use PGAutomation ();
+use PGAutomationETA ();
+use Digest::SHA ();
 use PGAutomationLaunch ();
 use Time::HiRes ();
 # Required for the ":shared" attributes and lock() below: webui_http dispatches
@@ -1607,8 +1609,8 @@ sub webui_handle_request (@) {
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$r";
    }
    elsif($path eq "/api/ping") {
-    my $r='{"ok":1}';
-    print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\n$cors\r\n$r";
+    my $r='{"ok":1,"ui_build":"'.$_webui_ui_build.'"}';
+    print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ".length($r)."\r\n$cors\r\n$r";
    }
    elsif($path eq "/api/info") {
     my $now=time();
@@ -13102,15 +13104,19 @@ sub webui_automation_public_run (@) {
   heartbeat_age=>defined($heartbeat) ? (time()-$heartbeat<0 ? 0 : int(time()-$heartbeat)) : undef,
   lock_owner=>ref($execution) eq "HASH" ? ($execution->{owner}||"") : ($run->{lock_owner}||""),
   worker_status=>&webui_automation_worker_summary($run->{worker_status}),
+  progress=>PGAutomationETA::progress($run),
  };
  my $eta=$run->{time_estimate};
  if(ref($eta) eq 'HASH' && ($run->{status}||'') eq 'running'
-    && defined($active_item) && defined($eta->{active_item}) && $eta->{active_item}==$active_item
+    && (($public->{active_stage}||'') eq 'queue-preflight' || (defined($active_item) && defined($eta->{active_item}) && $eta->{active_item}==$active_item))
     && ($eta->{stage}||'') eq ($public->{active_stage}||'')
     && ($eta->{calculated_at}||0)>=($run->{resumed_at}||0)) {
   # Never expose internal profile identities or arbitrary saved payload fields.
-  $public->{time_estimate}={map {$_=>$eta->{$_}} qw(scope remaining_seconds calculated_at active_item stage job_remaining_seconds job_unknown_stages batch_known_seconds batch_unknown_stages known_stages remaining_stages approximate_history stage_remaining_seconds)};
+  $public->{time_estimate}={map {$_=>$eta->{$_}} qw(scope remaining_seconds calculated_at active_item stage job_remaining_seconds job_unknown_stages batch_known_seconds batch_unknown_stages known_stages remaining_stages approximate_history stage_remaining_seconds pass_remaining_seconds)};
  }
+ my $op=$run->{operation_progress};
+ $public->{operation_progress}={map {$_=>$op->{$_}} qw(stage completed total unit message)}
+  if(($run->{status}||'') eq 'running' && ref($op) eq 'HASH' && ($op->{stage}||'') eq ($public->{active_stage}||''));
  # Interrupted manifests from older runners can retain the transient
  # "Stopping..." message after verified cleanup. Use saved evidence only
  # while parked; a resumed worker must never inherit an old cleanup result.
@@ -13274,7 +13280,7 @@ sub webui_automation_run (@) {
     }
    }
   }
-  foreach my $artifact (qw(calibration/reset.json calibration/grey-state.json calibration/3d-state.json calibration/dv-profile-state.json calibration/dv-profile-measurements.json calibration/dv-profile-upload.json panel-light.json apply-all.json quality.json)) {
+  foreach my $artifact (&webui_automation_item_artifacts()) {
    my $value=PGAutomation::read_json_file($dir."/items/$i/$artifact");
    next if(ref($value) ne "HASH");
    my ($group,$name)=$artifact=~m{^([^/]+)/(.+)\.json$};
@@ -13288,6 +13294,13 @@ sub webui_automation_run (@) {
  }
     $run->{items}=\@items if(@items || @$raw_items==0);
  return $run;
+}
+
+# Per-item artifact files merged into history/job-detail items by
+# webui_automation_run. Anything in this list is run evidence, never recipe
+# input, so webui_automation_normalize_item strips the same keys again.
+sub webui_automation_item_artifacts (@) {
+ return qw(calibration/reset.json calibration/grey-state.json calibration/3d-state.json calibration/dv-profile-state.json calibration/dv-profile-measurements.json calibration/dv-profile-upload.json panel-light.json apply-all.json quality.json);
 }
 
 sub webui_automation_fresh_worker (@) {
@@ -13502,6 +13515,16 @@ sub webui_automation_normalize_item (@) {
  delete $item->{settings_recovery};
  delete $item->{profile_baseline_needs_restore};
  delete @$item{qw(setting_contracts generation_profile capability_profile calibration_settings_recipe device_identity best_available_settings best_available_write_ack preflight_contract)};
+ # History items carry merged artifact evidence (webui_automation_run), e.g. a
+ # 500 KB calibration reset transcript. Copied into a queue and started, it
+ # would be stored several times over and make the manifest too slow for the
+ # runner launch handshake. Only recipe input may survive normalization.
+ delete $item->{series};
+ foreach my $artifact (&webui_automation_item_artifacts()) {
+  my ($group,$name)=$artifact=~m{^([^/]+)/(.+)\.json$};
+  if(defined($group) && defined($name)) { delete $item->{$group}{$name} if(ref($item->{$group}) eq "HASH"); }
+  elsif($artifact=~m{^(.+)\.json$} && $1 ne "quality") { delete $item->{$1}; }
+ }
  $item->{id}=PGAutomation::new_id() if(!defined($item->{id}) || !PGAutomation::safe_component($item->{id}));
  $item->{name}=substr(($item->{name}||$item->{title}||"Automation item"),0,120);
  $item->{signal_format}=lc($item->{signal_format}||$item->{signal_mode}||"sdr");
@@ -13659,10 +13682,62 @@ sub webui_automation_settings_plan (@) {
  return {status=>'ok',%$plan,live_context_matches=>$matched?JSON::PP::true:JSON::PP::false};
 }
 
-sub webui_automation_probe_hazard (@) {
- my ($item,$key,$category,$token)=@_;
+# Hazard controls (energy saving, AI picture, sleep timers, screen saver) are
+# read from the TV before every job. Each helper call opens and registers a
+# fresh TV session (3-14 s on the G3), and the old per-key, per-category walk
+# made 14 calls a job, 13 of them refusals. Now each settings category is asked
+# once for every still-unknown key (the helper batches the read and retries
+# rejected keys singly inside that one session), and verdicts are remembered
+# per TV model and firmware so later jobs and runs ask only for controls this
+# TV is known to expose.
+our $webui_automation_hazard_memo_ttl=30*86400;
+sub webui_automation_hazard_categories (@) {
+ return (
+  energySaving=>["picture"],
+  aiPicture=>["picture"],
+  autoPowerOff=>["power","system","general"],
+  noSignalPowerOff=>["power","system","general"],
+  screenSaverTimeout=>["screenSaver","screensaver","general"],
+  screenSaver=>["screenSaver","screensaver","general"],
+ );
+}
+sub webui_automation_hazard_fingerprint (@) {
+ my ($item)=@_;
+ my $identity=ref($item) eq "HASH" && ref($item->{device_identity}) eq "HASH" ? $item->{device_identity} : {};
+ return "" if(($identity->{model_name}||"") eq "" || ($identity->{firmware}||"") eq "");
+ return join("|",map { $identity->{$_}//"" } qw(model_name firmware webos_release));
+}
+sub webui_automation_hazard_memo_path (@) { return PGAutomation::base_dir()."/hazard-probes.json"; }
+sub webui_automation_hazard_memo (@) {
+ my ($fingerprint)=@_;
+ return {} if(!defined($fingerprint) || $fingerprint eq "");
+ my $all=PGAutomation::read_json_file(&webui_automation_hazard_memo_path());
+ my $entry=ref($all) eq "HASH" && ref($all->{$fingerprint}) eq "HASH" ? $all->{$fingerprint} : {};
+ my $now=PGAutomation::now();
+ return { map { $_=>$entry->{$_} } grep { ref($entry->{$_}) eq "HASH" && ($now-($entry->{$_}{checked_at}||0))<$webui_automation_hazard_memo_ttl } keys %$entry };
+}
+sub webui_automation_remember_hazards (@) {
+ my ($fingerprint,$verdicts)=@_;
+ return 0 if(!defined($fingerprint) || $fingerprint eq "" || ref($verdicts) ne "HASH" || !%$verdicts);
+ my ($ok)=PGAutomation::with_lock(&webui_automation_hazard_memo_path(),sub {
+  my ($all)=@_;
+  $all={} if(ref($all) ne "HASH");
+  my $now=PGAutomation::now();
+  $all->{$fingerprint}{$_}={category=>$verdicts->{$_}{category},checked_at=>$now} foreach(keys %$verdicts);
+  return $all;
+ });
+ return $ok ? 1 : 0;
+}
+# One TV session for a list of keys in one category. Returns key => hazard
+# hash when the TV exposes the control, key => undef when the TV itself
+# refused the key (safe to remember), and omits keys the TV never answered
+# for (transport failure or timeout: unknown, not unsupported).
+sub webui_automation_probe_hazards (@) {
+ my ($item,$keys,$category,$token)=@_;
+ $keys=[] if(ref($keys) ne "ARRAY");
+ return {} if(!@$keys);
  my $body=&webui_automation_json({
-  keys => [$key],
+  keys => [@$keys],
   picture_mode => $item->{picture_mode},
   signal_mode => $item->{signal_format},
   category => $category,
@@ -13670,20 +13745,76 @@ sub webui_automation_probe_hazard (@) {
  });
  my $response=eval { &webui_lg_picture_settings($body) };
  my $decoded=PGAutomation::decode_json($response||"");
- return undef if(ref($decoded) ne "HASH");
- my $supported=ref($decoded->{supported_picture_keys}) eq "ARRAY" ? $decoded->{supported_picture_keys} : [];
- my %supported=map { $_=>1 } @$supported;
- return undef if(!$supported{$key});
+ return {} if(ref($decoded) ne "HASH");
+ my %supported=map { $_=>1 } @{ref($decoded->{supported_picture_keys}) eq "ARRAY" ? $decoded->{supported_picture_keys} : []};
  my $settings=ref($decoded->{picture_settings}) eq "HASH" ? $decoded->{picture_settings} : (ref($decoded->{settings}) eq "HASH" ? $decoded->{settings} : {});
- return {
-  key => $key,
-  category => $category,
-  value => exists($settings->{$key}) ? $settings->{$key} : undef,
-  disabled_value => "off",
-  controllable => 1,
-  supported => 1,
-  generation => $decoded->{lg_generation},
+ my $unsupported=ref($decoded->{unsupported_picture_keys}) eq "HASH" ? $decoded->{unsupported_picture_keys} : {};
+ my %result;
+ foreach my $key (@$keys) {
+  if($supported{$key}) {
+   $result{$key}={ key=>$key, category=>$category, value=>exists($settings->{$key}) ? $settings->{$key} : undef,
+    disabled_value=>"off", controllable=>1, supported=>1, generation=>$decoded->{lg_generation} };
+  } elsif(exists($unsupported->{$key}) && PGLGCapabilities::lg_readback_unavailable_reason($unsupported->{$key})) {
+   $result{$key}=undef;
+  }
+ }
+ return \%result;
+}
+sub webui_automation_probe_hazard (@) {
+ my ($item,$key,$category,$token)=@_;
+ my $probed=&webui_automation_probe_hazards($item,[$key],$category,$token);
+ return ref($probed->{$key}) eq "HASH" ? $probed->{$key} : undef;
+}
+sub webui_automation_probe_item_hazards (@) {
+ my ($item,$token,$progress,$index)=@_;
+ my %hazard_categories=&webui_automation_hazard_categories();
+ my @hazard_keys=qw(energySaving aiPicture autoPowerOff noSignalPowerOff screenSaverTimeout screenSaver);
+ my $fingerprint=&webui_automation_hazard_fingerprint($item);
+ my $memo=&webui_automation_hazard_memo($fingerprint);
+ my (@hazards,%found,%answered,%verdict);
+ my $pass=sub {
+  my ($eligible)=@_;
+  foreach my $category (qw(picture power system screenSaver screensaver general)) {
+   my @keys=grep { my $key=$_; !$found{$key} && grep { $_ eq $category } @{$eligible->{$key}||[]} } @hazard_keys;
+   next if(!@keys);
+   $progress->($index,"Checking ".join(", ",@keys)." ($category) for ".($item->{name}||"job")) if(ref($progress) eq "CODE");
+   my $probed=&webui_automation_probe_hazards($item,\@keys,$category,$token);
+   foreach my $key (@keys) {
+    next if(!exists($probed->{$key}));
+    $answered{$key}{$category}=1;
+    next if(ref($probed->{$key}) ne "HASH");
+    $probed->{$key}{controllable}=1;
+    push @hazards,$probed->{$key};
+    $found{$key}=1;
+    $verdict{$key}={category=>$category};
+   }
+  }
  };
+ # Remembered controls are asked for only where they were last seen;
+ # remembered absences are not asked for at all.
+ my %candidates=map {
+  my $known=$memo->{$_};
+  $_=>(ref($known) eq "HASH" && exists($known->{category}) ? (defined($known->{category}) ? [$known->{category}] : []) : [@{$hazard_categories{$_}||[]}])
+ } @hazard_keys;
+ $pass->(\%candidates);
+ # A remembered category the TV now refuses: search the others again.
+ my %retry;
+ foreach my $key (@hazard_keys) {
+  next if($found{$key});
+  my $known=$memo->{$key};
+  next if(ref($known) ne "HASH" || !defined($known->{category}) || !$answered{$key}{$known->{category}});
+  $retry{$key}=[grep { $_ ne $known->{category} } @{$hazard_categories{$key}||[]}];
+ }
+ $pass->(\%retry) if(%retry);
+ foreach my $key (@hazard_keys) {
+  next if($found{$key});
+  my $known=$memo->{$key};
+  next if(ref($known) eq "HASH" && exists($known->{category}) && !defined($known->{category}));
+  # Remember an absent control only when the TV itself refused every candidate.
+  $verdict{$key}={category=>undef} if(!grep { !$answered{$key}{$_} } @{$hazard_categories{$key}||[]});
+ }
+ &webui_automation_remember_hazards($fingerprint,\%verdict) if(%verdict);
+ return \@hazards;
 }
 
 sub webui_automation_preflight_status (@) {
@@ -14087,25 +14218,7 @@ sub webui_automation_readiness_data (@) {
   if($item->{stages}{apply_all} && $item->{stages}{calibration}) {
    $check->($apply_support==1,"item-$index-apply-all",$apply_support==1 ? "Apply to all inputs is supported" : $apply_support==0 ? "Apply to all inputs is unavailable on this LG generation" : "LG apply-to-all capability is unknown",$index);
   }
-  my @hazards;
-  my %hazard_categories=(
-   energySaving=>["picture"],
-   aiPicture=>["picture"],
-   autoPowerOff=>["power","system","general"],
-   noSignalPowerOff=>["power","system","general"],
-   screenSaverTimeout=>["screenSaver","screensaver","general"],
-   screenSaver=>["screenSaver","screensaver","general"],
-  );
-  foreach my $key (qw(energySaving aiPicture autoPowerOff noSignalPowerOff screenSaverTimeout screenSaver)) {
-   foreach my $category (@{$hazard_categories{$key}||[]}) {
-    $progress->($index,"Checking $key ($category) for ".$item->{name});
-    my $hazard=&webui_automation_probe_hazard($item,$key,$category,$payload->{automation_token});
-    next if(ref($hazard) ne "HASH");
-    $hazard->{controllable}=1;
-    push @hazards,$hazard;
-    last;
-   }
-  }
+  my @hazards=@{&webui_automation_probe_item_hazards($item,$payload->{automation_token},$progress,$index)};
   foreach my $hazard (@hazards) {
    my $key=$hazard->{key};
    next if exists($settings->{$key});
@@ -14230,7 +14343,7 @@ sub webui_automation_start (@) {
   preflight_only=>$payload->{preflight_only}?JSON::PP::true:JSON::PP::false,queue_revision=>0,
   queue_id=>$queue->{id},queue_name=>$queue->{name},queue_snapshot=>$queue,
   items=>$items,hazard_restore=>$readiness->{hazard_restore}||{},created_at=>PGAutomation::now(),created_at_iso=>&webui_automation_iso(),
-  runner_pid=>0,active_item=>undef,active_stage=>"",checkpoints=>[],readiness=>$readiness,startup_events=>$readiness->{events}||[],
+  runner_pid=>0,active_item=>undef,active_stage=>"",checkpoints=>[],readiness=>{%$readiness,items=>undef},startup_events=>$readiness->{events}||[],
  };
  my ($locked,$start_result,$lock_error)=&webui_automation_lock(sub {
   my $current=&webui_automation_read_execution();
@@ -14751,6 +14864,20 @@ my %_webui_asset_allowed = map { $_ => 1 } qw(
  webui-automation.js
 );
 my %_webui_asset_cache;
+# Content digest of every spliced UI fragment, fixed at boot and reported by
+# /api/ping. A page compares it with the value it first saw; a change means
+# the interface on the generator was redeployed and restarted, so the page
+# offers a reload instead of running the old JavaScript indefinitely.
+my $_webui_ui_build="";
+sub webui_ui_build (@) { return $_webui_ui_build; }
+sub webui_ui_build_digest (@) {
+ my $sha=Digest::SHA->new(256);
+ foreach my $name (sort keys %_webui_asset_allowed) {
+  my $content=&webui_asset($name);
+  $sha->add($name,"\0",$content,"\0");
+ }
+ return substr($sha->hexdigest,0,16);
+}
 my $_webui_asset_missing="";
 my $_webui_html_cache;
 
@@ -14890,6 +15017,7 @@ sub webui_check_assets (@) {
  &log("WebUI ERROR: required UI asset unavailable at boot: hcfr_chc.js ($hcfr_path)",1)
   if(!-s $hcfr_path);
  $_webui_asset_missing="";
+ $_webui_ui_build=&webui_ui_build_digest();
  # Drop the warmed fragment cache: it exists only for the boot diagnostic,
  # and any data left here is deep-cloned into every ithreads worker (about
  # 2.6 MB each). Each worker re-reads and re-caches on its first request.

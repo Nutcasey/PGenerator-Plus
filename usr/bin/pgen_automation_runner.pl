@@ -388,7 +388,12 @@ sub _api {
     my $last;
     my $started = time();
     my $attempt = 0;
-    my $lg_action = _lg_action_path($path) && !$allow_stop;
+    # LG reconnects stay enabled while stopping or restoring preflight
+    # context: those paths must reach the TV to release ownership, and the
+    # retry is bounded (three pairing refreshes), so a transient websocket
+    # refusal right after a picture-mode switch no longer turns a fully
+    # checked queue into a "cleanup required" interruption.
+    my $lg_action = _lg_action_path($path);
     my $lg_preflighted = 0;
     my $lg_reconnects = 0;
     while (1) {
@@ -1680,6 +1685,42 @@ sub _select_item_picture_mode {
     return 1;
 }
 
+# Write a job's controls category by category in one TV session each. A
+# group whose write is refused or comes back unverified is left for the
+# per-control path, which keeps its per-key evidence and best-available
+# handling. Returns the keys written and verified together.
+sub _apply_settings_batched {
+    my ($item_number,$item,$point,$keys,$settings,$calibration_active)=@_;
+    my %by_category;
+    push @{$by_category{_setting_category($item,$_)}},$_ for @$keys;
+    my %done;
+    for my $category (sort keys %by_category) {
+        my @group=@{$by_category{$category}};
+        next if @group<2;
+        _update_run(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>scalar(keys %done),total=>scalar(@$keys)+1,unit=>'settings and verification',message=>'Applying '.scalar(@group).' '.$category.' controls together'};});
+        delete $item->{best_available_write_ack}{$_} for @group;
+        my $result=_api('POST','/api/lg/picture-settings/set',{
+            settings=>{map { $_=>($_ eq 'gamma' ? _tv_gamma_value($settings->{$_}) : $settings->{$_}) } @group},
+            readback_keys=>[@group,'pictureMode'],
+            picture_mode=>_picture_mode($item),
+            tv_input=>$item->{tv_input}||'',
+            signal_mode=>_signal($item),
+            category=>$category,
+            keep_calibration_mode=>$calibration_active ? JSON::PP::true : JSON::PP::false,
+            calibration_mode_active=>$calibration_active ? JSON::PP::true : JSON::PP::false,
+        });
+        my $ok=ref($result) eq 'HASH' && (($result->{status}||'') eq 'ok' || ($result->{status}||'') eq 'started')
+            && (!exists($result->{verification_state}) || ($result->{verification_state}||'') eq 'verified');
+        if (!$ok) {
+            _log_action('Batched write of '.scalar(@group).' '.$category.' controls was not confirmed; applying them one at a time');
+            next;
+        }
+        $done{$_}=1 for @group;
+        _log_action('Applied '.scalar(@group).' '.$category.' controls in one TV session');
+    }
+    return \%done;
+}
+
 sub _apply_and_verify {
     my ($item_number, $item, $point, $mode_selected, $calibration_active) = @_;
     return 0 if !_verify_live_capability_profile($item);
@@ -1694,7 +1735,16 @@ sub _apply_and_verify {
         _log_action('Applying '.scalar(@keys).' queued TV settings to '._picture_mode($item)) if @keys;
         my $applied=0;
         my $next_setting_log=time()+15;
+        # First pass: each category's controls in one TV session, confirmed by
+        # the readback below; only controls that do not verify take the
+        # per-control path. Every helper call registers a fresh TV session
+        # (3-14 s on the G3), so 18 single writes made TV setup the slowest
+        # stage of a job.
+        my %batched=$cycle==1 ? %{_apply_settings_batched($item_number,$item,$point,\@keys,$settings,$calibration_active)} : ();
+        $applied+=scalar(keys %batched);
         foreach my $key (@keys) {
+            next if $batched{$key};
+            _update_run(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>$applied,total=>scalar(@keys)+1,unit=>'settings and verification',message=>'Applying '.$key.' ('.($applied+1).'/'.scalar(@keys).')'};});
             delete $item->{best_available_write_ack}{$key};
             my $category = _setting_category($item, $key);
             my $result = _apply_one_setting($item, $key, $settings->{$key}, $category, $calibration_active);
@@ -1730,6 +1780,7 @@ sub _apply_and_verify {
                 $next_setting_log=time()+15;
             }
         }
+        _update_run(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>$applied,total=>scalar(@keys)+1,unit=>'settings and verification',message=>'Verifying all TV settings after writes'};});
         $last = _read_and_verify_settings($item_number, $item, $point);
         if ($last->{verified}) {
             return $last->{verified};
@@ -2720,6 +2771,7 @@ sub _stage {
         $run->{active_stage} = $name;
         $run->{stage_started_at} = $item->{stage_started_at};
         $run->{worker_status} = {};
+        delete $run->{operation_progress};
         $run->{items}[$item_number] = $item if ref($run->{items}) eq 'ARRAY';
     });
     my $ok = eval { $callback->(); };
@@ -3300,7 +3352,8 @@ sub _preflight_progress {
     my $state={id=>$RUN_ID,run_id=>$RUN_ID,intent=>_run()->{preflight_only}?'readiness':'start',
         scope=>'queue',status=>'checking',started_at=>$result->{started_at},updated_at=>time(),
         active_item=>$number,total_items=>$result->{total_items},items=>$result->{jobs},
-        checks=>$result->{checks},issues=>[grep {!$_->{ok}} @{$result->{checks}}],message=>$message};
+        checks=>$result->{checks},issues=>[grep {!$_->{ok}} @{$result->{checks}}],message=>$message,
+        progress_done=>$result->{progress_done},progress_total=>$result->{progress_total}};
     die 'Unable to persist visible queue preflight progress'
         if !PGAutomation::write_json_atomic(PGAutomation::base_dir().'/preflight.json',$state,0664);
 }
@@ -3419,12 +3472,12 @@ sub _restore_preflight_context {
 
 sub _preflight_queue {
     $ACTIVE_STAGE='queue-preflight';
-    my $run=_update_run(sub {$_[0]{preflight_in_progress}=JSON::PP::true;});
+    my $run=_update_run(sub {$_[0]{preflight_in_progress}=JSON::PP::true;$_[0]{stage_started_at}=time();delete $_[0]{operation_progress};});
     die 'Unable to reserve queue preflight' if !ref($run);
     my $revision=$run->{queue_revision}||0;
     my $items=PGAutomation::clone($run->{items}||[]);
     my @pending=grep {($items->[$_]{status}||'') !~ /^complete(?:-with-warnings)?$/} 0..$#$items;
-    my $result={scope=>'queue',ready=>0,started_at=>time(),total_items=>scalar(@pending),checked_items=>0,
+    my $result={scope=>'queue',ready=>0,started_at=>time(),total_items=>scalar(@pending),checked_items=>0,progress_done=>0,progress_total=>3+3*scalar(@pending),
         jobs=>[map {{name=>$_->{name}||'Job',status=>(($_->{status}||'')=~/^complete/ ? 'previously-completed' : 'unchecked')}} @$items],checks=>[]};
     my $context;
     my $setup=eval {
@@ -3434,8 +3487,11 @@ sub _preflight_queue {
             my $base=_api('POST','/api/automation/readiness',{scope=>'batch',items=>[map {$items->[$_]} @pending]},0,0);
             push @{$result->{checks}},@{$base->{checks}||[]};
             die($base->{message}||'Equipment is not ready') if !$base->{ready};
+            $result->{progress_done}++;
+            _preflight_progress($result,undef,'Equipment ready; saving original signal and picture mode');
             $ACTIVE_ITEM=undef;
             $context=_preflight_snapshot();
+            $result->{progress_done}++;
         }
         1;
     };
@@ -3454,6 +3510,8 @@ sub _preflight_queue {
                 # connected input/profile afresh, then require the same TV.
                 delete @$item{qw(capability_profile generation_profile tv_input preflight_contract)};
                 die($::LAST_ERROR||'Unable to select preflight signal') if !_apply_signal($item);
+                $result->{progress_done}++;
+                _preflight_progress($result,$number,'Signal ready; selecting and verifying picture mode');
                 my $signal=_signal($item);
                 my $before=_preflight_read_mode($signal);
                 die 'TV input or compatibility changed during queue preflight'
@@ -3469,6 +3527,8 @@ sub _preflight_queue {
                 my $selected=_preflight_read_mode($signal);
                 die 'Target picture mode was not independently confirmed during preflight'
                     if !_mode_agrees(_picture_mode($item),$selected->{picture_mode});
+                $result->{progress_done}++;
+                _preflight_progress($result,$number,'Picture mode confirmed; checking TV controls and meter');
                 my $ready=_api('POST','/api/automation/readiness',{scope=>'job',items=>[$item]},0,0);
                 for my $check (@{$ready->{checks}||[]}) {$check->{item_number}=$number;push @{$result->{checks}},$check;}
                 die($ready->{message}||'Job failed TV compatibility checks') if !$ready->{ready}
@@ -3479,6 +3539,8 @@ sub _preflight_queue {
                         || ($item->{capability_profile}{hash}||'') !~ /^[a-f0-9]{64}$/;
                 $item->{preflight_contract}=PGAutomationPlan::contract($item);
                 $result->{jobs}[$number]{status}='checked';$result->{checked_items}++;
+                $result->{progress_done}++;
+                _preflight_progress($result,$number,'Job '.($number+1).' readiness checks passed');
                 1;
             };
             if (!$ok) {
@@ -3488,7 +3550,10 @@ sub _preflight_queue {
             }
         }
     }
+    # A display-state write failure must not prevent restoration.
+    eval {_preflight_progress($result,undef,'Restoring original output and picture modes after queue checks');};
     my $restored=_restore_preflight_context();
+    $result->{progress_done}++ if $restored;
     push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-restore',message=>$::LAST_ERROR||'Preflight restoration failed'} if !$restored;
     push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-cancelled',message=>'Queue preflight stopped; unchecked jobs are not ready'} if $STOP_REQUESTED;
     my @errors=grep {!$_->{ok} && ($_->{level}||'error') eq 'error'} @{$result->{checks}};
@@ -3722,12 +3787,19 @@ sub _claim_queue_item {
     return ($claimed,$changed);
 }
 
+# A claim that fails right after a full preflight means the saved job and its
+# plan disagree on disk, not that the operator edited the queue. Allow two
+# re-checks per job, then stop: on 16 Sep 2026 the appliance's JSON::PP
+# rewrote two numeric recipe values as strings inside the manifest write and
+# the runner re-checked the whole queue every seven minutes for an hour.
+my %REPLANS;
+sub _replan_exhausted {
+    my ($index) = @_;
+    return ++$REPLANS{$index} > 2 ? 1 : 0;
+}
+
 sub _main {
     die "automation store unavailable\n" if !PGAutomation::ensure_store() || !-d $RUN_DIR;
-    my $run = _run();
-    die "run manifest unavailable\n" if ref($run) ne 'HASH' || ($run->{token} || '') ne $TOKEN;
-    return if ($run->{status} || '') eq 'paused';
-    return if ($run->{status} || '') =~ /^(?:complete|failed|stopped)$/;
     if (!open($RUNNER_LOCK, '>>', $RUNNER_LOCK_FILE) || !flock($RUNNER_LOCK, LOCK_EX | LOCK_NB)) {
         _log('another automation runner owns the runner lock');
         return;
@@ -3735,10 +3807,17 @@ sub _main {
     # No device API, cleanup, or execution-state write is allowed before the
     # launcher commits this unique attempt. A cancelled/delayed child exits
     # without touching a different run or resurrecting a failed launch.
+    # The handshake comes before the manifest is decoded: the launcher's
+    # start window must cover interpreter startup only, not a JSON::PP parse
+    # of a large run.json on the appliance. The launcher has already verified
+    # this token against the manifest and refuses paused or finished runs.
     die "Runner launch was cancelled, expired, or superseded\n"
         if !PGAutomationLaunch::worker_handshake($RUN_ID, $TOKEN, $LAUNCH_ATTEMPT);
     $LAUNCH_ACCEPTED = 1;
-    $run = _run();
+    my $run = _run();
+    die "run manifest unavailable\n" if ref($run) ne 'HASH' || ($run->{token} || '') ne $TOKEN;
+    return if ($run->{status} || '') eq 'paused';
+    return if ($run->{status} || '') =~ /^(?:complete|failed|stopped)$/;
     $ETA_HISTORY=eval {PGAutomationETA::history($RUN_ID)} || [];
     _heartbeat(1);
     _log_action('Automation runner started');
@@ -3780,7 +3859,15 @@ sub _main {
             }
         }
         my ($claimed,$queue_changed)=_claim_queue_item($i);
-        if ($queue_changed) {$i--;next;} # Retry this index after full preflight.
+        if ($queue_changed) {
+            if (_replan_exhausted($i)) {
+                _finish('failed',{stage=>'queue-preflight',error_code=>'queue-plan-mismatch',
+                    message=>'Job '.($i+1).' kept failing to match the plan it had just passed. Stopping rather than re-checking the queue indefinitely; see the activity log.'});
+                return;
+            }
+            $i--;next; # Retry this index after full preflight.
+        }
+        delete $REPLANS{$i};
         $items = $claimed->{items};
         last if $i >= @$items;
         _refresh_control();

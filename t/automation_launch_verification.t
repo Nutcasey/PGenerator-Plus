@@ -54,7 +54,7 @@ sub setup {
 }
 sub marker { return PGAutomation::run_dir($_[0]).'/device-command.marker'; }
 sub settle {
- my ($condition)=@_;my $until=Time::HiRes::time()+2;
+ my ($condition,$timeout)=@_;my $until=Time::HiRes::time()+($timeout||2);
  Time::HiRes::sleep(0.02) while Time::HiRes::time()<$until && !$condition->();
  return $condition->();
 }
@@ -136,6 +136,46 @@ for my $failure (qw(pid manifest accepted)) {
  isnt($? >> 8,0,'actual application worker refuses a missing/cancelled attempt');
  unlike(PGAutomation::read_raw($log),qr/Stop requested|cancelling all|calibration exit/,'unaccepted worker never runs device cleanup');
  is(PGAutomation::read_json_file(PGAutomation::base_dir().'/execution.json')->{status},'starting','unaccepted worker does not rewrite execution state');
+}
+{
+ # The application worker must flag itself ready before it decodes the
+ # manifest: on the appliance a large run.json parse alone exceeded the
+ # start window, so every launch expired and the run was reaped as dead.
+ # A manifest with a foreign token proves the order: the old worker exited
+ # on that check before ever touching launch.json.
+ my $id=setup();my $dir=PGAutomation::run_dir($id);my $file="$dir/launch.json";
+ PGAutomation::write_json_atomic("$dir/run.json",{id=>$id,token=>'other-token',status=>'starting',runner_pid=>0,items=>[]});
+ PGAutomation::write_json_atomic($file,{run_id=>$id,attempt=>'order-attempt',state=>'pending',expires_at=>Time::HiRes::time()+10});
+ my $child=fork();die $! unless defined $child;
+ if(!$child){open STDOUT,'>',"$dir/order.log";open STDERR,'>&',\*STDOUT;exec $^X,"$Bin/../usr/bin/pgen_automation_runner.pl",$id,'test-token','order-attempt';exit 127;}
+ ok(settle(sub {(PGAutomation::read_json_file($file)->{state}||'') eq 'ready'},8),'application worker flags ready before decoding the manifest');
+ PGAutomation::write_json_atomic($file,{%{PGAutomation::read_json_file($file)},state=>'cancelled'});
+ waitpid($child,0);
+ isnt($? >> 8,0,'worker exits once its attempt is cancelled');
+ unlike(PGAutomation::read_raw("$dir/order.log"),qr/Stop requested|cancelling all|calibration exit/,'cancelled worker performs no device cleanup');
+ is(PGAutomation::read_json_file(PGAutomation::base_dir().'/execution.json')->{status},'starting','cancelled worker leaves execution state alone');
+}
+{
+ # A worker that flagged ready inside the window keeps waiting for the
+ # launcher's decision after the attempt deadline: acceptance rewrites the
+ # manifest, which can take seconds per megabyte on the appliance.
+ my $id=setup();my $dir=PGAutomation::run_dir($id);my $file="$dir/launch.json";
+ local $ENV{PGEN_LAUNCH_TEST_MODE}='';
+ PGAutomation::write_json_atomic($file,{run_id=>$id,attempt=>'slow-accept',state=>'pending',expires_at=>Time::HiRes::time()+0.5});
+ my $child=fork();die $! unless defined $child;
+ if(!$child){exec $^X,$fixture,$id,'test-token','slow-accept';exit 127;}
+ ok(settle(sub {(PGAutomation::read_json_file($file)->{state}||'') eq 'ready'}),'fixture worker flags ready inside the window');
+ Time::HiRes::sleep(0.8);
+ my $launch=PGAutomation::read_json_file($file);
+ is($launch->{state},'ready','worker is still waiting after the attempt deadline');
+ ok(kill(0,$launch->{pid}),'worker process has not given up');
+ my $now=Time::HiRes::time();
+ PGAutomation::with_lock("$dir/run.json",sub { return {%{$_[0]},status=>'running',runner_pid=>$launch->{pid},launch_attempt=>'slow-accept',heartbeat=>$now}; });
+ PGAutomation::with_lock(PGAutomation::base_dir().'/execution.json',sub { return {%{$_[0]},pid=>$launch->{pid},status=>'running',launch_attempt=>'slow-accept'}; });
+ PGAutomation::write_json_atomic($file,{%$launch,state=>'accepted',accepted_at=>$now});
+ waitpid($child,0);
+ is($? >> 8,0,'an acceptance that began inside the window still admits the worker');
+ ok(-f marker($id),'admitted worker proceeds to device work');
 }
 # Publication must not ignore flush/sync errors: the launch journal and
 # ownership manifest use this writer. Preserve the previous valid file.
