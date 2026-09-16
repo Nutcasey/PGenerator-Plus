@@ -9865,6 +9865,18 @@ function meterUpdateNoiseFloorControlAvailability(){
  target.title=applies
   ? 'Perceptual noise floor in L* points (pre-gain): deviations at or below this are labeled \'within meter noise\' in the tooltip at every IRE, because the shadow gain magnifies meter repeatability noise as much as signal. Type any value or pick a preset; empty or 0 = Off. Typical colorimeter repeatability is ~0.2-0.5 L* points near black. Plotted values never change.'
   : 'Noise floor applies to the Perceptual RGB bal formula only — switch RGB bal to Perceptual to use it. The saved value is kept.';
+ // One-tap return to Off: clearing a typed number by hand is fiddly on a
+ // touch screen, so show a × only when the floor is actually on.
+ const clear=document.getElementById('meterRgbBalanceNoiseFloorClear');
+ if(clear&&clear.style) clear.style.display=meterRgbBalanceNoiseFloor()>0?'':'none';
+}
+// Clear the noise floor back to Off and redraw the annotation (chart band,
+// hover tooltips, live bars) exactly like an operator edit would.
+function meterOnRgbBalanceNoiseFloorClear(){
+ const input=document.getElementById('meterRgbBalanceNoiseFloor');
+ if(!input) return;
+ input.value='';
+ meterOnRgbBalanceNoiseFloorChange();
 }
 
 // Dispatcher — keeps every existing caller working while honoring the

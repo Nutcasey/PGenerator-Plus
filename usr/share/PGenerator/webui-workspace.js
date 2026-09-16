@@ -15117,6 +15117,20 @@ function drawRGBChart(gs,allSteps,readingMap){
     zone.forEach((p,i)=>{const X=chart.toX(p.x),Y=chart.toY(p[edge]);if(i)ctx.lineTo(X,Y);else ctx.moveTo(X,Y);});
     ctx.stroke();
    });
+   // Name the band where it is widest (the leftmost plotted step sits toward
+   // black): without this the shading reads as an unexplained watermark until
+   // the operator hovers a point. Pill style matches the EOTF '0% =' label.
+   const zp=zone[0];
+   const zText='±'+noiseFloor+' L* noise';
+   ctx.font='bold 9px sans-serif';
+   const zW=ctx.measureText(zText).width;
+   const zx=Math.min(chart.pad.l+chart.w-zW-6,chart.toX(zp.x)+6);
+   const zy=Math.max(chart.pad.t+10,Math.min(chart.pad.t+chart.h-6,chart.toY(zp.hi)-6));
+   ctx.fillStyle='rgba(160,190,255,0.9)';
+   ctx.fillRect(zx-3,zy-9,zW+6,12);
+   ctx.fillStyle='#1a1a22';
+   ctx.textAlign='left';ctx.textBaseline='alphabetic';
+   ctx.fillText(zText,zx,zy+1);
    ctx.restore();
   }
  }
@@ -18456,10 +18470,17 @@ function chartHandleHover(e,canvasId){
   if(perceptualGain>1.0005) html+='<br>Perceptual gain: '+perceptualGain.toFixed(2)+'x';
   // Noise annotation applies at EVERY gain, including 1x at 100% IRE: an
   // operator who selected a floor wants small deviations contextualized on
-  // all points, not just the shadow-magnified ones.
+  // all points, not just the shadow-magnified ones. Show the pre-gain L*
+  // deviation next to the flag so the operator can judge HOW deep into the
+  // noise the point sits instead of trusting the floor blindly.
   if(meterRgbBalanceNoiseFloor()>0){
    const within=[bal.R,bal.G,bal.B].map(v=>meterRgbBalanceWithinNoise(v,perceptualGain));
-   if(within.some(Boolean)) html+='<br><span style="opacity:.75">'+['R','G','B'].filter((c,i)=>within[i]).join('/')+' within meter noise</span>';
+   if(within.some(Boolean)){
+    const pg=(Number.isFinite(perceptualGain)&&perceptualGain>0)?perceptualGain:1;
+    const raw=[bal.R,bal.G,bal.B];
+    const parts=['R','G','B'].map((c,i)=>within[i]?c+' '+(Math.abs(raw[i]-100)/pg).toFixed(2):null).filter(Boolean);
+    html+='<br><span style="opacity:.75">'+parts.join(' · ')+' L* pre-gain — within meter noise</span>';
+   }
   }
  }
  if(gamma!=null) html+='<br>Gamma: '+gamma.toFixed(2);
