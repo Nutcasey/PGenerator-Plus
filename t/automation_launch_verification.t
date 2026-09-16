@@ -26,6 +26,8 @@ use Time::HiRes ();
 use PGAutomation ();
 use PGAutomationLaunch ();
 my ($id,$token,$attempt)=@ARGV;
+my $argv_snapshot=PGAutomation::read_raw("/proc/$$/cmdline");
+$token=PGAutomationLaunch::read_launch_token($id,$attempt) if $token eq '--launch';
 my $dir=PGAutomation::run_dir($id);
 my $mode=$ENV{PGEN_LAUNCH_TEST_MODE}||'';
 exit 3 if $mode eq 'exit';
@@ -35,6 +37,7 @@ exit 4 unless ref($run) eq 'HASH' && ($run->{token}||'') eq $token;
 open my $lock,'>>',PGAutomation::base_dir().'/runner.lock' or die $!;
 exit 5 unless flock($lock,LOCK_EX|LOCK_NB);
 exit 6 unless PGAutomationLaunch::worker_handshake($id,$token,$attempt);
+PGAutomation::write_atomic("$dir/argv.snapshot",$argv_snapshot) or die $!;
 PGAutomation::write_atomic("$dir/device-command.marker","accepted\n") or die $!;
 WORKER
 close $fh;
@@ -72,6 +75,10 @@ sub settle {
  is($run->{runner_pid},$launch->{pid},'manifest PID belongs to accepted child');
  is($execution->{pid},$launch->{pid},'ownership PID agrees');
  isnt($launch->{pid},$$,'stale PID was not accepted');
+ my $argv=PGAutomation::read_raw(PGAutomation::run_dir($id).'/argv.snapshot');
+ unlike($argv,qr/test-token/,'production child argv contains no run credential');
+ like($argv,qr/\0--launch\0/,'production child uses a non-secret attempt selector');
+ is((stat(PGAutomation::run_dir($id).'/launch.json'))[2]&0777,0600,'small launch credential journal is owner-only');
  ok($run->{heartbeat}>0,'initial heartbeat is persisted before acceptance');
 }
 for my $mode (qw(exit delay)) {

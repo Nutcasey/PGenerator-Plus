@@ -105,13 +105,14 @@ $run = PGAutomation::read_json_file($path);
 is($run->{status}, 'interrupted', 'run can be resumed to finish');
 is($run->{items}[0]{status}, 'complete', 'the finished item is not reopened');
 
-# A claim whose manifest is unreadable is dropped, not left blocking the guided UI.
+# An unreadable manifest is uncertain ownership, not proof that the TV is idle.
 $id = PGAutomation::new_id();
 make_path(PGAutomation::run_dir($id) . '/items');
 PGAutomation::write_atomic(PGAutomation::run_dir($id) . '/run.json', "garbage\n");
 write_execution(run_id=>$id);
 is(main::webui_automation_reap_dead_runner(), 1, 'a claim over an unreadable manifest is handled');
-ok(!-f $execution_path, 'the claim is removed because nothing can act on that run');
+ok(-f $execution_path, 'uncertain ownership remains fenced until explicit recovery');
+is(PGAutomation::read_json_file($execution_path)->{status},'interrupted','corrupt manifest is a visible recovery state');
 
 # A cleanup runner that never starts keeps the run parked for a later Stop retry.
 {

@@ -56,7 +56,7 @@ like(main::_worker_progress({status=>'error',message=>'Meter disconnected',curre
  );
  local *main::_api=sub {return {status=>'ok'} if $_[1] eq '/api/lg/status';return shift(@responses) || die 'Unexpected extra worker poll'};
  local *main::_refresh_control=sub {};
- local *main::_update_run=sub {1};
+ local *main::_update_run=sub {my $r={};$_[0]->($r);return $r};
  local *main::_sleep_controlled=sub {1};
  my $result=main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{});
  is($result->{status},'complete','real worker wait loop completes with buffered events');

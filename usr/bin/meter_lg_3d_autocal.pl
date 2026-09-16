@@ -26,6 +26,7 @@ use PGCalibrationMath qw(
  target_linear_for_context target_relative_luminance_for_context
 );
 use PGMeterReading qw(reading_xyz);
+use PGAutomation ();
 use PGSignalCode qw(signal_code_policy signal_percent_to_code);
 use PGAutomationProcessing ();
 use PGLGCapabilities qw(resolve_lg_capabilities lg_scoped_request_payload);
@@ -188,6 +189,7 @@ sub decode_json_safe {
 
 sub write_state {
  my ($state)=@_;
+ PGAutomation::stamp_worker_state($state,$LG_3D_REQUEST_CONTEXT);
  # Never let an unencodable value (scalar/code ref) in $state kill the
  # worker: the error handlers themselves call write_state, so an encode
  # die here cascades straight to process death (seen 2026-07-03: a

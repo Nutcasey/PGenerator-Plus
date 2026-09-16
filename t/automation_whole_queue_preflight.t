@@ -11,7 +11,7 @@ require "$Bin/../usr/share/PGenerator/webui.pm";
 
 # Real runner, file store, signal switching, mode selection, plan and restoration
 # code. Only the external TV/renderer/readiness responses are simulated.
-my ($run_id,$run_file,$store,@calls,%config,%modes,$profile,$input,$bad_job,$virtual,$restore_fail,$cancel,$prepares,$mode_writes,$use_real_transport);
+my ($run_id,$run_file,$store,@calls,%config,%modes,$profile,$input,$bad_job,$virtual,$restore_fail,$cancel,$prepares,$mode_writes,$use_real_transport,$legacy,$read_error);
 sub fixture {
     $store=tempdir(CLEANUP=>1);$ENV{PGEN_AUTOMATION_DIR}=$store;
     PGAutomation::ensure_store();
@@ -21,7 +21,7 @@ sub fixture {
      do "$Bin/../usr/bin/pgen_automation_runner.pl";die $@ if $@;}
     @calls=();%config=(signal_mode=>'sdr',eotf=>'0',primaries=>'0',colorimetry=>'2',color_format=>'0',rgb_quant_range=>'2',max_bpc=>'10',dv_map_mode=>'2');
     %modes=(sdr=>'expert1',hdr10=>'hdrCinema',dv=>'dolbyVisionCinemaBright');
-    $profile='a'x64;$input='hdmi1';$bad_job=0;$virtual=0;$restore_fail=0;$cancel=0;$prepares=0;$mode_writes=0;$use_real_transport=0;
+    $profile='a'x64;$input='hdmi1';$bad_job=0;$virtual=0;$restore_fail=0;$cancel=0;$prepares=0;$mode_writes=0;$use_real_transport=0;$legacy=0;$read_error=0;
     my @specs=(['sdr','filmMaker'],['hdr10','hdrFilmMaker'],['dv','dolbyVisionFilmMaker'],['sdr','cinema']);
     my @items=map {main::webui_automation_normalize_item({id=>'job-'.($_+1),name=>'Job '.($_+1),signal_format=>$specs[$_][0],picture_mode=>$specs[$_][1],settings=>{},settle_seconds=>0,stages=>{calibration=>1,apply_all=>0}})} 0..$#specs;
     PGAutomation::write_json_atomic($run_file,{id=>$run_id,token=>'test-token',status=>'running',items=>\@items,queue_revision=>0});
@@ -29,8 +29,10 @@ sub fixture {
     PGAutomation::write_json_atomic(PGAutomation::run_dir($run_id).'/control.json',{request=>'none'});
 }
 sub tv_response {
+    return {status=>'error',message=>'Simulated transport read failure'} if $read_error;
     return {status=>'ok',current_input=>$input,picture_settings=>{pictureMode=>$modes{$config{signal_mode}}},
-        supported_picture_keys=>['pictureMode'],virtual_picture_settings=>$virtual,
+        supported_picture_keys=>['pictureMode'],virtual_picture_settings=>$virtual||$legacy,
+        lg_generation=>{picture_mode_read_forbidden=>$legacy,ddc_only_white_balance=>$legacy},
         generation_profile=>{capability_profile_hash=>$profile,capability_profile_id=>'fixture',capability_library_valid=>1,capability_platform_profile_applied=>1}};
 }
 sub fake_api {
@@ -57,8 +59,8 @@ sub fake_api {
         die 'Only one mode may be queried in its actual signal context' if @{$payload->{items}}!=1;
         $prepares++;
         my $raw=$payload->{items}[0];
-        die 'Readiness queried wrong signal context' if $raw->{signal_format} ne $config{signal_mode};
-        die 'Readiness queried wrong picture context' if $raw->{picture_mode} ne $modes{$config{signal_mode}};
+        die 'Readiness queried wrong signal context' if !$legacy && $raw->{signal_format} ne $config{signal_mode};
+        die 'Readiness queried wrong picture context' if !$legacy && $raw->{picture_mode} ne $modes{$config{signal_mode}};
         if($cancel && $prepares==2) {PGAutomation::write_json_atomic(PGAutomation::run_dir($run_id).'/control.json',{request=>'stop'});select undef,undef,undef,.55;}
         my $item=main::webui_automation_normalize_item($raw);
         $item->{tv_input}=$input;$item->{generation_profile}=tv_response()->{generation_profile};
@@ -121,6 +123,20 @@ $r=run_check();
 ok(!$r->{ready},'unreadable/echoed original mode blocks reversible probing');
 is($mode_writes,0,'no TV mode is changed without a restorable original mode');
 is(scalar(grep {$_->[0] eq 'POST' && $_->[1] eq '/api/config'} @calls),0,'no output is changed before original context can be captured');
+fixture();$legacy=1;
+$r=run_check();
+ok($r->{ready},'reviewed legacy mode-readback limitation does not block the queue') or diag explain $r;
+is($r->{verification_state},'limited','legacy result is explicitly limited rather than live-mode verified');
+is($r->{checked_items},4,'legacy path still checks every pending scoped job');
+is($mode_writes,0,'legacy preflight never probes picture modes it cannot restore');
+is(scalar(grep {$_->[0] eq 'POST' && $_->[1] eq '/api/config'} @calls),0,'legacy preflight leaves generator output untouched');
+my $legacy_context=PGAutomation::read_json_file(PGAutomation::run_dir($run_id).'/viewing-context.json');
+is($legacy_context->{original}{picture_mode},'','virtual selector cannot become a restoration target');
+is_deeply($legacy_context->{modes},{},'no unverified mode is saved for later restoration');
+fixture();$legacy=1;$read_error=1;
+$r=run_check();
+ok(!$r->{ready},'a real read failure is not waived by a legacy limitation');
+is($prepares,0,'failed independent input/profile read blocks before jobs');
 fixture();$cancel=1;%original_modes=%modes;
 $r=run_check();
 ok(!$r->{ready},'cancelled preflight cannot become ready');
@@ -223,5 +239,26 @@ fixture();$use_real_transport=1;
  ok(@requests>4,'independent snapshots reached the actual transport multiple times');
  is(scalar(grep {exists($_->{picture_mode}) || exists($_->{expected_tv_input})} @requests),0,'snapshot reads never inherit the queued mode or a guessed input');
  is(scalar(grep {!$_->{ignore_calibration_picture_mode}} @requests),0,'every snapshot explicitly ignores cached calibration selection');
+}
+
+for my $limited (0,1) {
+ fixture();$legacy=$limited;my %saved_config=%config;my %saved_modes=%modes;
+ $r=run_check();ok($r->{ready},'viewing restoration fixture passed preflight');
+ # Simulate the calibration workflow selecting its final signal/mode.
+ $config{signal_mode}='dv';$config{max_bpc}='8';$modes{dv}='dolbyVisionFilmMaker';$modes{sdr}='filmMaker';
+ PGAutomation::with_lock($run_file,sub {$_[0]{viewing_restore_required}=1;return $_[0];});
+ @calls=();
+ local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
+ ok(main::_restore_preflight_context('viewing'),'run-level original output restoration succeeds');
+ is_deeply({map {$_=>$config{$_}} keys %saved_config},\%saved_config,'original generator transport is restored after calibration, not only after preflight');
+ my $restored=PGAutomation::read_json_file($run_file);
+ ok(!$restored->{viewing_restore_required},'confirmed restoration clears its own obligation');
+ if($limited) {
+  is(scalar(grep {$_->[1] eq '/api/lg/picture-settings/set'} @calls),0,'legacy restoration never writes a guessed original picture mode');
+  is($restored->{viewing_restore_outcome},'output-restored-mode-unavailable','legacy restoration labels its limited evidence');
+ } else {
+  is_deeply(\%modes,\%saved_modes,'readable per-signal original picture modes are restored');
+ }
+ is(scalar(grep {$_->[1]=~/reset|lut|autocal/} @calls),0,'viewing restoration never overwrites newly calibrated LUTs');
 }
 done_testing();

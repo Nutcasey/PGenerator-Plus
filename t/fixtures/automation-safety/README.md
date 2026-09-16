@@ -1,82 +1,140 @@
-# PR14 startup, cleanup and whole-queue safety contracts
+# PR14 automation safety and regression contracts
 
-These changes are based on PR head `620af0b43fb5a5552b2e3c9cc6a23b615c673674`.
-They do not change calibration algorithms or claim new physical TV validation.
+Hardening baseline: `6b929baec0aed06ac3a385c74239b056eb8b9dc3`.
+These changes preserve calibration algorithms, LUT geometry, solver targets and
+existing audit-only workflows. They are not physical TV certification.
 
-## Startup
+## Ownership and durable state
 
-The daemon and child use a unique, expiring attempt record. The child loads its
-modules, validates the manifest and acquires the singleton runner lock before
-announcing readiness. The daemon persists the matching manifest, execution claim,
-PID and initial heartbeat before publishing acceptance. The child performs no
-device operations or device cleanup without that acceptance. A failed or late
-attempt is fenced; a stale PID or an unrelated process is not an acknowledgement.
-The daemon and tests use the same launcher, not a runtime function replacement.
+The existing attempt/acceptance handshake remains mandatory before device work.
+Production runner arguments contain the run ID, `--launch` and a non-secret
+attempt ID. A small owner-only launch journal supplies the token without parsing
+the full manifest before the handshake. Automation directories are private and
+new records/configuration files containing credentials are owner-only. The
+legacy explicit-token CLI remains available for compatibility; do not use it in
+process launchers or diagnostic commands whose arguments may be logged.
 
-## Cleanup
+Journal publication syncs the temporary file, renames it, then syncs the parent
+directory; deletion also syncs the directory. Persistence errors propagate. A
+missing ownership record is distinct from an unreadable/malformed record; the
+latter blocks new device work. An unreadable run manifest never authorises
+claim deletion. Preserve and repair recovery evidence; do not delete an
+uncertain claim merely to unblock another calibration.
 
-Unconfirmed TV/worker cleanup or final meter release retains execution ownership
-in a recoverable interrupted state. Resume, Clear and Delete cannot bypass it.
-Each explicit Retry cleanup may launch a new bounded cleanup attempt. Recovery
-cannot take ownership from a different batch. Successful cleanup preserves each
-job's results; it does not silently resume calibration. Terminal state is saved
-before ownership is released. Flush/sync failures are propagated by the shared
-atomic writer rather than being published as successful journal writes.
+Locks are bounded. The listener is non-blocking, as is its overload response,
+and silent browser preconnect sockets do not occupy request workers. Existing
+appliance allocator mitigation remains unchanged. The loopback test covers
+repeated failed starts and silent clients, not reproduction of a Pi/glibc
+allocator deadlock. That original hardware report still requires confirmation.
 
-## Whole-queue checks
+## Cleanup and Pause
 
-Check Readiness starts an owned, persistent, check-only run after explicit consent
-to temporary signal and picture-mode switching. Run queue and Resume perform fresh
-whole-pending-queue checks before calibration. Every pending job is checked in its
-actual signal/picture context. Configuration, mode restoration and context evidence
-are journalled before mutation. Stop and failed checks restore those contexts;
-failed restoration retains ownership for Retry cleanup. A neutral grey pattern,
-not the user's previous arbitrary image/video pattern, is left after restoration.
+A panel-protection restoration obligation is written before any disable is sent.
+Partial dispatch, a lost reply, artifact failure and process interruption cannot
+silently erase it. Finalisation checks protection, protective settings, preflight,
+viewing-context, worker/CAL_END and meter obligations. Failed restoration leaves
+an interrupted, owned run with Retry cleanup; Clear, Delete and Resume cannot
+bypass it. A successful retry clears stale failure records.
 
-No preflight resets calibration, uploads LUTs, enters calibration mode or takes a
-meter measurement. It uses the existing confirmed calibration-exit check to
-establish a normal baseline. Control capabilities, value contracts, input,
-platform and manual requirements are checked. This is not a promise that a TV
-will accept every later command or that a network/meter cannot subsequently fail.
+A TV without a readback API cannot supply verified TPC/GSR values. Successful
+re-enable dispatch is labelled `sent-unverified`, not fabricated readback. The
+runner's existing conservative end state is to enable both controls, not claim
+it recovered an unknowable original value.
 
-The resolved plan freezes request intent, device identity, input and compatibility
-signature. Job-start checks remain mandatory. Editing pending jobs invalidates the
-plan, and revision/intent checks under the claim lock prevent an edit-vs-start race.
-Completed jobs are not re-calibrated when checking the remaining queue.
+Pause safely parks at a checkpoint: workers and meter stop, calibration mode
+closes, temporary protective settings are restored, and results/checkpoints are
+retained. Resume reconstructs and checks the required settings and saved profile
+baseline without unnecessarily repeating completed calibration. Failed parking
+is cleanup-required; Retry cleanup preserves the pending Pause. Boot recovery
+also notices older paused manifests with outstanding protective changes.
 
-### Deliberate compatibility limit
+## Whole-queue checks and the C1 regression
 
-Automatic reversible preflight requires an independently readable original picture
-mode. A virtual/echoed requested selector is not restoration evidence. A TV which
-cannot provide that evidence is blocked **before** modes are changed rather than
-claiming that it can be restored. This includes affected legacy/C1 configurations;
-use the guided workflow until native current-mode observation is available. Known
-manual requirements for other controls remain explicit warnings, not verified
-settings. Do not remove this guard merely to turn an unsupported device green.
+Readable TVs retain strict reversible whole-queue probing. Independent original
+modes, input and compatibility signatures are required; an unexpected read
+failure or virtual/echoed selector does not become valid restoration evidence.
+
+For a reviewed legacy profile explicitly reporting unavailable mode readback,
+preflight performs scoped compatibility checks without changing signal or
+picture mode. Each job is labelled `checked-limited`, not live-mode verified.
+Its real signal/mode is still selected and settings rechecked before calibration,
+using the existing matrix-authorised accepted-write/manual-control path.
+No guessed original mode is recorded or restored. This narrows the consequence
+of the legacy flag without changing DDC generation classification globally.
+
+Preflight restoration and run-level viewing restoration use separate journals.
+The queue's `finish_policy` defaults to `restore-original`; `keep-last` leaves the
+final calibrated mode selected. Temporary protection restoration is mandatory
+for either policy. Original selection/transport restoration never rewrites the
+new LUT. Known unreadable original modes yield output-only restoration with an
+explicit limited outcome. A neutral grey pattern, not the previous arbitrary
+image/video, is the idle output.
+
+## Retry, measurements and reporting
+
+Reconnection alone does not permit repeating a destructive mutation. A reset or
+other non-repeatable action may be retried only with evidence it was not sent.
+Ambiguous post-send connection loss remains an actionable unknown outcome.
+Absolute-value writes and explicit idempotent reads retain bounded recovery.
+
+Each worker launch carries an attempt ID. Seeded and subsequent status records
+retain it; the worker adds its PID and Linux process start identity. Adoption,
+completion and archived evidence must match the awaited attempt. A repeated
+start with the same ID adopts the existing result rather than starting the same
+calibration again. Emergency Stop remains intentionally broad because workers
+share one physical TV/meter; that is not used as proof of result ownership.
+
+Live status and Stop controls still poll promptly. Repeated manifest progress
+writes are coalesced to 5–10 seconds and terminal boundaries; durable checkpoints
+and safety obligations are not deferred. Measure resource/latency behaviour on
+the appliance before claiming performance improvements.
+
+Browser picture caches are partitioned by device/profile/input/signal/mode and
+category, with per-key read times. An unscoped/virtual response invalidates the
+current pointer; values and capability envelopes never merge across contexts.
+
+Quality is an explicit policy: `audit` preserves the original order and reports
+warnings; `enforce` requires enabled post-readings and configured limits, then
+blocks Apply to All Inputs until every selected sweep passes. Evidence is bound
+to targets, limits, context and the calibration checkpoints. Changed calibration
+or limits invalidate an old proof. Stored quality results are separate from the
+recipe, so copying History cannot erase its acceptance limits. No universal
+HDR/DV thresholds are imposed.
 
 ## Automated verification
 
-- `t/automation_launch_verification.t`: real subprocesses, stale/foreign PIDs,
-  singleton contention, delayed/cancelled/superseded attempts and persistence faults.
-- `t/automation_cleanup_journal.t`: interrupted cleanup, initial/result journal
-  write failures and stale successful cleanup evidence across process recovery.
-- `t/automation_cleanup_ownership.t`: actual store/finish/control paths, failed
-  CAL_END/meter release, retries, legacy terminal recovery and competing ownership.
-- `t/automation_whole_queue_preflight.t`: real runner orchestration and transport
-  with simulated hardware responses, late-job incompatibility, check-only behaviour,
-  cancellation, restoration failure/retry, stale plans and edit-vs-claim races.
-- `t/browser/automation_review_fixes.cjs`: consent, whole-queue request, late blockers
-  and Retry cleanup/disabled Resume presentation alongside the existing UI checks.
+Run syntax checks, `prove -v t/`, and all eleven scripts listed in the existing
+browser CI job, using Chromium's sandbox. Do not run `*_deployed.cjs` scripts as
+part of hardware-free CI.
 
-Run the complete Perl suite, syntax checks and all ten configured browser suites,
-then repeat on the same source. Hardware-free tests are not C1/G3 certification.
+Key new/extended tests:
 
-## Physical acceptance still required
+- `automation_review_hardening.t`: durable writes, permissions, bounded locks,
+  corrupt ownership, disable/restore failure injection, safe Pause, retry delivery,
+  worker attempt ownership/replay and enforced quality proof.
+- `automation_http_responsiveness.t`: real threaded loopback HTTP listener,
+  failed-start routing, silent sockets and responsive ping, with equipment mocked.
+- `automation_whole_queue_preflight.t`: real runner, storage, transport and plan
+  code with simulated device responses; legacy limited checks, modern fail-closed
+  reads, cancellation and separate final viewing restoration without LUT writes.
+- `automation_launch_verification.t`: real subprocess handshake, cancelled/late
+  attempts, private credential journal and secret-free production argv.
+- `lg_browser_read_cache.t`: cross-mode, cross-input and profile isolation.
+- `automation_restart_cleanup.t`: safe paused runs versus legacy unsafe pauses.
 
-On the exact candidate build, complete an SDR/HDR10/Dolby Vision queue, demonstrate
-that a deliberately incompatible late job blocks calibration before job one, and
-check original output/mode restoration after success, rejection and Stop. Disconnect
-the TV during restoration, verify that Retry cleanup retains ownership, reconnect
-and recover. Exercise delayed startup and a process restart without allowing late
-calibration or loss of pending recovery evidence. Confirm legacy unreadable-mode
-sets show an actionable block rather than a fabricated successful preflight.
+## Physical acceptance outstanding
+
+On the exact candidate commit, complete SDR, HDR10 with Dark Detail, and Dolby
+Vision jobs on the G3 and contributor's C1. Verify C1 can reach calibration,
+unsupported native controls stay manual/unverified, and modern failures still
+block. Independently check output, settings and before/after measurements.
+
+Exercise Pause/Resume after setup, reset and greyscale completion; Stop and reboot;
+partial protection failures; failed restoration/reconnect/retry; and both finish
+policies. Check actual CAL_END and protective end state, then verify a new batch
+can start. Repeat the contributor's failed-readiness/Run-queue sequence on the Pi
+and inspect accept backlog, descriptors and allocator behaviour. Test enforced
+quality with a deliberately failed limit and verify no propagation occurs.
+
+Hardware-free tests and hosted CI do not substitute for these checks or for an
+independent agent/human code review. No hardware deployment is part of this change.

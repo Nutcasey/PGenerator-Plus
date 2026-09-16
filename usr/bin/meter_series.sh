@@ -171,7 +171,7 @@ load_series_identity_meta() {
  [[ -n "$SERIES_META_LOADED" ]] && return
  SERIES_META_LOADED=1
  [[ -f "$STATE_FILE" ]] || return
- SERIES_META_JSON=$(python - "$STATE_FILE" <<'PY' 2>/dev/null || true
+ SERIES_META_JSON=$(python - "$STATE_FILE" "$$" <<'PY' 2>/dev/null || true
 import json, sys
 try:
     state = json.load(open(sys.argv[1]))
@@ -189,9 +189,15 @@ meta = {"type": stype, "points": points}
 # these top-level fields made a live series depend on whichever reading or
 # reconstructed step happened to be available during that poll, then caused a
 # second target/Delta-E calculation when the completed snapshot was restored.
-for key in ("signal_mode", "target_gamma", "max_luma", "dv_map_mode", "dv_interface"):
+for key in ("signal_mode", "target_gamma", "max_luma", "dv_map_mode", "dv_interface", "automation_worker_id", "full_autocal_run_id"):
     if key in state and state[key] is not None:
         meta[key] = state[key]
+if meta.get("automation_worker_id"):
+    meta["worker_pid"] = int(sys.argv[2])
+    try:
+        meta["worker_start_ticks"] = open("/proc/%s/stat" % sys.argv[2]).read().rsplit(") ", 1)[1].split()[19]
+    except (OSError, IndexError):
+        meta["worker_start_ticks"] = ""
 sys.stdout.write(",".join(json.dumps(key) + ":" + json.dumps(value, separators=(",", ":"))
                           for key, value in meta.items()))
 PY

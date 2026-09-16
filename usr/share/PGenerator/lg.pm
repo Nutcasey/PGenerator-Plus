@@ -3,6 +3,7 @@
 #
 
 use JSON::PP ();
+use PGAutomation ();
 use File::Path qw(make_path remove_tree);
 use Fcntl qw(:flock);
 use IO::Select ();
@@ -82,89 +83,106 @@ sub lg_read_picture_settings_cache (@) {
 
 # Remember the last live picture-settings answer served over HTTP, merged per
 # control, so the browser can be answered from it while automation owns the TV.
-sub lg_remember_picture_settings (@) {
- my ($json)=@_;
- my $result=eval { JSON::PP::decode_json($json||"") };
- return 0 if(ref($result) ne "HASH" || ($result->{"status"}||"") ne "ok" || ref($result->{"picture_settings"}) ne "HASH");
- my $cache=&lg_read_picture_settings_cache();
- $cache->{"picture_settings"}={} if(ref($cache->{"picture_settings"}) ne "HASH");
- foreach my $key (keys(%{$result->{"picture_settings"}})) {
-  $cache->{"picture_settings"}{$key}=$result->{"picture_settings"}{$key};
- }
- foreach my $key (qw(current_input generation_profile lg_generation virtual_picture_settings)) {
-  $cache->{$key}=$result->{$key} if(exists($result->{$key}));
- }
- # Capability envelope: only a read that covered at least as many controls
- # as the stored one may replace it; the runner's one-key mode reads must
- # not shrink what the Display card is later shown.
- my $width=(ref($result->{"supported_picture_keys"}) eq "ARRAY") ? scalar(@{$result->{"supported_picture_keys"}}) : 0;
- if($width >= ($cache->{"capability_width"}||0)) {
-  $cache->{"capability_width"}=$width;
-  foreach my $key (qw(supported_picture_keys unsupported_picture_keys setting_contracts logical_controls)) {
-   $cache->{$key}=$result->{$key} if(exists($result->{$key}));
-  }
- }
- $cache->{"updated_at"}=time();
- my $path=&lg_picture_settings_cache_path();
- my $tmp=$path.".".$$.".".(eval { threads->tid() } || 0).".tmp";
- return 0 if(!open(my $fh,">:raw",$tmp));
- print $fh JSON::PP->new->canonical->encode($cache);
- close($fh);
- chmod(0644,$tmp);
- return rename($tmp,$path) ? 1 : 0;
+sub lg_picture_cache_context (@) {
+ my ($result,$request)=@_;
+ $request={} if(ref($request) ne 'HASH');
+ my $settings=ref($result->{picture_settings}) eq 'HASH' ? $result->{picture_settings} : {};
+ my $mode=$settings->{pictureMode}||$result->{active_picture_mode}||'';
+ my $matrix=ref($result->{settings_matrix}) eq 'HASH' ? $result->{settings_matrix} : {};
+ $mode=$matrix->{observed_picture_mode}||$matrix->{context}{picture_mode}||'' if(!$mode && $matrix->{context_confirmed});
+ # Never use a requested selector as proof that an unrelated partial read
+ # belongs to that mode. Missing context is a cache miss, not a merge key.
+ return undef if(!$mode || $result->{virtual_picture_settings});
+ my $profile=$result->{generation_profile}{capability_profile_hash}||'';
+ my $input=$result->{current_input}||'';
+ return undef if(!$profile || !$input);
+ my $signal=$mode=~/^dolby/i ? 'dv' : $mode=~/^hdr/i ? 'hdr10' : 'sdr';
+ $signal='hlg' if($signal eq 'hdr10' && ($request->{signal_mode}||'') eq 'hlg');
+ return {ip=>$result->{ip}||'',profile=>$profile,input=>$input,mode=>lc($mode),signal=>$signal,
+  category=>$request->{category}||'picture'};
 }
 
-# While an automation run owns the TV, a picture-settings read that does not
-# carry the run's own token is the browser polling. Every such read spawned a
-# helper on the single TV lane (6 s under load, every ~30 s during a run) and
-# queued the runner's next call behind it. Answer from the last live read,
-# flagged, instead. The runner and the AutoCal workers send the token and
-# are never affected; an idle, paused or interrupted run does not gate.
+sub lg_remember_picture_settings (@) {
+ my ($json,$body)=@_;
+ my $result=eval { JSON::PP::decode_json($json||'') };
+ return 0 if(ref($result) ne 'HASH' || ($result->{status}||'') ne 'ok' || ref($result->{picture_settings}) ne 'HASH');
+ my $request=eval { JSON::PP::decode_json($body||'{}') };
+ my $context=&lg_picture_cache_context($result,$request);
+ # An unscoped/virtual response must not leave an old coherent snapshot
+ # labelled as current. Retain history but clear the current pointer.
+ my ($ok)=PGAutomation::with_lock(&lg_picture_settings_cache_path(),sub {
+  my ($store)=@_;$store={} if(ref($store) ne 'HASH' || ($store->{schema_version}||0)!=2);
+  $store->{schema_version}=2;$store->{contexts}||={};
+  if(!$context){delete $store->{current};return $store;}
+  my $id=PGAutomation::encode_json($context);
+  my $cache=$store->{contexts}{$id}||={context=>$context,picture_settings=>{},read_at=>{}};
+  foreach my $key (keys %{$result->{picture_settings}}) {
+   $cache->{picture_settings}{$key}=$result->{picture_settings}{$key};
+   $cache->{read_at}{$key}=time();
+  }
+  foreach my $key (qw(current_input generation_profile lg_generation virtual_picture_settings)) {
+   $cache->{$key}=$result->{$key} if(exists($result->{$key}));
+  }
+  my $width=ref($result->{supported_picture_keys}) eq 'ARRAY' ? scalar(@{$result->{supported_picture_keys}}) : 0;
+  if($width>=($cache->{capability_width}||0)) {
+   $cache->{capability_width}=$width;
+   foreach my $key (qw(supported_picture_keys unsupported_picture_keys setting_contracts logical_controls)) {
+    $cache->{$key}=$result->{$key} if(exists($result->{$key}));
+   }
+  }
+  $cache->{updated_at}=time();$store->{current}=$id;
+  my @old=sort {($store->{contexts}{$b}{updated_at}||0)<=>($store->{contexts}{$a}{updated_at}||0)} grep {$_ ne $id} keys %{$store->{contexts}};
+  delete @{$store->{contexts}}{@old[31..$#old]} if(@old>31);
+  return $store;
+ });
+ return $ok;
+}
+
+# Browser polling is read-only and cannot queue behind an active TV command.
+# Partial reads may merge only inside the same device/input/signal/mode/category.
 sub lg_browser_picture_settings_while_automation (@) {
  my ($body)=@_;
- my $execution_file=&lg_automation_execution_file();
- return "" if(!-f $execution_file);
- return "" if(!open(my $fh,"<:raw",$execution_file));
- my $raw="";
- { local $/; $raw=<$fh>//""; }
- close($fh);
- my $execution=eval { JSON::PP::decode_json($raw) };
- return "" if(ref($execution) ne "HASH");
- my $status=$execution->{"status"}||"";
- return "" if($status !~ /^(?:starting|running|completing|stopping)$/);
- my $payload=eval { JSON::PP::decode_json($body||"") };
- $payload={} if(ref($payload) ne "HASH");
- my $token=$payload->{"automation_token"}||"";
- return "" if($token ne "" && $token eq ($execution->{"token"}||""));
- my $cache=&lg_read_picture_settings_cache();
- my $known=(ref($cache->{"picture_settings"}) eq "HASH") ? $cache->{"picture_settings"} : {};
- my $keys=$payload->{"keys"};
- $keys=[sort keys(%{$known})] if(ref($keys) ne "ARRAY" || !@{$keys});
- my %settings=map { exists($known->{$_}) ? ($_=>$known->{$_}) : () } @{$keys};
- my $run_id=$execution->{"run_id"}||"";
- return &lg_encode_json({
-  status => "ok",
-  cached => &lg_json_true(),
-  automation_active => &lg_json_true(),
-  run_id => $run_id,
-  picture_settings => \%settings,
-  (map { exists($cache->{$_}) ? ($_=>$cache->{$_}) : () } qw(current_input generation_profile lg_generation virtual_picture_settings supported_picture_keys unsupported_picture_keys setting_contracts logical_controls)),
-  cached_at => $cache->{"updated_at"}||0,
-  message => "Values from the last read; the TV is in use by automation run ".($run_id ne "" ? $run_id : "in progress").".",
- });
+ my $stored=PGAutomation::read_state(&lg_automation_execution_file());
+ return '' if($stored->{state} eq 'missing');
+ return &lg_encode_json({status=>'error',error_code=>'automation-state-unreadable',message=>'Automation ownership is unreadable; live TV reads are deferred.'}) if($stored->{state} ne 'ok');
+ my $execution=$stored->{value};my $status=$execution->{status}||'';
+ return '' if($status!~/^(?:starting|running|completing|stopping)$/);
+ my $payload=eval {JSON::PP::decode_json($body||'{}')};$payload={} if(ref($payload) ne 'HASH');
+ my $token=$payload->{automation_token}||'';
+ return '' if($token ne '' && $token eq ($execution->{token}||''));
+ my $store=&lg_read_picture_settings_cache();
+ my $cache=($store->{schema_version}||0)==2 ? $store->{contexts}{$store->{current}||''} : undef;
+ my $context=ref($cache) eq 'HASH' ? $cache->{context}||{} : {};
+ my %request_fields=(picture_mode=>'mode',tv_input=>'input',signal_mode=>'signal',category=>'category');
+ my $matches=ref($cache) eq 'HASH';
+ for my $key (keys %request_fields) {
+  next if(!defined($payload->{$key}) || $payload->{$key} eq '');
+  $matches=0 if(lc($payload->{$key}) ne lc($context->{$request_fields{$key}}||''));
+ }
+ $cache={} if(!$matches);
+ my $known=$cache->{picture_settings}||{};
+ my $keys=$payload->{keys};$keys=[sort keys %$known] if(ref($keys) ne 'ARRAY' || !@$keys);
+ my %settings=map {exists($known->{$_}) ? ($_=>$known->{$_}) : ()} @$keys;
+ return &lg_encode_json({status=>'ok',cached=>&lg_json_true(),automation_active=>&lg_json_true(),
+  run_id=>$execution->{run_id}||'',picture_settings=>\%settings,cache_context_available=>&lg_json_bool($matches),
+  (map {exists($cache->{$_}) ? ($_=>$cache->{$_}) : ()} qw(current_input generation_profile lg_generation virtual_picture_settings supported_picture_keys unsupported_picture_keys setting_contracts logical_controls)),
+  cached_at=>$cache->{updated_at}||0,read_at=>$cache->{read_at}||{},
+  message=>$matches ? 'Values from the last read in this TV/input/signal/picture-mode context; automation owns the TV.'
+   : 'No coherent cached values for this context. Live reads are deferred while automation owns the TV.'});
 }
 
 sub lg_automation_guard_json (@) {
  my ($body)=@_;
  my $execution_file=&lg_automation_execution_file();
- return "" if(!-f $execution_file);
- my $raw="";
- return "" if(!open(my $fh,"<:raw",$execution_file));
- { local $/; $raw=<$fh>//""; }
- close($fh);
- my $execution=eval { JSON::PP::decode_json($raw) };
- return "" if(ref($execution) ne "HASH");
+ my $stored=PGAutomation::read_state($execution_file);
+ return "" if($stored->{state} eq 'missing');
+ return &lg_encode_json({status=>'error',error_code=>'automation-state-unreadable',
+  message=>'Automation ownership cannot be read; device writes are blocked until recovery state is restored'})
+  if($stored->{state} ne 'ok');
+ my $execution=$stored->{value};
  my $status=$execution->{status}||"";
+ return &lg_encode_json({status=>'error',error_code=>'automation-state-unreadable',message=>'Automation ownership has an invalid status'})
+  if($status !~ /^(?:starting|running|paused|stopping|completing|interrupted|complete(?:-with-warnings)?|failed|stopped)$/);
  return "" if($status ne "starting" && $status ne "running"
   && $status ne "paused" && $status ne "stopping" && $status ne "completing" && $status ne "interrupted");
  my $payload=eval { JSON::PP::decode_json($body||"") };
@@ -2841,6 +2859,8 @@ sub webui_meter_lg_dv_profile_start (@) {
  my ($body)=@_;
  my $automation_guard=&lg_automation_guard_json($body);
  return $automation_guard if($automation_guard ne "");
+ my $replayed=PGAutomation::worker_replay_json($body,$_meter_lg_dv_profile_file);
+ return $replayed if($replayed ne "");
  return '{"status":"error","message":"Dolby Vision profile payload required"}' if(!defined($body) || $body eq "" || $body!~/^\s*\{/);
  my $start_lock;
  return '{"status":"error","retryable":true,"message":"Unable to serialize Dolby Vision profile startup"}'
@@ -2906,13 +2926,8 @@ sub webui_meter_lg_dv_profile_start (@) {
   $t_im=255 if(!defined($t_im) || $t_im !~ /^-?\d+$/);
   $body=~s/\}\s*\z/,"patch_insert_patch_code":$p_code,"patch_insert_patch_input_max":$p_im,"patch_insert_time_code":$t_code,"patch_insert_time_input_max":$t_im}/;
  }
- if(open(my $fh,">",$_meter_lg_dv_profile_config_file)) {
-  print $fh $body;
-  close($fh);
-  chmod(0666,$_meter_lg_dv_profile_config_file);
- } else {
-  return '{"status":"error","message":"Unable to prepare the Dolby Vision profile config"}';
- }
+ return PGAutomation::encode_json({status=>"error",message=>"Unable to persist private worker configuration"})
+  if(!PGAutomation::write_atomic($_meter_lg_dv_profile_config_file,$body,0600));
  # Stamp the Full AutoCal run id (if any) into the initial status so the
  # browser's adoption probe can tell THIS run's worker from a foreign one
  # from the very first poll. The worker's own rewrites drop the key;
@@ -2922,7 +2937,9 @@ sub webui_meter_lg_dv_profile_start (@) {
  my $init=($_dv_run_id ne "")
   ? '{"status":"running","full_autocal_run_id":"'.$_dv_run_id.'","message":"Starting Dolby Vision profile measurement","steps":[]}'
   : '{"status":"running","message":"Starting Dolby Vision profile measurement","steps":[]}';
- if(open(my $sf,">",$_meter_lg_dv_profile_file)) { print $sf $init; close($sf); chmod(0666,$_meter_lg_dv_profile_file); }
+ $init=PGAutomation::seed_worker_state_json($init,$body);
+ return PGAutomation::encode_json({status=>"error",message=>"Unable to persist worker launch identity"})
+  if(!PGAutomation::write_atomic($_meter_lg_dv_profile_file,$init,0666));
  my $log_file=&webui_prepare_tmp_worker_log($_meter_lg_dv_profile_log_file,"meter_lg_dv_profile");
  my $cmd="setsid /usr/bin/perl /usr/bin/meter_lg_dv_profile.pl '$_meter_lg_dv_profile_config_file' '$_meter_lg_dv_profile_file' '$_meter_lg_dv_profile_stop_file' </dev/null >'$log_file' 2>&1 &";
  system($cmd);
@@ -3780,7 +3797,7 @@ sub webui_lg_api (@) {
   my $cached=&lg_browser_picture_settings_while_automation($body);
   return $cached if($cached ne "");
   my $json=&webui_lg_picture_settings($body);
-  &lg_remember_picture_settings($json);
+  &lg_remember_picture_settings($json,$body);
   return $json;
  }
  if($path eq "/api/lg/picture-settings/set" && $method eq "POST") {

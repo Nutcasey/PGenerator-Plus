@@ -82,7 +82,7 @@ write_run('owed',status=>'interrupted',active_item=>undef,active_stage=>'',clean
 main::webui_automation_boot_recover();
 is_deeply(\@spawned,['owed'],'an unverified earlier cleanup is retried at boot');
 
-# 7. Paused and finished runs are never touched.
+# 7. Safely paused and finished runs are never touched.
 @spawned=();
 write_run('paused',status=>'paused',active_item=>0,active_stage=>'greyscale-done');
 main::webui_automation_boot_recover();
@@ -100,4 +100,11 @@ like($cmd,qr{not reachable},'a TV that is off is left for a manual Retry cleanup
 like($cmd,qr{-X POST .*'/api/automation/runs/mid-job/control/stop'|-X POST .*'http://127\.0\.0\.1/api/automation/runs/mid-job/control/stop'},'then asks for the run to be stopped');
 like($cmd,qr{restart-cleanup\.log},'and logs under the run directory, not /tmp');
 is(main::webui_automation_shell_quote("it's"),q{'it'"'"'s'},'shell quoting survives an apostrophe');
+
+@spawned=();
+write_run('legacy-unsafe-pause',status=>'paused',active_item=>0,active_stage=>'greyscale-done',panel_protection=>{restore_pending=>1});
+main::webui_automation_boot_recover();
+is_deeply(\@spawned,['legacy-unsafe-pause'],'a legacy paused run with temporary protection changes is safely cleaned at boot');
+ok($read->('legacy-unsafe-pause')->{pause_park_pending},'cleanup preserves its intended paused outcome');
+is($read->('legacy-unsafe-pause')->{pending_terminal_status},'paused','safe pause remains resumable after recovery');
 done_testing();

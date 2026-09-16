@@ -16,6 +16,7 @@ BEGIN {
  $script_dir=~s{/[^/]+\z}{};
  unshift @INC,"$script_dir/../share/PGenerator";
 }
+use PGAutomation ();
 use PGSignalCode qw(signal_code_policy signal_percent_to_code);
 use PGLGCapabilities qw(lg_scoped_request_payload);
 
@@ -37,6 +38,7 @@ sub read_file {
 
 sub write_state {
  my (%state)=@_;
+ PGAutomation::stamp_worker_state(\%state,$config);
  # Automation reads this file directly. Retain ownership and the measured
  # phase's context rather than requiring the standalone status endpoint to
  # reconstruct them from a mutable config file.
@@ -48,10 +50,7 @@ sub write_state {
    $state{$key}=$config->{$key} if(defined($config->{$key}));
   }
  }
- open(my $fh,'>',$state_file) or return;
- print $fh $json->encode(\%state);
- close($fh);
- chmod(0666,$state_file);
+ return PGAutomation::write_json_atomic($state_file,\%state,0666);
 }
 
 sub cancelled { return -e $stop_file; }
