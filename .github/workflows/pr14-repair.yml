@@ -1,0 +1,29 @@
+name: PR14 safety repair workspace
+on:
+  push:
+    branches: [repair/pr14-safety-20260916]
+    paths: [.github/workflows/pr14-repair.yml, repair-input/**]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 620af0b43fb5a5552b2e3c9cc6a23b615c673674
+          persist-credentials: false
+      - name: Archive the exact reviewed tree
+        run: |
+          git rev-parse HEAD > /tmp/pr14-head.txt
+          git archive --format=tar HEAD | gzip > /tmp/pr14-source.tar.gz
+          sha256sum /tmp/pr14-source.tar.gz > /tmp/pr14-source.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr14-source-620af0b4
+          path: |
+            /tmp/pr14-source.tar.gz
+            /tmp/pr14-head.txt
+            /tmp/pr14-source.sha256
+          retention-days: 2
