@@ -1118,9 +1118,24 @@ sub lg_helper_run (@) {
  $request->{"helper_timeout"}=$timeout;
  my $payload=MIME::Base64::encode_base64(&lg_encode_json($request),"");
  my $cmd="timeout ${timeout}s env PGEN_LG_REQUEST_B64=".&lg_shell_quote($payload)." ".&lg_shell_quote($helper)." 2>&1";
- my $raw=`$cmd`;
- my $exit_status=$? >> 8;
+ my ($raw,$exit_status)=&lg_helper_exec($cmd);
  my $result=&lg_decode_json($raw);
+ # The G3 refuses new websocket connections for 20-30 s now and then,
+ # typically just after a picture-mode or signal change; three jobs died on
+ # it on 16 Sep 2026. A connect refusal means nothing reached the TV, so
+ # one more attempt after a short pause is safe for every action except
+ # pairing, where the operator is waiting on the TV prompt.
+ if(ref($result) eq "HASH" && ($result->{"status"}||"") eq "error"
+    && ($result->{"message"}||"") =~ /Unable to connect to LG WebOS TV/
+    && ($request->{"action"}||"") !~ /pair|register/i && !$request->{"no_connect_retry"}) {
+  &lg_helper_connect_pause();
+  ($raw,$exit_status)=&lg_helper_exec($cmd);
+  my $retried=&lg_decode_json($raw);
+  if(ref($retried) eq "HASH" && ($retried->{"status"}||"") ne "") {
+   $retried->{"connect_retried"}=1;
+   $result=$retried;
+  }
+ }
  if(ref($result) eq "HASH" && ($result->{"status"}||"") ne "") {
     return $result;
  }
@@ -1134,6 +1149,14 @@ sub lg_helper_run (@) {
  $raw="LG helper execution failed" if($raw eq "");
  return { status => "error", message => $raw };
 }
+
+sub lg_helper_exec (@) {
+ my ($cmd)=@_;
+ my $raw=`$cmd`;
+ return ($raw,$? >> 8);
+}
+
+sub lg_helper_connect_pause (@) { sleep(3); }
 
 sub lg_helper_timeout (@) {
  my $request=shift;

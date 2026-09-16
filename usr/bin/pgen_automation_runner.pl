@@ -3273,9 +3273,19 @@ sub _save_job_readiness {
 sub _require_job_ready {
     my ($number,$item,$scope)=@_;
     my $result=_api('POST','/api/automation/readiness',{items=>[$item],scope=>$scope});
+    my $errors=sub { [map {$_->{message}||$_->{name}} grep {!$_->{ok} && ($_->{level}||'error') eq 'error'} @{$_[0]{checks}||[]}] };
+    # Readiness runs its own TV conversations inside the daemon, so the
+    # runner's LG reconnect logic never sees a refusal that happens there.
+    # A readiness verdict is idempotent: reconnect and ask once more.
+    if (!$result->{ready} && grep { _lg_connection_failure({status=>'error',message=>$_}) } @{$errors->($result)}) {
+        _log_action('TV connection was refused during readiness checks; reconnecting and checking again');
+        if (_ensure_lg_connection(1)) {
+            $result=_api('POST','/api/automation/readiness',{items=>[$item],scope=>$scope});
+        }
+    }
     _save_job_readiness($number,$item,$result);
     if (!$result->{ready}) {
-        my @errors=map {$_->{message}||$_->{name}} grep {!$_->{ok} && ($_->{level}||'error') eq 'error'} @{$result->{checks}||[]};
+        my @errors=@{$errors->($result)};
         die(@errors ? join('; ',@errors) : $result->{message}||'TV/meter readiness failed');
     }
     return $result;
