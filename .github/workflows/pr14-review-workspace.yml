@@ -1,4 +1,4 @@
-name: PR14 review workspace
+name: PR14 hardening validation
 
 on:
   push:
@@ -6,22 +6,94 @@ on:
       - review/pr14-hardening-20260916
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  source-snapshot:
+  validate:
     runs-on: ubuntu-22.04
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Read review payload
+        uses: actions/checkout@v4
+        with:
+          path: review
+          persist-credentials: false
+      - name: Check out exact feature base
+        uses: actions/checkout@v4
         with:
           ref: 6b929baec0aed06ac3a385c74239b056eb8b9dc3
-          persist-credentials: false
-      - name: Export the exact reviewed source without Git credentials
-        run: git archive --format=tar --output="$RUNNER_TEMP/pr14-source.tar" HEAD
-      - uses: actions/upload-artifact@v4
+          path: candidate
+      - name: Verify and apply reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python3 - <<'PY'
+          import base64, hashlib, lzma, pathlib
+          encoded = ''.join(pathlib.Path(f'review/.review/pr14-hardening.{i}.b64').read_text() for i in (1, 2, 3))
+          patch = lzma.decompress(base64.b64decode(encoded, validate=True))
+          digest = hashlib.sha256(patch).hexdigest()
+          assert digest == 'cd5b6c26d0082130bc65ed66ab4176f86858a4f73160db97b7126f24cfd5ef29', digest
+          pathlib.Path('evidence/hardening.patch').write_bytes(patch)
+          pathlib.Path('evidence/patch.sha256').write_text(digest + '\n')
+          PY
+          test "$(git -C candidate rev-parse HEAD)" = 6b929baec0aed06ac3a385c74239b056eb8b9dc3
+          git -C candidate apply --index --whitespace=error ../evidence/hardening.patch
+          git -C candidate diff --cached --check
+          git -C candidate diff --cached --stat | tee evidence/changes.txt
+          git -C candidate write-tree > evidence/tested-tree.txt
+      - uses: actions/setup-node@v4
         with:
-          name: pr14-source-6b929bae
-          path: ${{ runner.temp }}/pr14-source.tar
-          retention-days: 1
+          node-version: '22'
+      - name: Install test dependencies
+        working-directory: candidate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libio-socket-ssl-perl
+          npm install --no-save --no-package-lock puppeteer@24.43.1
+      - name: Syntax checks
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in usr/bin/pgen_automation_runner.pl usr/bin/meter_lg_autocal.pl usr/bin/meter_lg_3d_autocal.pl usr/bin/meter_lg_dv_profile.pl usr/share/PGenerator/PGAutomation.pm usr/share/PGenerator/PGAutomationLaunch.pm usr/share/PGenerator/lg.pm usr/share/PGenerator/webui.pm; do
+            perl -Iusr/share/PGenerator -c "$file"
+          done
+          node --check usr/share/PGenerator/webui-automation.js
+          bash -n usr/bin/meter_series.sh
+      - name: Full Perl regression suite
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy prove t/ 2>&1 | tee ../evidence/perl-tests.log
+      - name: Sandboxed browser regressions
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for suite in automation_activity automation_progress automation_history automation_refresh automation_editor automation_settings_plan automation_review_fixes automation_dismiss_readiness automation_job_detail automation_calibration_observer automation_design_states; do
+            echo "=== $suite ===" | tee -a ../evidence/browser-tests.log
+            node "t/browser/$suite.cjs" 2>&1 | tee -a ../evidence/browser-tests.log
+          done
+      - name: Publish tested candidate on an isolated review branch
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --check
+          test "$(git write-tree)" = "$(cat ../evidence/tested-tree.txt)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Harden automation recovery and restore legacy C1 queue support'
+          git rev-parse HEAD > ../evidence/tested-commit.txt
+          git push origin HEAD:refs/heads/review/pr14-tested-hardening-20260916
+      - name: Retain test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr14-hardening-validation
+          path: evidence/
+          retention-days: 7
           if-no-files-found: error
