@@ -90,7 +90,18 @@ sub sync_pattern_bits_default (@) {
  # Standard Dolby Vision uses the 8-bit RGB tunnel, so BITS remains 8 even
  # though its shader consumes 12-bit source codes via SOURCE_MAX=4095.
  # Dedicated WebUI and Calman paths declare that source precision separately.
- if(int($pgenerator_conf{"dv_status"} || 0) == 1) {
+ #
+ # Test all three DV flags, not dv_status alone. Every other "is DV active"
+ # check in the tree (legacy_external_dv_active in daemon.pm, the transport
+ # guards in command.pm, idle_pattern_text in pattern.pm) treats is_ll_dovi and
+ # is_std_dovi as DV on their own. Keying only on dv_status left $bits_default
+ # at max_bpc for a session signalled through the transport flags, so any
+ # consumer that falls back to it -- a pattern with no explicit BITS -- got a
+ # 10 or 12 bpc tunnel under DV. webui_pattern_effective_bits() returns 8 for
+ # dv unconditionally; this is the same contract at the source.
+ if(int($pgenerator_conf{"dv_status"} || 0) == 1
+    || int($pgenerator_conf{"is_ll_dovi"} || 0) == 1
+    || int($pgenerator_conf{"is_std_dovi"} || 0) == 1) {
   $bits_default=8;
   return;
  }
