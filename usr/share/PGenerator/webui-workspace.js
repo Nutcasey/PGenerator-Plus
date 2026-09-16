@@ -15083,6 +15083,9 @@ function drawRGBChart(gs,allSteps,readingMap){
  // a box-zoom.
  const noiseFloor=meterRgbBalanceNoiseFloor();
  if(noiseFloor>0&&meterRgbBalanceFormula()==='perceptual'){
+  // chart.toX/toY take NORMALIZED [0,1] view coordinates (same convention as
+  // refY and the rPts/gPts/bPts points above), not data values — convert.
+  const toNorm=v=>(v-yMin)/(yMax-yMin);
   const zone=[];
   xSteps.forEach((step,idx)=>{
    const bal=balMap[step.ire];
@@ -15090,17 +15093,26 @@ function drawRGBChart(gs,allSteps,readingMap){
    // balance, so its noise threshold would annotate nothing.
    if(!bal||bal.noChroma) return;
    const gain=meterPerceptualRgbBalanceGain(step);
-   zone.push({x:meterGreyCategoryChartX(xSteps,idx),dev:noiseFloor*gain});
+   const dev=noiseFloor*gain;
+   zone.push({x:meterGreyCategoryChartX(xSteps,idx),hi:toNorm(100+dev),lo:toNorm(100-dev)});
   });
   if(zone.length>1){
    ctx.save();
    ctx.beginPath();ctx.rect(chart.pad.l,chart.pad.t,chart.w,chart.h);ctx.clip();
    ctx.beginPath();
-   zone.forEach((p,i)=>{const X=chart.toX(p.x),Y=chart.toY(100+p.dev);if(i)ctx.lineTo(X,Y);else ctx.moveTo(X,Y);});
-   for(let i=zone.length-1;i>=0;i--)ctx.lineTo(chart.toX(zone[i].x),chart.toY(100-zone[i].dev));
+   zone.forEach((p,i)=>{const X=chart.toX(p.x),Y=chart.toY(p.hi);if(i)ctx.lineTo(X,Y);else ctx.moveTo(X,Y);});
+   for(let i=zone.length-1;i>=0;i--)ctx.lineTo(chart.toX(zone[i].x),chart.toY(zone[i].lo));
    ctx.closePath();
-   ctx.fillStyle='rgba(160,190,255,0.10)';
+   ctx.fillStyle='rgba(160,190,255,0.14)';
    ctx.fill();
+   // Hairline edges so the band edge stays readable over the grid lines.
+   ctx.strokeStyle='rgba(160,190,255,0.35)';
+   ctx.lineWidth=1;
+   [ 'hi','lo' ].forEach(edge=>{
+    ctx.beginPath();
+    zone.forEach((p,i)=>{const X=chart.toX(p.x),Y=chart.toY(p[edge]);if(i)ctx.lineTo(X,Y);else ctx.moveTo(X,Y);});
+    ctx.stroke();
+   });
    ctx.restore();
   }
  }
