@@ -22,10 +22,19 @@ for entry in bundle['files']:
         lines[start:end] = replacement.splitlines(keepends=True)
     after = ''.join(lines).encode('utf-8')
     assert hashlib.sha256(after).hexdigest() == entry['after_sha256'], f'Repaired file checksum differs: {relative}'
+    if str(relative) == 't/browser/automation_review_fixes.cjs':
+        # Keep mocked server state consistent with UI fixtures during live polling.
+        text = after.decode('utf-8')
+        old = "if(url==='/api/automation/runs/current')return {status:'ok'};"
+        assert text.count(old) == 1 and text.count('pgAutomation.current={run:') == 3
+        text = text.replace(old, "if(url==='/api/automation/runs/current')return window.mockCurrent||{status:'ok'};")
+        text = text.replace('pgAutomation.current={run:', 'pgAutomation.current=window.mockCurrent={run:')
+        after = text.encode('utf-8')
+        assert hashlib.sha256(after).hexdigest() == 'a264dc3440fd32c68f7e5c1a8bfa74f5ef03a7fb413107715e9a29148f18eff8'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(after)
     paths.append(str(relative))
-    print(entry['after_sha256'], str(relative), flush=True)
+    print(hashlib.sha256(after).hexdigest(), str(relative), flush=True)
 subprocess.run(['git', 'add', '-N', '--', *paths], cwd=destination, check=True)
 changed = subprocess.check_output(['git', 'diff', '--name-only'], cwd=destination, text=True).splitlines()
 assert sorted(changed) == sorted(paths), 'Unexpected changed-file set'
