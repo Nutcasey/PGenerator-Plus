@@ -14719,7 +14719,96 @@ sub webui_automation_boot_recover (@) {
   &webui_automation_recover_run($run_id,"daemon-restarted","The daemon restarted while this automation run was active");
  }
  &webui_automation_reconcile_execution();
+ &webui_automation_schedule_restart_cleanup();
  return 1;
+}
+
+# A daemon restart or appliance reboot under a running batch used to leave
+# the run parked as "interrupted" with the TV in whatever signal, picture
+# mode and calibration state the runner had it in, until someone pressed
+# Stop. Now, once its HTTP server is up, the daemon finishes that cleanup
+# itself through the same Stop path an operator would use: the cleanup
+# runner closes calibration mode, restores the protective controls it had
+# changed, restores the saved output and picture modes when the restart hit
+# the queue check, releases ownership, and the run ends "stopped" so a fresh
+# batch can start. This deliberately trades Resume for a known TV state: a
+# batch cut by a reboot is ended, not resumed.
+#
+# It fires only for a run the restart itself interrupted while a job or the
+# queue check had the TV (or one already owed cleanup from an earlier
+# failed attempt). A run parked between jobs, paused, or blocked before it
+# touched the TV stays resumable and is not touched. The script probes the
+# TV before dialling it, so a TV that is off at boot is left alone instead
+# of blocking the TV lane, and there are at most two attempts per run
+# across boots; after that the run stays "cleanup required" for a manual
+# Retry cleanup, exactly as before.
+our $webui_automation_restart_cleanup_attempts=2;
+sub webui_automation_restart_cleanup_log (@) {
+ my ($run_id)=@_;
+ return PGAutomation::run_dir($run_id)."/restart-cleanup.log";
+}
+sub webui_automation_restart_cleanup_command (@) {
+ my ($run_id)=@_;
+ my $url="http://127.0.0.1/api/automation/runs/".$run_id."/control/stop";
+ my $log=&webui_automation_restart_cleanup_log($run_id);
+ my $q=\&webui_automation_shell_quote;
+ return "log=".$q->($log)."; "
+  ."for i in \$(seq 1 90); do curl -s -m 2 http://127.0.0.1/api/ping | grep -q ok && break; sleep 2; done; "
+  ."curl -s -m 2 http://127.0.0.1/api/ping | grep -q ok || { echo \"\$(date -u +%FT%TZ) daemon did not answer; cleanup left for Retry cleanup\" >>\"\$log\"; exit 0; }; "
+  ."ip=\$(curl -s -m 10 http://127.0.0.1/api/lg/status | sed -n 's/.*\"stored_ip\":\"\\([0-9.]*\\)\".*/\\1/p'); "
+  ."if [ -z \"\$ip\" ]; then echo \"\$(date -u +%FT%TZ) no paired TV address; cleanup left for Retry cleanup\" >>\"\$log\"; exit 0; fi; "
+  ."curl -s -m 5 -o /dev/null \"http://\$ip:3000/\"; rc=\$?; "
+  ."if [ \"\$rc\" = 7 ] || [ \"\$rc\" = 28 ] || [ \"\$rc\" = 6 ]; then echo \"\$(date -u +%FT%TZ) TV \$ip not reachable (curl \$rc); cleanup left for Retry cleanup\" >>\"\$log\"; exit 0; fi; "
+  ."echo \"\$(date -u +%FT%TZ) automatic cleanup after restart for ".$q->($run_id)."\" >>\"\$log\"; "
+  ."curl -s -m 600 -X POST -H 'Content-Type: application/json' -d '{}' ".$q->($url)." >>\"\$log\" 2>&1; echo >>\"\$log\"";
+}
+sub webui_automation_spawn_restart_cleanup (@) {
+ my ($run_id)=@_;
+ my $script=&webui_automation_restart_cleanup_command($run_id);
+ my $rc=system("setsid sh -c ".&webui_automation_shell_quote($script)." </dev/null >/dev/null 2>&1 &");
+ &log("Automation: unable to start the automatic cleanup for run $run_id (rc=$rc)",1) if($rc!=0 && defined(&log));
+ return $rc==0 ? 1 : 0;
+}
+# The restart interrupted a job or the queue check while the TV was in use.
+sub webui_automation_restart_left_tv_in_use (@) {
+ my ($run)=@_;
+ return 0 if(ref($run) ne "HASH");
+ return 1 if(&webui_automation_cleanup_required($run));
+ my $failure=ref($run->{failure}) eq "HASH" ? $run->{failure} : {};
+ return 0 if(($failure->{error_code}||"") ne "daemon-restarted");
+ my $active=$run->{active_item};
+ $active=$active->{item_number} if(ref($active) eq "HASH");
+ # active_item still names the last job while a finished batch is tidying
+ # up; a completed job has already left the TV in its end state.
+ return 1 if(defined($active) && $active=~/^\d+$/
+  && (ref($run->{items}) ne "ARRAY" || ref($run->{items}[$active]) ne "HASH" || ($run->{items}[$active]{status}||"") !~ /^complete/));
+ return 1 if(($run->{active_stage}||"") eq "queue-preflight");
+ return 0;
+}
+sub webui_automation_schedule_restart_cleanup (@) {
+ my $execution=&webui_automation_read_execution();
+ return 0 if(ref($execution) ne "HASH" || ($execution->{status}||"") ne "interrupted");
+ my $run_id=PGAutomation::safe_component($execution->{run_id}||"");
+ return 0 if($run_id eq "");
+ my $run=&webui_automation_read_run($run_id);
+ return 0 if(ref($run) ne "HASH" || ($run->{status}||"") ne "interrupted");
+ return 0 if(!&webui_automation_restart_left_tv_in_use($run));
+ return 0 if(PGAutomation::pid_is_live($run->{runner_pid}||0,"pgen_automation_runner.pl"));
+ if(($run->{restart_cleanup_attempts}||0)>=$webui_automation_restart_cleanup_attempts) {
+  &log("Automation: run $run_id still needs cleanup after $webui_automation_restart_cleanup_attempts automatic attempts; leaving it for Retry cleanup",1) if(defined(&log));
+  return 0;
+ }
+ my $now=PGAutomation::now();
+ my ($saved)=PGAutomation::with_lock(PGAutomation::run_dir($run_id)."/run.json",sub {
+  my ($current)=@_;
+  return undef if(ref($current) ne "HASH");
+  $current->{restart_cleanup_attempts}=($current->{restart_cleanup_attempts}||0)+1;
+  $current->{restart_cleanup_scheduled_at}=$now;
+  $current->{worker_status}={message=>"The generator restarted during this batch; restoring the TV automatically if it can be reached, otherwise use Retry cleanup"};
+  return $current;
+ });
+ return 0 if(!$saved);
+ return &webui_automation_spawn_restart_cleanup($run_id);
 }
 
 # Seconds a freshly launched runner is given to record its pid before an
