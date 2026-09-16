@@ -84,10 +84,17 @@ jobs:
         run: |
           set -euo pipefail
           cp repair-input/apply_edits.py /tmp/pr14-apply.py
+          tar -czf /tmp/pr14-repair-inputs.tar.gz repair-input
           cat repair-input/edits.part* | base64 -w0 > /tmp/pr14-edits.b64
           git checkout --detach 620af0b43fb5a5552b2e3c9cc6a23b615c673674
           python3 /tmp/pr14-apply.py /tmp/pr14-edits.b64 .
           git diff --check
+          git diff --binary > /tmp/pr14-verified.patch
+          cp .github/workflows/tests.yml /tmp/pr14-tests.yml
+          # The Actions token may publish source, but cannot write workflows.
+          # Keep that file unchanged here; the authorised connector publishes
+          # its separately verified update after reviewing this candidate.
+          git restore --source=HEAD -- .github/workflows/tests.yml
           git add -A
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -95,10 +102,15 @@ jobs:
           git push origin HEAD:refs/heads/repair/pr14-verified-20260916
           git rev-parse HEAD | tee /tmp/pr14-verified-commit.txt
           git show --stat --oneline HEAD | tee /tmp/pr14-verified-summary.txt
+          git archive --format=tar.gz HEAD > /tmp/pr14-verified-source.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: pr14-verified-candidate
           path: |
             /tmp/pr14-verified-commit.txt
             /tmp/pr14-verified-summary.txt
+            /tmp/pr14-verified-source.tar.gz
+            /tmp/pr14-verified.patch
+            /tmp/pr14-tests.yml
+            /tmp/pr14-repair-inputs.tar.gz
           retention-days: 7
