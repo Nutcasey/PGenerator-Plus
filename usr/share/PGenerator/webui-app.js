@@ -9873,6 +9873,18 @@ function meterUpdateNoiseFloorControlAvailability(){
  // touch screen, so show a × only when the floor is actually on.
  const clear=document.getElementById('meterRgbBalanceNoiseFloorClear');
  if(clear&&clear.style) clear.style.display=meterRgbBalanceNoiseFloor()>0?'':'none';
+ // Floor set but formula not Perceptual: the dimming says "inactive" but only
+ // the hover title says why, and touch screens never hover. Show an inline
+ // hint that doubles as a one-tap switch to the formula that uses the floor.
+ const hint=document.getElementById('meterRgbBalanceNoiseFloorHint');
+ if(hint&&hint.style) hint.style.display=(meterRgbBalanceNoiseFloor()>0&&!applies)?'':'none';
+}
+// One-tap repair for the inline hint: select Perceptual RGB bal and run the
+// shared change path, exactly as if the operator had used the formula picker.
+function meterSwitchToPerceptualRgbBalance(){
+ const sel=document.getElementById('meterRgbBalanceFormula');
+ if(sel) sel.value='perceptual';
+ meterOnRgbBalanceFormulaChange();
 }
 // Clear the noise floor back to Off and redraw the annotation (chart band,
 // hover tooltips, live bars) exactly like an operator edit would.
