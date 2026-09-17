@@ -360,7 +360,10 @@ padding:4px 24px 4px 8px;border-radius:6px;font-size:.74rem;outline:none;transit
  #meterNoiseFloorControl #meterRgbBalanceNoiseFloorHint{
   min-height:44px;min-width:44px
  }
- #meterNoiseFloorControl #meterRgbBalanceNoiseFloor{min-height:44px}
+ /* input measured 39px wide under coarse rules in a real render — also
+    below the 44px minimum; min-width grows the hit box, 6ch still fits
+    any valid value (up to "10"). */
+ #meterNoiseFloorControl #meterRgbBalanceNoiseFloor{min-height:44px;min-width:44px}
 }
 #meterSettingsGrid{display:flex;flex-wrap:wrap;gap:10px 12px;align-items:flex-start}
 #meterSettingsGrid .field{flex:0 0 auto;min-width:0}
