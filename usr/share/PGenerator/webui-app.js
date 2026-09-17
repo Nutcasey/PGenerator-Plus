@@ -9905,11 +9905,16 @@ function meterSwitchToPerceptualRgbBalance(){
 }
 // Apply a preset button value through the same path a typed edit takes:
 // write the field, commit-normalize, redraw, persist. Buttons must never
-// annotate a value the field does not show.
+// annotate a value the field does not show. Tapping the ACTIVE preset turns
+// the floor Off — the buttons carry aria-pressed, so they must behave like
+// real toggles (a pressed control that cannot be released breaks AT users'
+// expectations and the × button's job on touch screens).
 function meterApplyNoiseFloorPreset(value){
  const input=document.getElementById('meterRgbBalanceNoiseFloor');
  if(!input) return;
- input.value=String(value);
+ const v=Number(value);
+ if(Number.isFinite(v)&&v>0&&Math.abs(v-meterRgbBalanceNoiseFloor())<1e-9) input.value='';
+ else input.value=String(value);
  meterOnRgbBalanceNoiseFloorChange();
 }
 // Clear the noise floor back to Off and redraw the annotation (chart band,
