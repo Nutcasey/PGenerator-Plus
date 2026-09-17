@@ -372,7 +372,7 @@ function pgAutomationRenderSettingsEditor(){
     const options=meta.options.slice();if(value&&!options.includes(value))options.unshift(value);
     input='<select'+attrs+'>'+options.map(option=>'<option value="'+pgAutomationEscape(option)+'"'+(String(option)===value?' selected':'')+'>'+pgAutomationEscape(meta.labels?.[option]||option)+'</option>').join('')+'</select>';
    }else{
-    input='<input'+attrs+' type="'+(meta.type==='number'?'number':'text')+'"'+(meta.min!=null?' min="'+meta.min+'"':'')+(meta.max!=null?' max="'+meta.max+'"':'')+' value="'+pgAutomationEscape(value)+'">';
+    input='<input'+attrs+' type="'+(meta.type==='number'?'number':'text')+'"'+(meta.min!=null?' min="'+pgAutomationEscape(meta.min)+'"':'')+(meta.max!=null?' max="'+pgAutomationEscape(meta.max)+'"':'')+' value="'+pgAutomationEscape(value)+'">';
    }
    return '<div class="field"><label><input type="checkbox" data-pg-automation-pin="'+pgAutomationEscape(key)+'"'+(pin?' checked':'')+(unavailable?' disabled':'')+' onchange="pgAutomationTogglePin(this)"> '+pgAutomationEscape(meta.label||key)+'</label>'+input+(unavailable?'<span class="auto-muted">'+pgAutomationEscape(unavailable.reason)+'</span>':'')+'</div>';
   }).join('');
@@ -1070,7 +1070,7 @@ function pgAutomationReadoutsHtml(run,pre,completed,total,showRun){
  return '<div class="auto-readouts" aria-live="off">'+cell('clock',r.elapsed)+cell('stage-clock',r.stage)
   +'<div class="auto-readouts-left" data-automation-eta>'+cell('eta-job',r.job)+cell('eta-batch',r.batch)+'</div></div>'
   +'<div class="auto-progress-status auto-muted"><span class="auto-live" data-automation-live data-state="'+r.liveState+'">'+pgAutomationEscape(r.live)+'</span>'
-  +(showRun?'<span>'+completed+' of '+total+' jobs complete</span>':'')+'<span data-automation-eta-note>'+pgAutomationEscape(r.note)+'</span></div>';
+  +((showRun||pre)?'<span>'+completed+' of '+total+(run?.active_stage==='queue-preflight'||!showRun?' jobs checked':' jobs complete')+'</span>':'')+'<span data-automation-eta-note>'+pgAutomationEscape(r.note)+'</span></div>';
 }
 function pgAutomationProgressMeters(run,pre){
  const p=run?.progress;
@@ -1136,7 +1136,12 @@ function pgAutomationRenderProgress(){
   const latest=(pgAutomation.current?.activity?.entries||[]).filter(entry=>entry.source==='Runner').at(-1);
   message=(run.status==='running'?run.operation_progress?.message:null)||(run.active_stage==='queue-preflight'?latest?.message:null)||run.worker_status?.message||latest?.message||run.worker_status?.current_name||pgAutomationStageLabel(run.active_stage);
   message=String(message).replace(/^Job \d+ \| /,'');
-  if(run.active_stage==='queue-preflight')title='Checking the whole queue'+(index>=0?' · Job '+(index+1)+' of '+total:'');
+  if(run.active_stage==='queue-preflight'){
+   title='Checking the whole queue'+(index>=0?' · Job '+(index+1)+' of '+total:'');
+   const checked=run.preflight_result;
+   total=checked?.total_items??total;
+   completed=(checked?.jobs||[]).filter(item=>['checked','checked-limited'].includes(item.status)).length;
+  }
   if(run.failure){
    error=true;
    // The runner saves the same stage failure on both the job and the run.
@@ -1150,7 +1155,7 @@ function pgAutomationRenderProgress(){
   if(error&&!issues.length)issues.push({message:'Run '+run.status+'. Open Live Run or History for its saved checkpoints.'});
   if(run.heartbeat_age>60&&['running','starting','stopping','completing'].includes(run.status))issues.push({message:'No runner heartbeat for '+run.heartbeat_age+' seconds. Progress is unconfirmed; do not start a second run.'});
  }else if(pre){
-  total=pre.total_items||0;completed=(pre.items||[]).filter(item=>item.status==='checked').length;
+  total=pre.total_items||0;completed=(pre.items||[]).filter(item=>['checked','checked-limited'].includes(item.status)).length;
   title=pre.status==='checking'?'Checking '+(pre.active_item==null?'TV and meter':'job '+(Number(pre.active_item)+1)+' of '+total):pre.status==='ready'?'Last readiness check passed':pre.status==='started'?'Launching calibration runner':'Last readiness check did not pass';
   message=(pre.queue_name?pre.queue_name+' · ':'')+(pre.message||'')+(pre.elapsed_seconds!=null?' · '+pre.elapsed_seconds+' s elapsed':'');
   issues=pre.issues||[];error=['blocked','failed','interrupted'].includes(pre.status)||issues.some(issue=>issue.level==='error');

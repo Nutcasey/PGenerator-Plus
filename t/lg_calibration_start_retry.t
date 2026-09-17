@@ -106,4 +106,36 @@ for my $failure (
  is($result->{start_attempts},2,'C1 workflow recovers on acknowledged second attempt');
  is(main::lg_wire_pic_mode($result->{calibration_picture_mode}),'dolby_cinema_dark','C1 Cinema still opens Cinema Dark, not a different preset');
 }
+
+# The actual C1 wire contract is nested under lg_generation; DDC-only does
+# not itself grant an exception. An explicit read ban permits only the same
+# bounded, positively rejected CAL_START to be retried, never a timeout.
+{
+ local *main::lg_generation_info=sub {{model_name=>'OLED65C1PUB',platform_year=>2021,
+  platform_model=>'HE_DTV_W21O_AFABATAA',generation_id=>'lg2021_oled',
+  ddc_only_white_balance=>1,picture_mode_read_forbidden=>1}};
+ fixture($driver,$ok);$mode='';
+ my $result=main::lg_calibration_mode_workflow('test','key',1,1,'dolbyVisionCinema','dv');
+ is($result->{status},'ok','read-banned C1 recovers from an explicit transient driver rejection');
+ is($result->{start_attempts},2,'read-banned workflow actually retries');
+ is($reads,0,'known impossible mode read is not attempted or invented');
+ ok(!$result->{cal_start_tolerated},'read ban never converts a rejected start into success');
+ is(scalar @request_modes,2,'both attempts reach the calibration request');
+ is($request_modes[0],$request_modes[1],'retry retains the exact resolved calibration bank');
+ is(main::lg_wire_pic_mode($request_modes[0]),'dolby_cinema_dark','C1 Cinema uses the dark DV wire bank');
+ fixture($driver,$driver,$driver);$mode='';
+ $result=main::lg_calibration_mode_workflow('test','key',1,1,'dolbyVisionCinema','dv');
+ is($result->{status},'error','persistent read-banned rejection still fails');
+ is($result->{start_attempts},3,'read-banned retry remains bounded');
+ for my $failure ({type=>'error',error=>'timeout'}, {type=>'response',payload=>{}},
+   {type=>'error',payload=>{errorCode=>401,errorText=>'Permission denied'}}) {
+  fixture($failure);$mode='';
+  $result=main::lg_calibration_mode_workflow('test','key',1,1,'dolbyVisionCinema','dv');
+  is($result->{start_attempts},1,'read ban does not permit ambiguous or unauthorised retries');
+  is($result->{status},'error','unacknowledged operation remains a failure');
+ }
+}
+fixture($driver);$mode='';
+my (undef,$ddc_only_attempts)=main::lg_calibration_start_with_retry({},'dolby_cinema_dark',1,{ddc_only_white_balance=>1});
+is($ddc_only_attempts,1,'DDC-only alone is not a mode-read ban');
 done_testing();

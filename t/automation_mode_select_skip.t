@@ -77,4 +77,20 @@ is($calls[0]{path},'/api/lg/picture-settings','an automation item, which has the
   like($body,qr/ignore_calibration_picture_mode\s*=>\s*JSON::PP::true/,"$name ignores the saved calibration mode");
  }
 }
+
+for my $nested (0,1) {
+ my $response={status=>'ok',current_input=>'hdmi4',picture_settings=>{pictureMode=>'filmMaker'}};
+ if($nested) {$response->{lg_generation}={picture_mode_read_forbidden=>JSON::PP::true};}
+ else {$response->{picture_mode_read_forbidden}=JSON::PP::true;}
+ ok(!main::_mode_read_from_response($response)->{verified},"mode echo with nested=$nested read ban is never independent verification");
+}
+ok(main::_mode_read_from_response({status=>'ok',current_input=>'hdmi4',picture_settings=>{pictureMode=>'filmMaker'},
+ lg_generation=>{ddc_only_white_balance=>1}})->{verified},'DDC-only white balance is not implicitly a mode-read prohibition');
+{
+ local *main::_api=sub {{status=>'ok',current_input=>'hdmi4',picture_settings=>{pictureMode=>'filmMaker'},
+  supported_picture_keys=>[],lg_generation=>{picture_mode_read_forbidden=>JSON::PP::true},
+  generation_profile=>{capability_library_valid=>1,capability_platform_profile_applied=>1,picturemode_readable=>0}}};
+ my $check=main::_read_and_verify_settings(0,item(),'c1');
+ is($check->{verified},'unverifiable','settings verification recognises a nested ban without claiming the echo is verified');
+}
 done_testing();

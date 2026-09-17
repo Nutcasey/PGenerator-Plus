@@ -114,9 +114,12 @@ sub stamp_worker_state {
 
 sub seed_worker_state_json {
     my ($raw,$body)=@_;
-    my $state=decode_json($raw);my $id=worker_id(decode_json($body));
+    my $request=decode_json($body);
+    my $state=decode_json($raw);my $id=worker_id($request);
     return $raw if !$id || ref($state) ne 'HASH';
     $state->{automation_worker_id}=$id;
+    my $run_id=safe_component($request->{full_autocal_run_id});
+    $state->{full_autocal_run_id}=$run_id if $run_id ne '';
     $state->{worker_seeded_at}=time();
     return encode_json($state);
 }

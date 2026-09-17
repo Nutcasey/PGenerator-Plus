@@ -37,9 +37,12 @@ const source=fs.readFileSync(path.resolve(__dirname,'../../usr/share/PGenerator/
    check(!document.querySelector('#pgAutomationProgress').textContent.match(/\d+s\b|ago/),'nothing in the card counts seconds');
    run.active_stage='queue-preflight';run.active_item=null;delete run.operation_progress;
    run.progress={completed:.33,total:25,stage_completed:3,stage_total:9,unit:'checks'};
+   run.preflight_result={scope:'queue',total_items:2,jobs:[{status:'checked-limited'},{status:'checked-limited'}]};
    await pgAutomationPollLive();clearTimeout(pgAutomation.liveTimer);
    check(pgAutomationEl('Progress').textContent.includes('Checking the whole queue'),'initial checks have their own heading');
    check(pgAutomationEl('Progress').querySelector('progress').value===3,'initial checks are determinate before calibration');
+   check(pgAutomationEl('Progress').textContent.includes('2 of 2 jobs checked'),'limited preflight jobs count as checked, not calibration complete');
+   check(!pgAutomationEl('Progress').textContent.includes('0 of 2 jobs complete'),'preflight must not show calibration completion counts');
    // A rendering exception used to risk wedging polling=true forever.
    const render=pgAutomationRenderActivity;pgAutomationRenderActivity=()=>{throw Error('injected render failure')};
    await pgAutomationPollLive();clearTimeout(pgAutomation.liveTimer);
@@ -69,6 +72,13 @@ const source=fs.readFileSync(path.resolve(__dirname,'../../usr/share/PGenerator/
   assert.equal(await page.$eval('#pgAutomationProgress progress',e=>e.getAttribute('aria-label')),'3D LUT / Dolby Vision profiling');
   await page.evaluate(()=>{pgAutomation.current.run.status='paused';pgAutomationRenderProgress();pgAutomationTickProgress();});
   assert.match(await page.$eval('[data-automation-eta]',e=>e.textContent),/paused/);
+  await page.evaluate(()=>{
+   pgAutomation.current={preflight:{id:'limited-check',status:'ready',total_items:2,
+    items:[{status:'checked-limited'},{status:'checked'}],issues:[{level:'warning',message:'Picture mode needs manual confirmation'}]}};
+   pgAutomationRenderProgress();
+   if(!pgAutomationEl('Progress').textContent.includes('2 of 2 jobs checked'))throw Error('saved limited checks are counted');
+   if(!pgAutomationEl('Progress').textContent.includes('manual confirmation'))throw Error('limited verification warning is preserved');
+  });
   assert.deepEqual(errors,[]);
   console.log('PASS live log survives readiness, repeated polling, advancing check/setup/patch bars, ticking elapsed time, render-error recovery, responsive progress and pause state');
  }finally{await browser.close()}

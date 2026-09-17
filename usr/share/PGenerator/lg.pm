@@ -3568,6 +3568,43 @@ sub _lg_cal_hist_restore_1d {
  return &lg_encode_json($result);
 }
 
+# 3D LUT and DV profile archives use optional, caller-selected session
+# bookends. Unlike the old bare eval calls, an unacknowledged entry must never
+# reach the upload, and an upload exception must not skip requested cleanup.
+sub _lg_cal_hist_restore_with_bookends {
+ my ($context,$enable,$disable,$upload)=@_;
+ my ($result,$upload_attempted);
+ my $stage='calibration-entry';
+ my $ok=eval {
+  if($enable) {
+   my $on=&lg_decode_json(&webui_lg_calibration_mode(&lg_encode_json({%$context,enabled=>JSON::PP::true})));
+   die(($on->{message}||'TV did not acknowledge calibration entry')."\n")
+    if(($on->{status}||'') ne 'ok' || !$on->{calibration_mode});
+  }
+  $stage='archive-upload';$upload_attempted=1;
+  $result=&lg_decode_json($upload->());
+  die "Archive upload returned no valid result\n" if(!exists($result->{status}));
+  1;
+ };
+ if(!$ok) {
+  $result={status=>'error',error_code=>$stage eq 'calibration-entry'?'calibration-entry-unconfirmed':'archive-upload-failed',
+   failure_stage=>$stage,message=>'Archive restore failed: '.($@||'Unknown restore failure')};
+ }
+ # Honour explicitly held sessions after success, but do not strand a session
+ # this call tried to enter when entry/upload failed or its outcome is unknown.
+ if($disable || ($enable && (!$ok || ($result->{status}||'') ne 'ok'))) {
+  my $off=eval { &lg_decode_json(&webui_lg_calibration_mode(&lg_encode_json({%$context,enabled=>JSON::PP::false}))) };
+  my $exit_error=$@;
+  if(ref($off) ne 'HASH' || ($off->{status}||'') ne 'ok' || !exists($off->{calibration_mode}) || $off->{calibration_mode}) {
+   $result={%{$result||{}},status=>'error',upload_status=>$upload_attempted?($result->{status}||'unknown'):'not-attempted',
+    error_code=>'calibration-exit-unconfirmed',cleanup_required=>JSON::PP::true,
+    message=>($result->{message}||'Archive upload finished').'; calibration exit is unconfirmed. Use Exit Calibration before testing the TV.',
+    cleanup_detail=>$exit_error||(ref($off) eq 'HASH'?$off->{message}:undef)||'No exit acknowledgement'};
+  }
+ }
+ return &lg_encode_json($result);
+}
+
 sub webui_lg_calibration_history_reupload (@) {
  my ($body)=@_;
  my $payload=&lg_decode_json($body);
@@ -3613,11 +3650,6 @@ sub webui_lg_calibration_history_reupload (@) {
   my $meta=_lg_cal_hist_read_json_file("$_lg_cal_hist_luts/$base.json") || {};
   $picture_mode ||= $meta->{"picture_mode"} || "";
   $signal_mode ||= $meta->{"signal_mode"} || "";
-  if($enable_cal) {
-   my $on_body=sprintf('{"enabled":true,"picture_mode":"%s","signal_mode":"%s"}',
-    _lg_cal_hist_json_escape($picture_mode),_lg_cal_hist_json_escape($signal_mode));
-   eval { &webui_lg_calibration_mode($on_body); };
-  }
   my $up_body=&lg_encode_json({
    payload_path => $bin,
    picture_mode => $picture_mode,
@@ -3625,13 +3657,9 @@ sub webui_lg_calibration_history_reupload (@) {
    keep_calibration_mode => 1,
    helper_timeout => 120,
   });
-  my $result_json=&webui_lg_3d_lut_upload($up_body);
-  if($disable_cal) {
-   my $off_body=sprintf('{"enabled":false,"picture_mode":"%s","signal_mode":"%s"}',
-    _lg_cal_hist_json_escape($picture_mode),_lg_cal_hist_json_escape($signal_mode));
-   eval { &webui_lg_calibration_mode($off_body); };
-  }
-  return $result_json;
+  return _lg_cal_hist_restore_with_bookends(
+   {picture_mode=>$picture_mode,signal_mode=>$signal_mode},$enable_cal,$disable_cal,
+   sub { &webui_lg_3d_lut_upload($up_body) });
  }
 
  if($id =~ /^1dfile:([A-Za-z0-9._-]+)$/) {
@@ -3646,22 +3674,15 @@ sub webui_lg_calibration_history_reupload (@) {
   return &lg_encode_json({ status => "error", message => "DV archive not found" })
    unless(ref($meta) eq "HASH" && ref($meta->{"measurements"}) eq "HASH");
   $picture_mode ||= $meta->{"picture_mode"} || "dolbyVisionFilmMaker";
-  if($enable_cal) {
-   my $on_body=sprintf('{"enabled":true,"picture_mode":"%s","signal_mode":"dv"}',_lg_cal_hist_json_escape($picture_mode));
-   eval { &webui_lg_calibration_mode($on_body); };
-  }
   my $up_body=&lg_encode_json({
    measurements => $meta->{"measurements"},
    picture_mode => $picture_mode,
    signal_mode => "dv",
    keep_calibration_mode => 1,
   });
-  my $result_json=&webui_lg_dv_profile_upload($up_body);
-  if($disable_cal) {
-   my $off_body=sprintf('{"enabled":false,"picture_mode":"%s","signal_mode":"dv"}',_lg_cal_hist_json_escape($picture_mode));
-   eval { &webui_lg_calibration_mode($off_body); };
-  }
-  return $result_json;
+  return _lg_cal_hist_restore_with_bookends(
+   {picture_mode=>$picture_mode,signal_mode=>'dv'},$enable_cal,$disable_cal,
+   sub { &webui_lg_dv_profile_upload($up_body) });
  }
 
  if($id =~ /^dv:([A-Za-z0-9._-]+)$/) {
@@ -3680,22 +3701,15 @@ sub webui_lg_calibration_history_reupload (@) {
   my $cfg=(ref($manifest->{"config"}) eq "HASH") ? $manifest->{"config"} : {};
   $picture_mode ||= $cfg->{"picture_mode"} || "dolbyVisionFilmMaker";
   $signal_mode ||= "dv";
-  if($enable_cal) {
-   my $on_body=sprintf('{"enabled":true,"picture_mode":"%s","signal_mode":"dv"}',_lg_cal_hist_json_escape($picture_mode));
-   eval { &webui_lg_calibration_mode($on_body); };
-  }
   my $up_body=&lg_encode_json({
    measurements => $meas,
    picture_mode => $picture_mode,
    signal_mode => "dv",
    keep_calibration_mode => 1,
   });
-  my $result_json=&webui_lg_dv_profile_upload($up_body);
-  if($disable_cal) {
-   my $off_body=sprintf('{"enabled":false,"picture_mode":"%s","signal_mode":"dv"}',_lg_cal_hist_json_escape($picture_mode));
-   eval { &webui_lg_calibration_mode($off_body); };
-  }
-  return $result_json;
+  return _lg_cal_hist_restore_with_bookends(
+   {picture_mode=>$picture_mode,signal_mode=>'dv'},$enable_cal,$disable_cal,
+   sub { &webui_lg_dv_profile_upload($up_body) });
  }
 
  return &lg_encode_json({ status => "error", message => "Unknown history id" });

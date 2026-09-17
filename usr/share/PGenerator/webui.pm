@@ -24,7 +24,7 @@ use PGCalibrationMath qw(
 use PGSignalCode qw(
  signal_code_nominal_range signal_code_policy signal_percent_to_code
 );
-use PGLGCapabilities qw(lg_recipe lg_setting_contracts lg_setting_values_agree lg_normalize_setting_value lg_operation_contract lg_best_settings_plan lg_settings_selection_plan lg_calibration_mode_contract);
+use PGLGCapabilities qw(lg_recipe lg_setting_contracts lg_setting_values_agree lg_normalize_setting_value lg_operation_contract lg_best_settings_plan lg_settings_selection_plan lg_calibration_mode_contract lg_picture_mode_read_forbidden);
 use Fcntl qw(O_NONBLOCK O_WRONLY LOCK_EX LOCK_UN);
 use File::Path qw(make_path);
 use JSON::PP ();
@@ -14254,7 +14254,7 @@ sub webui_automation_readiness_data (@) {
    my $matrix_note=ref($contract) eq "HASH" && %{$contract}
     ? " (matrix: read $read_decision, write $write_decision)" : "";
    if($best->{active} && $key eq 'pictureMode' && !$supported{$key}
-      && ($read_response->{virtual_picture_settings} || $read_response->{picture_mode_read_forbidden})) {
+      && ($read_response->{virtual_picture_settings} || lg_picture_mode_read_forbidden($read_response))) {
     $check->(0,"item-$index-key-$key","TV matrix permits unavailable picture-mode readback; the selected mode is not independently verified. Confirm it in the TV menu.",$index,'warning');
     next;
    }
