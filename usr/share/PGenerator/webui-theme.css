@@ -347,6 +347,21 @@ pointer-events:none;color:var(--text);font-size:.82rem;line-height:1;white-space
 padding:4px 24px 4px 8px;border-radius:6px;font-size:.74rem;outline:none;transition:border .2s,box-shadow .2s;min-height:28px}
 .inline-select:focus{outline:none}
 .inline-select:focus-visible{border-color:var(--accent);box-shadow:0 0 0 1px rgba(91,127,255,.35)}
+/* Touch targets: the noise-floor control row (input, preset buttons, ×,
+   hint) is compact by design and every target is well under 44px, which
+   F-04 flags on the bench touch screens. Under a coarse pointer, grow the
+   interactive members of this row to 44px hit height/width. min-* is used
+   rather than a padding override because the compact padding lives in each
+   element's inline style; min-height wins the box regardless. Scoped to the
+   labeled row so no other compact control changes. */
+@media(pointer:coarse){
+ #meterNoiseFloorControl .noise-floor-preset,
+ #meterNoiseFloorControl #meterRgbBalanceNoiseFloorClear,
+ #meterNoiseFloorControl #meterRgbBalanceNoiseFloorHint{
+  min-height:44px;min-width:44px
+ }
+ #meterNoiseFloorControl #meterRgbBalanceNoiseFloor{min-height:44px}
+}
 #meterSettingsGrid{display:flex;flex-wrap:wrap;gap:10px 12px;align-items:flex-start}
 #meterSettingsGrid .field{flex:0 0 auto;min-width:0}
 #meterSettingsGrid > .field > label:first-child{min-height:18px;display:flex;align-items:center}
