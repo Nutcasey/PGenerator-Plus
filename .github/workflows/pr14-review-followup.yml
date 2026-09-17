@@ -1,0 +1,102 @@
+name: PR14 review follow-up validation
+
+on:
+  push:
+    branches:
+      - review/pr14-followup-20260917
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Read review payload
+        uses: actions/checkout@v4
+        with:
+          path: review
+          persist-credentials: false
+      - name: Check out exact feature base
+        uses: actions/checkout@v4
+        with:
+          ref: a787bbe5fab9e4a88e1300e34fca1967724b47cb
+          path: candidate
+      - name: Verify and apply reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence/browser
+          python3 - <<'PY'
+          import base64, hashlib, lzma, pathlib
+          encoded = ''.join(pathlib.Path(f'review/.review/pr14-followup.{i}.b64').read_text() for i in (1, 2, 3, 4))
+          patch = lzma.decompress(base64.b64decode(encoded, validate=True))
+          digest = hashlib.sha256(patch).hexdigest()
+          assert digest == '0f06d8a16bb290c361506cb976228b7c3d6260671037db6c92ed82b0344ca8e1', digest
+          pathlib.Path('evidence/followup.patch').write_bytes(patch)
+          pathlib.Path('evidence/patch.sha256').write_text(digest + '\n')
+          PY
+          test "$(git -C candidate rev-parse HEAD)" = a787bbe5fab9e4a88e1300e34fca1967724b47cb
+          git -C candidate apply --index --whitespace=error ../evidence/followup.patch
+          git -C candidate diff --cached --check
+          git -C candidate diff --cached --stat | tee evidence/changes.txt
+          git -C candidate write-tree > evidence/tested-tree.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install test dependencies
+        working-directory: candidate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libio-socket-ssl-perl
+          npm install --no-save --no-package-lock puppeteer@24.43.1
+      - name: Syntax checks
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in usr/bin/pgen_automation_runner.pl usr/sbin/pgenerator-lg usr/share/PGenerator/PGAutomation.pm usr/share/PGenerator/PGLGCapabilities.pm usr/share/PGenerator/lg.pm usr/share/PGenerator/webui.pm; do
+            perl -Iusr/share/PGenerator -c "$file"
+          done
+          node --check usr/share/PGenerator/webui-automation.js
+          node --check t/browser/automation_progress.cjs
+          bash -n usr/bin/meter_series.sh
+      - name: Full Perl regression suite
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy prove t/ 2>&1 | tee ../evidence/perl-tests.log
+      - name: Sandboxed browser regressions
+        working-directory: candidate
+        shell: bash
+        env:
+          PGEN_UI_EVIDENCE: ../evidence/browser
+        run: |
+          set -euo pipefail
+          for suite in automation_activity automation_progress automation_history automation_refresh automation_editor automation_settings_plan automation_review_fixes automation_dismiss_readiness automation_job_detail automation_calibration_observer automation_design_states; do
+            echo "=== $suite ===" | tee -a ../evidence/browser-tests.log
+            node "t/browser/$suite.cjs" 2>&1 | tee -a ../evidence/browser-tests.log
+          done
+      - name: Publish tested candidate on an isolated review branch
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --check
+          test "$(git write-tree)" = "$(cat ../evidence/tested-tree.txt)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Fix series worker hand-offs and validate legacy calibration archive restores'
+          git rev-parse HEAD > ../evidence/tested-commit.txt
+          git push origin HEAD:refs/heads/review/pr14-tested-followup-20260917
+      - name: Retain test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr14-followup-validation
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
