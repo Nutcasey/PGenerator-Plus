@@ -9886,6 +9886,15 @@ function meterSwitchToPerceptualRgbBalance(){
  if(sel) sel.value='perceptual';
  meterOnRgbBalanceFormulaChange();
 }
+// Apply a preset button value through the same path a typed edit takes:
+// write the field, commit-normalize, redraw, persist. Buttons must never
+// annotate a value the field does not show.
+function meterApplyNoiseFloorPreset(value){
+ const input=document.getElementById('meterRgbBalanceNoiseFloor');
+ if(!input) return;
+ input.value=String(value);
+ meterOnRgbBalanceNoiseFloorChange();
+}
 // Clear the noise floor back to Off and redraw the annotation (chart band,
 // hover tooltips, live bars) exactly like an operator edit would.
 function meterOnRgbBalanceNoiseFloorClear(){
