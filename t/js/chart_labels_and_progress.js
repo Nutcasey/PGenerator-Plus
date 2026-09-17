@@ -133,4 +133,22 @@ const ws=read('webui-workspace.js'),app=read('webui-app.js'),auto=read('webui-au
  ctx.pgAutomation.statusError='';
  assert.equal(label(null,{status:'blocked'}),'Blocked','a blocked preflight is not called paused');
 }
+// The colour stage names only what the job is doing: a 3D LUT profile on SDR,
+// HDR10 and HLG, a Dolby Vision profile on DV. Naming both read as if an SDR
+// run had wandered into Dolby Vision (seen live on the appliance).
+{
+ const ctx={pgAutomation:{current:{run:{active_item:0,items:[{signal_format:'sdr'}]}}}};
+ vm.createContext(ctx);
+ vm.runInContext(grab(auto,'pgAutomationStageSignal')+'\n'+grab(auto,'pgAutomationStageLabel')+';this.label=pgAutomationStageLabel;',ctx);
+ assert.equal(ctx.label('volume-done'),'3D LUT profiling','an SDR job calls the colour stage a 3D LUT profile');
+ assert.doesNotMatch(ctx.label('volume-done'),/Dolby/,'and never mentions Dolby Vision');
+ assert.equal(ctx.label('volume-settings-verified'),'Checking TV settings after the 3D LUT upload','the follow-up check names the 3D LUT too');
+ ctx.pgAutomation.current.run.items[0].signal_format='dv';
+ assert.equal(ctx.label('volume-done'),'Dolby Vision profiling','a Dolby Vision job names its own profile');
+ assert.match(ctx.label('volume-settings-verified'),/Dolby Vision profile upload/,'and its follow-up check');
+ assert.equal(ctx.label('volume-done','hdr10'),'3D LUT profiling','an explicit signal overrides the active job');
+ assert.equal(ctx.label('greyscale-done'),'Calibrating the 1D LUT','other stages are unchanged');
+ ctx.pgAutomation.current=null;
+ assert.equal(ctx.label('volume-done'),'3D LUT profiling','with no active job the neutral name is used');
+}
 console.log('PASS chart labels and progress: HDR clip excluded from gamma, EOTF tracking title, held-state labels');

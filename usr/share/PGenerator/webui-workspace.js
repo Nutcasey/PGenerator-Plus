@@ -9289,6 +9289,15 @@ function meterFullAutoCalComplete(touchupStatus,options){
  try{ fetchJSON('/api/lg/autocal/run/end',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(meterAutoCalRunEndPayload('complete')),_quiet:true,_timeoutMs:8000}).then(meterReportLgRunEnd).catch(function(){}); }catch(e){}
 }
 
+// A worker the automation runner owns is reported on the Automation card and
+// is driven without an operator. The manual AutoCal UI must not adopt it: an
+// unattended run cannot answer a completion modal, and nothing should cover
+// the screen mid-batch. Seen live on 17 September 2026, when an SDR job's 3D
+// LUT solve opened the manual download prompt over a running batch.
+function meterStatusAutomationOwned(status){
+ return !!(status&&(status.automation_worker_id||status.automation_token));
+}
+
 async function meterPollAutoCal(options){
 	 if(meterAutoCalPollInFlight) return;
 	 if(meterFullAutoCalReportPhaseActive()){
@@ -9487,7 +9496,7 @@ let completeStatus=r;
 	    meterAutoCalPendingConfig=null;
 	    meterAutoCalSetOverlay(false,r);
 	   }
-	   if(notify&&!(r.status==='complete'&&meterAutoCalStopRequested)) toast(r.status==='complete'?'LG Auto Cal complete':r.status==='error'?'LG Auto Cal error: '+(r.message||'process failed'):r.status==='cancelled'?'LG Auto Cal stopped':'LG Auto Cal idle',r.status==='error');
+	   if(notify&&!meterStatusAutomationOwned(r)&&!(r.status==='complete'&&meterAutoCalStopRequested)) toast(r.status==='complete'?'LG Auto Cal complete':r.status==='error'?'LG Auto Cal error: '+(r.message||'process failed'):r.status==='cancelled'?'LG Auto Cal stopped':'LG Auto Cal idle',r.status==='error');
 	  }
  }catch(e){
   const backendGreyscaleActive=!!(meterAutoCalPolling||meterAutoCalPhase==='running');
@@ -11179,18 +11188,20 @@ async function meterPollLg3dAutoCal(options){
   meterLg3dAutoCalPollErrors=0;
   const full3dActive=full3dPhase||meterFullAutoCalEnsureStatusPhase(r,'3d-lut');
   const retryWaiting=!!(r.status==='error'&&r.upload_retry_available);
-  const localActive=!!(meterLg3dAutoCalRunning||meterActionPending||meterLg3dAutoCalPolling||full3dActive||retryWaiting);
+  const automationOwned=meterStatusAutomationOwned(r);
+  const localActive=!automationOwned&&!!(meterLg3dAutoCalRunning||meterActionPending||meterLg3dAutoCalPolling||full3dActive||retryWaiting);
   if(initial&&r.status!=='running'&&!localActive){
    meterLg3dAutoCalRunning=false;
    return;
   }
   if(r.status==='running'||localActive) meterLg3dApplyStatus(r);
-  if(r.status==='running'&&!meterLg3dAutoCalPolling){
+  if(r.status==='running'&&!meterLg3dAutoCalPolling&&!automationOwned){
    meterLg3dAutoCalPolling=setInterval(meterPollLg3dAutoCal,1500);
   }
   // Standalone AutoCal: while the cube is generating, show a spinner modal
   // that tracks worker messages (then hand off to the solved download modal).
-  if(!full3dActive&&r.status==='running'){
+  // An automation run's solve is reported on the Automation card instead.
+  if(!full3dActive&&!automationOwned&&r.status==='running'){
    const phase=String(r.phase||'').toLowerCase();
    if(phase==='building'||phase==='solving'){
     try{

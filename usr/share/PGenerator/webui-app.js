@@ -521,7 +521,15 @@ function webuiRememberOutputProfile(signalMode,values){
  if(!/^(?:sdr|hdr10|hlg)$/.test(sm)||!values) return;
  const profile={};
  ['max_bpc','color_format','rgb_quant_range','colorimetry'].forEach(key=>{if(values[key]!=null&&String(values[key])!=='')profile[key]=String(values[key]);});
- try{ localStorage.setItem(webuiOutputProfileKey(sm),JSON.stringify(profile)); }catch(e){}
+ const body=JSON.stringify(profile);
+ try{ localStorage.setItem(webuiOutputProfileKey(sm),body); return; }
+ catch(e){
+  // A full quota (disposable series data, usually) must not silently lose the
+  // operator's transport profile: reclaim once and retry, as draft saving does.
+  if(typeof meterStorageQuotaError!=='function'||!meterStorageQuotaError(e)) return;
+  if(typeof meterSeriesCacheReclaimSpace!=='function'||!meterSeriesCacheReclaimSpace([])) return;
+  try{ localStorage.setItem(webuiOutputProfileKey(sm),body); }catch(err){}
+ }
 }
 function webuiRememberedOutputProfile(signalMode){
  try{
@@ -4063,9 +4071,33 @@ let meterSeriesCachePersistSuspended=0;
 // least valuable series data first: caches left by earlier appliance boots,
 // then the oldest half of this boot's entries. The active series and any
 // entry about to be written are never evicted. Returns how many were removed.
+// Version 1 kept every series for a boot in one blob. Those blobs are merged
+// into the v2 store on the first boot-id read and are dead weight afterwards,
+// but they are megabytes each, so on an older browser they can hold the whole
+// quota and make every later write fail (P6).
+function meterLegacySeriesCacheKeys(){
+ const keys=[];
+ try{
+  for(let i=localStorage.length-1;i>=0;i--){
+   const key=localStorage.key(i);
+   if(!key||key.indexOf('pgen.meter.')!==0||key.indexOf('.v2.')>=0) continue;
+   if(key==='pgen.meter.seriesCache'||/\.seriesCache$/.test(key)) keys.push(key);
+  }
+ }catch(e){}
+ return keys;
+}
+function meterDropLegacySeriesCaches(){
+ let removed=0;
+ meterLegacySeriesCacheKeys().forEach(key=>{try{localStorage.removeItem(key);removed++;}catch(e){}});
+ return removed;
+}
 function meterSeriesCacheReclaimSpace(keep){
  let removed=0;
  try{
+  // Superseded v1 blobs go first: they are never read again once migration has
+  // run, and they are the largest thing in storage on an older browser.
+  removed+=meterDropLegacySeriesCaches();
+  if(removed) return removed;
   const protectedKeys=new Set([...(keep||[]),meterActiveSeriesKey].filter(Boolean));
   const current=meterSeriesCacheKey('');
   // Until the appliance boot is known every stored scope might be this boot's,
@@ -4254,7 +4286,8 @@ function meterSetSeriesCacheBootId(bootId){
   mergeCache(readCache('pgen.meter.seriesCache'));
   mergeCache(memoryCache);
   localStorage.setItem(markerKey,bootId);
-  if(Object.keys(meterSeriesCache).length>0){
+  const migrated=Object.keys(meterSeriesCache).length>0;
+  if(migrated){
    Object.keys(meterSeriesCache).forEach(key=>meterSeriesCacheDirtyKeys.add(key));
    meterPersistSeriesCache();
    const lastCandidates=[
@@ -4273,6 +4306,10 @@ function meterSetSeriesCacheBootId(bootId){
    if(keepKey) localStorage.setItem(meterSeriesCacheKey('lastSeriesKey'),keepKey);
    else localStorage.removeItem(meterSeriesCacheKey('lastSeriesKey'));
   }
+  // The v1 blobs have now been read into the live cache (or held nothing worth
+  // keeping). Drop them unless a write is still pending, so megabytes of dead
+  // storage stop starving queue drafts and output profiles (P6).
+  if(meterSeriesCacheDirtyKeys.size===0) meterDropLegacySeriesCaches();
  }catch(e){}
 }
 

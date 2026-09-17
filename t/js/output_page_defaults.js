@@ -32,6 +32,20 @@ function page(){
  assert.equal(els.eotf.value,'0','and SDR gamma');
 }
 {
+ // A full quota used to lose the profile silently, so a later switch back fell
+ // to the fixed 8-bit baseline (seen live on the appliance).
+ const {els,ctx,store}=page();
+ let full=true,reclaimed=0;
+ ctx.localStorage.setItem=(k,v)=>{if(full){const e=new Error('quota');e.name='QuotaExceededError';throw e;}store.set(k,String(v));};
+ ctx.meterStorageQuotaError=e=>!!e&&e.name==='QuotaExceededError';
+ ctx.meterSeriesCacheReclaimSpace=()=>{reclaimed++;full=false;return 1;};
+ ctx.webuiRememberOutputProfile('sdr',{max_bpc:'10',color_format:'1',rgb_quant_range:'1',colorimetry:'2'});
+ assert.equal(reclaimed,1,'a full quota reclaims disposable series space once');
+ assert.ok(ctx.webuiRememberedOutputProfile('sdr'),'and the profile is stored on the retry');
+ ctx.changeSignal('hdr10');ctx.changeSignal('sdr');
+ assert.equal(els.max_bpc.value,'10','so switching back still restores the operator profile');
+}
+{
  const {els,ctx}=page();
  ctx.webuiRememberOutputProfile('sdr',{max_bpc:'10',color_format:'0',rgb_quant_range:'2',colorimetry:'2'});
  ctx.changeSignal('sdr');

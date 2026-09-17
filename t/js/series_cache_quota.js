@@ -22,7 +22,7 @@ function context(limit){
   meterSeriesCacheNormalizeEntry:s=>({schema:2,body:s.body}),meterSeriesSnapshotCanRestore:()=>true};
  vm.createContext(ctx);
  vm.runInContext('let meterSeriesCacheDirtyKeys=new Set();let meterSeriesCachePersistSuspended=0;'
-  +['meterSeriesCacheKey','meterSeriesCacheScopeKey','meterSeriesCacheEntryStorageKey','meterSeriesCacheReclaimSpace','meterStorageQuotaError','meterPersistSeriesCache'].map(n=>grab(app,n)).join('\n')
+  +['meterSeriesCacheKey','meterSeriesCacheScopeKey','meterSeriesCacheEntryStorageKey','meterLegacySeriesCacheKeys','meterDropLegacySeriesCaches','meterSeriesCacheReclaimSpace','meterStorageQuotaError','meterPersistSeriesCache'].map(n=>grab(app,n)).join('\n')
   +';this.dirty=()=>meterSeriesCacheDirtyKeys;this.suspend=n=>{meterSeriesCachePersistSuspended=n;};',ctx);
  return ctx;
 }
@@ -48,6 +48,56 @@ const big='x'.repeat(900);
  assert.ok(ctx.localStorage.getItem('pgen.meter.boot2.seriesCache.v2.entry.c'),'then the pending entries are written');
  assert.equal(ctx.dirty().size,0,'and nothing is left pending');
  assert.equal(ctx.localStorage.getItem('pgen.automation.queueDraft'),'{"queue":1}','non-series data is never evicted');
+}
+{
+ // Round 5 (live finding): version-1 blobs are merged into the v2 store on the
+ // first boot-id read and never read again, but they are megabytes each and
+ // used to hold the whole quota, so every later write failed.
+ const ctx=context(4000);
+ ctx.localStorage.setItem('pgen.meter.boot1.seriesCache',big+big);
+ ctx.localStorage.setItem('pgen.meter.seriesCache','{"legacy":1}');
+ ctx.localStorage.setItem('pgen.meter.boot2.seriesCache.v2.entry.keep',big);
+ ctx.localStorage.setItem('pgen.automation.queueDraft','{"queue":1}');
+ assert.equal(ctx.meterLegacySeriesCacheKeys().length,2,'both version-1 blobs are recognised');
+ assert.equal(ctx.meterSeriesCacheReclaimSpace([]),2,'a full quota drops the superseded version-1 blobs first');
+ assert.equal(ctx.localStorage.getItem('pgen.meter.boot1.seriesCache'),null,'the scoped version-1 blob is gone');
+ assert.equal(ctx.localStorage.getItem('pgen.meter.seriesCache'),null,'the unscoped version-1 blob is gone');
+ assert.ok(ctx.localStorage.getItem('pgen.meter.boot2.seriesCache.v2.entry.keep'),'current series data is kept');
+ assert.equal(ctx.localStorage.getItem('pgen.automation.queueDraft'),'{"queue":1}','non-series data is untouched');
+}
+{
+ // The blobs are dropped as soon as migration has persisted everything, so a
+ // browser that never hits the quota also stops carrying them.
+ const ctx=context(100000);
+ vm.runInContext(`let meterSeriesCacheBootId='';meterSeriesCache={};
+  const meterReadSeriesCacheV2=()=>null;
+  const meterSeriesKeyIsIccWorkflow=()=>false;
+  const meterSeriesSnapshotContainsIccWorkflow=()=>false;
+  const meterSeriesSnapshotWithoutModeVariants=s=>s;
+  const meterSeriesSnapshotSignalMode=()=>'sdr';
+  const meterSeriesSnapshotForMode=()=>null;
+  const meterStoreSeriesSnapshot=(key,snap)=>{meterSeriesCache[key]=snap;};
+  const meterUpdateSeriesCacheUi=()=>{};
+  let persisted=0;
+  meterPersistSeriesCache=()=>{persisted++;meterSeriesCacheDirtyKeys.clear();};
+  ${grab(app,'meterSetSeriesCacheBootId')}
+  this.setBoot=meterSetSeriesCacheBootId;this.cacheKeys=()=>Object.keys(meterSeriesCache);this.persists=()=>persisted;`,ctx);
+ ctx.localStorage.setItem('pgen.meter.boot9.seriesCache',JSON.stringify({old:{body:'x',updated_at:1}}));
+ ctx.localStorage.setItem('pgen.meter.seriesCache',JSON.stringify({older:{body:'y',updated_at:1}}));
+ ctx.setBoot('boot9');
+ assert.equal(ctx.cacheKeys().sort().join(','),'old,older','both version-1 blobs are migrated into the live cache');
+ assert.equal(ctx.persists(),1,'and written to the v2 store');
+ assert.equal(ctx.localStorage.getItem('pgen.meter.boot9.seriesCache'),null,'the scoped blob is dropped after migration');
+ assert.equal(ctx.localStorage.getItem('pgen.meter.seriesCache'),null,'and the unscoped one too');
+ // Live case: the blobs hold only entries the merge discards, so nothing is
+ // migrated. They are still dead weight and must go.
+ ctx.localStorage.setItem('pgen.meter.boot9.seriesCache',JSON.stringify({}));
+ ctx.localStorage.setItem('pgen.meter.seriesCache',JSON.stringify({}));
+ vm.runInContext('meterSeriesCacheBootId="";meterSeriesCache={};',ctx);
+ ctx.setBoot('boot9');
+ assert.equal(ctx.cacheKeys().length,0,'nothing survives the merge');
+ assert.equal(ctx.localStorage.getItem('pgen.meter.boot9.seriesCache'),null,'the empty version-1 blob is dropped anyway');
+ assert.equal(ctx.localStorage.getItem('pgen.meter.seriesCache'),null,'and so is the unscoped one');
 }
 {
  // Round 3: before the boot is known, another scope may be this boot's data.

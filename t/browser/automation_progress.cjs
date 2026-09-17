@@ -69,7 +69,13 @@ const source=fs.readFileSync(path.resolve(__dirname,'../../usr/share/PGenerator/
    if(evidence)await (await page.$('#pgAutomationProgress')).screenshot({path:path.join(evidence,`progress-${width}.png`)});
   }
   await page.emulateMediaFeatures([{name:'prefers-reduced-motion',value:'reduce'}]);
-  assert.equal(await page.$eval('#pgAutomationProgress progress',e=>e.getAttribute('aria-label')),'3D LUT / Dolby Vision profiling');
+  // The colour stage is named for the job's own signal, so an SDR or HDR job
+  // never reads as Dolby Vision work.
+  assert.equal(await page.$eval('#pgAutomationProgress progress',e=>e.getAttribute('aria-label')),'3D LUT profiling');
+  assert.equal(await page.evaluate(()=>{const run=pgAutomation.current.run;const was=run.items[Number(run.active_item)].signal_format;
+   run.items[Number(run.active_item)].signal_format='dv';pgAutomationRenderProgress();
+   const label=document.querySelector('#pgAutomationProgress progress').getAttribute('aria-label');
+   run.items[Number(run.active_item)].signal_format=was;pgAutomationRenderProgress();return label;}),'Dolby Vision profiling','a Dolby Vision job names its own profile');
   await page.evaluate(()=>{pgAutomation.current.run.status='paused';pgAutomationRenderProgress();pgAutomationTickProgress();});
   assert.match(await page.$eval('[data-automation-eta]',e=>e.textContent),/paused/);
   await page.evaluate(()=>{

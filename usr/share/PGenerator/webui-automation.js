@@ -908,10 +908,22 @@ async function pgAutomationDeleteQueue(){
  if(!queue||!await pgAutomationConfirm('Delete saved queue “'+pgAutomationQueueName(queue.name)+'”? Run history remains.','Delete queue'))return;
  try{await pgAutomationRequest('queues/delete',{id:queue.id});if(pgAutomation.queue.id===queue.id){delete pgAutomation.queue.id;pgAutomation.selectedQueue='';pgAutomation.loadedQueueSnapshot='';pgAutomationSaveDraft();}await pgAutomationRefresh();}catch(e){pgAutomationNotice(e.message,true);}
 }
-function pgAutomationStageLabel(stage){
+// The colour stage is a 3D LUT profile on every signal except Dolby Vision,
+// where it is a DV profile instead. Naming both on an SDR job reads as if the
+// run had wandered into Dolby Vision, so the label follows the job's signal.
+function pgAutomationStageSignal(signal){
+ if(signal)return String(signal).toLowerCase();
+ const run=pgAutomation.current?.run;
+ const index=run&&run.active_item!=null?Number(run.active_item):null;
+ const item=(index!=null&&Array.isArray(run.items))?run.items[index]:null;
+ return String(item?.signal_format||'').toLowerCase();
+}
+function pgAutomationStageLabel(stage,signal){
+ const dolbyVision=pgAutomationStageSignal(signal)==='dv';
  if(stage==='greyscale-settings-verified')return 'Checking TV settings after 1D calibration';
- if(stage==='volume-settings-verified')return 'Checking TV settings after profile / LUT upload';
- return {'queue-preflight':'Initial checks','greyscale-settings-verified':'Verifying 1D LUT settings','volume-settings-verified':'Verifying color calibration settings','readiness':'Checking TV and meter','job-readiness':'Checking this job’s devices and picture mode','item-started':'Checking this job before measurements','tv-setup-verified':'Applying TV settings','pre-readings-done':'Before readings','reset-and-reapply-verified':'Resetting calibration and reapplying settings','panel-light-settled':'Setting 100% white luminance','greyscale-done':'Calibrating the 1D LUT','volume-done':'3D LUT / Dolby Vision profiling','session-closed':'Closing calibration','apply-all-done':'Applying calibration to all inputs','post-readings-done':'After readings','item-complete':'Saving job results'}[stage]||String(stage||'').replace(/-/g,' ');
+ if(stage==='volume-settings-verified')return dolbyVision?'Checking TV settings after the Dolby Vision profile upload':'Checking TV settings after the 3D LUT upload';
+ if(stage==='volume-done')return dolbyVision?'Dolby Vision profiling':'3D LUT profiling';
+ return {'queue-preflight':'Initial checks','readiness':'Checking TV and meter','job-readiness':'Checking this job’s devices and picture mode','item-started':'Checking this job before measurements','tv-setup-verified':'Applying TV settings','pre-readings-done':'Before readings','reset-and-reapply-verified':'Resetting calibration and reapplying settings','panel-light-settled':'Setting 100% white luminance','greyscale-done':'Calibrating the 1D LUT','session-closed':'Closing calibration','apply-all-done':'Applying calibration to all inputs','post-readings-done':'After readings','item-complete':'Saving job results'}[stage]||String(stage||'').replace(/-/g,' ');
 }
 function pgAutomationIssueText(issue){
  const raw=typeof issue==='string'?issue:issue?.message||'';
@@ -922,7 +934,8 @@ function pgAutomationIssueText(issue){
  }
  let message=issue.message||issue.code||issue.name;
  if(/-key-/.test(issue.name||'')&&/is not supported by the LG TV/.test(message||''))message=message.replace(/ \(matrix:.*?\)/g,'').replace(/: .+?\. Configure/,'. Configure');
- return (issue.item_number!=null?'Job '+(Number(issue.item_number)+1)+': ':'')+[pgAutomationStageLabel(issue.stage),message].filter(Boolean).join(' · ');
+ const issueSignal=issue.signal_format||(issue.item_number!=null?(pgAutomation.current?.run?.items||[])[Number(issue.item_number)]?.signal_format:'');
+ return (issue.item_number!=null?'Job '+(Number(issue.item_number)+1)+': ':'')+[pgAutomationStageLabel(issue.stage,issueSignal),message].filter(Boolean).join(' · ');
 }
 function pgAutomationFailureChecks(item,index){
  const checks=item?.failure?.stage==='job-readiness'?(item.readiness?.checks||[]).filter(check=>!check.ok&&check.level!=='warning'):[];
