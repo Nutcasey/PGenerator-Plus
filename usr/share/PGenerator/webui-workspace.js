@@ -12541,7 +12541,11 @@ async function meterPollSeries(){
    try{ meterSeriesBeepPlay(); }catch(e){}
   }
   meterSeriesBeepArmed=false;
-  toast(r.status==='complete'?'Series complete!':r.status==='error'?'Series error: '+(r.current_name||'process died'):'Series cancelled');
+  // Same reasoning as the beep above: a series the automation runner drives is
+  // not this operator's read, and its ending is reported on the Automation
+  // card. Announcing it here puts a manual pop-up on screen mid-run.
+  if(!meterStatusAutomationOwned(r)&&!document.body.classList.contains('pg-automation-calibration-observer'))
+   toast(r.status==='complete'?'Series complete!':r.status==='error'?'Series error: '+(r.current_name||'process died'):'Series cancelled');
  }
  meterUpdateReadButtons();
  } finally {

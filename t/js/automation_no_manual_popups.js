@@ -25,4 +25,12 @@ assert.ok(completion.indexOf('meterLutSolveDonePrompt')>completion.indexOf('if(!
 // The 1D completion toast is gated too.
 const grey=grab('meterPollAutoCal');
 assert.match(grey,/if\(notify&&!meterStatusAutomationOwned\(r\)&&/,'the 1D completion toast is suppressed for automation workers');
+// The measurement series the runner drives ends on the Automation card, so the
+// workspace must not announce it. Seen live on 18 September 2026: "Series
+// complete!" toasted over a running batch's Before readings.
+const series=grab('meterPollSeries');
+const done=series.slice(series.indexOf('meterSeriesBeepArmed=false;'));
+assert.match(done,/if\(!meterStatusAutomationOwned\(r\)&&!document\.body\.classList\.contains\('pg-automation-calibration-observer'\)\)\s*\n?\s*toast\(r\.status==='complete'/,
+ 'the series completion toast is suppressed for an automation-owned series');
+assert.ok(done.includes("'Series complete!'"),'a manual series still gets its toast');
 console.log('PASS automation runs raise no manual AutoCal popups');
