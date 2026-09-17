@@ -46,6 +46,20 @@ ok($r->{ready},'known legacy model passes readiness with explicit manual setting
 ok($r->{items}[0]{best_available_settings}{manual}{gamma},'readiness saves matrix-derived manual instructions');
 is($r->{items}[0]{settings}{noiseReduction},'off','requested manual values remain in job, not silently discarded');
 ok(grep({$_->{level} eq 'warning' && $_->{message}=~/Set noiseReduction to off/} @{$r->{checks}}),'existing readiness UI receives actionable manual warning');
+# Missing top-level/virtual aliases do not erase the generation's read ban.
+{
+ my $original=\&main::webui_lg_picture_settings;
+ local *main::webui_lg_picture_settings=sub {
+  my $reply=PGAutomation::decode_json($original->(@_));
+  delete $reply->{virtual_picture_settings};
+  delete $reply->{picture_settings}{pictureMode};
+  $reply->{lg_generation}{picture_mode_read_forbidden}=JSON::PP::true;
+  return PGAutomation::encode_json($reply);
+ };
+ my $limited=$run->();
+ ok($limited->{ready},'nested read ban retains reviewed per-job readiness');
+ ok(grep({$_->{name} eq 'item-0-key-pictureMode' && $_->{level} eq 'warning'} @{$limited->{checks}}),'unavailable nested picture mode is a visible warning, never a verified read');
+}
 $missing_brightness=1;
 $r=$run->();
 ok($r->{ready},'matrix-authorized missing brightness read does not block accepted-write attempt');

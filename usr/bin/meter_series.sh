@@ -166,12 +166,14 @@ PY
 # routes the reads onto the ColorChecker CIE chart. Cache the identity once from
 # the seed (before our first overwrite) and re-splice it into every state write.
 SERIES_META_JSON=""
+SERIES_WORKER_META_JSON=""
 SERIES_META_LOADED=""
 load_series_identity_meta() {
  [[ -n "$SERIES_META_LOADED" ]] && return
  SERIES_META_LOADED=1
  [[ -f "$STATE_FILE" ]] || return
- SERIES_META_JSON=$(python - "$STATE_FILE" "$$" <<'PY' 2>/dev/null || true
+ local metadata
+ metadata=$(python - "$STATE_FILE" "$$" <<'PY' 2>/dev/null || true
 import json, sys
 try:
     state = json.load(open(sys.argv[1]))
@@ -189,19 +191,26 @@ meta = {"type": stype, "points": points}
 # these top-level fields made a live series depend on whichever reading or
 # reconstructed step happened to be available during that poll, then caused a
 # second target/Delta-E calculation when the completed snapshot was restored.
-for key in ("signal_mode", "target_gamma", "max_luma", "dv_map_mode", "dv_interface", "automation_worker_id", "full_autocal_run_id"):
+for key in ("signal_mode", "target_gamma", "max_luma", "dv_map_mode", "dv_interface"):
     if key in state and state[key] is not None:
         meta[key] = state[key]
-if meta.get("automation_worker_id"):
-    meta["worker_pid"] = int(sys.argv[2])
+worker_meta = {key: state[key] for key in ("automation_worker_id", "full_autocal_run_id")
+               if key in state and state[key] is not None}
+if worker_meta.get("automation_worker_id"):
+    worker_meta["worker_pid"] = int(sys.argv[2])
     try:
-        meta["worker_start_ticks"] = open("/proc/%s/stat" % sys.argv[2]).read().rsplit(") ", 1)[1].split()[19]
+        worker_meta["worker_start_ticks"] = open("/proc/%s/stat" % sys.argv[2]).read().rsplit(") ", 1)[1].split()[19]
     except (OSError, IndexError):
-        meta["worker_start_ticks"] = ""
-sys.stdout.write(",".join(json.dumps(key) + ":" + json.dumps(value, separators=(",", ":"))
-                          for key, value in meta.items()))
+        worker_meta["worker_start_ticks"] = ""
+for values in (meta, worker_meta):
+    print(",".join(json.dumps(key) + ":" + json.dumps(value, separators=(",", ":"))
+                   for key, value in values.items()))
 PY
 )
+ SERIES_META_JSON="${metadata%%$'\n'*}"
+ if [[ "$metadata" == *$'\n'* ]]; then
+  SERIES_WORKER_META_JSON="${metadata#*$'\n'}"
+ fi
 }
 
 write_state_json() {
@@ -211,6 +220,11 @@ write_state_json() {
  load_series_identity_meta
  if [[ -n "$SERIES_META_JSON" && "$payload" != *'"points"'* && "$payload" == *"}" ]]; then
   payload="${payload%\}},$SERIES_META_JSON}"
+ fi
+ # A payload with its own type/points still belongs to this worker attempt.
+ # All state-writer callers own measurements, never these cached identity fields.
+ if [[ -n "$SERIES_WORKER_META_JSON" && "$payload" == *"}" ]]; then
+  payload="${payload%\}},$SERIES_WORKER_META_JSON}"
  fi
  local tmp="${STATE_FILE}.$$.$RANDOM.tmp"
  printf '%s\n' "$payload" > "$tmp" || return 1

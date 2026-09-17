@@ -36,6 +36,17 @@ is($plan->{manual}{tint}{value},0,'zero-valued manual settings are preserved');
 like($plan->{manual}{gamma}{message},qr/gamma to bt1886.*filmMaker.*sdr.*hdmi1/,'manual instruction includes exact value and context');
 is(scalar keys %requested,18,'planning does not remove requested values from audit source');
 
+# The architectural capability is normally nested, not a top-level flag.
+# Absence of the virtual marker must not discard the explicitly reviewed limit.
+{
+ my $nested={%$response,lg_generation=>{picture_mode_read_forbidden=>JSON::PP::true}};
+ delete $nested->{virtual_picture_settings};
+ my $p=lg_best_settings_plan($identity,\%requested,$nested,%context);
+ ok($p->{active},'nested mode-read prohibition authorises the reviewed limited plan');
+ delete $nested->{lg_generation};
+ ok(!lg_best_settings_plan($identity,\%requested,$nested,%context)->{active},'an unexplained missing mode cannot inherit the limited plan');
+}
+
 my $contracts=lg_setting_contracts($identity,%context,keys=>[keys %requested])->{contracts};
 ok($contracts->{brightness}{allow_unverified_readback},'matrix explicitly permits native brightness acknowledgement');
 ok($contracts->{brightness}{require_readback},'even a write-only candidate must attempt post-write readback');

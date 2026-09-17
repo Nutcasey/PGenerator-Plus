@@ -25,7 +25,7 @@ use PGAutomationLaunch ();
 use PGAutomationPlan ();
 use PGMath ();
 use PGSignalCode ();
-use PGLGCapabilities qw(lg_setting_values_agree lg_scoped_request_payload lg_setting_write_accepted lg_readback_unavailable_reason);
+use PGLGCapabilities qw(lg_setting_values_agree lg_scoped_request_payload lg_setting_write_accepted lg_readback_unavailable_reason lg_picture_mode_read_forbidden);
 
 my ($RUN_ID, $TOKEN, $LAUNCH_ATTEMPT) = @ARGV;
 $TOKEN=PGAutomationLaunch::read_launch_token($RUN_ID,$LAUNCH_ATTEMPT) if defined($TOKEN) && $TOKEN eq '--launch';
@@ -951,6 +951,11 @@ sub _status_terminal {
     return defined($status) && $status =~ /^(?:complete|error|failed|cancelled|stopped|idle)$/;
 }
 
+sub _clear_active_worker {
+    $ACTIVE_WORKER = '';
+    $ACTIVE_WORKER_ID = '';
+}
+
 sub _start_worker {
     my ($path, $status_path, $payload) = @_;
     $ACTIVE_WORKER_ID=$RUN_ID.'-'.(_active_item_number()//0).'-'.PGAutomation::new_id();
@@ -1178,13 +1183,18 @@ sub _copy_worker_files {
 
 sub _snapshot_series {
     my ($item_number, $which, $key, $status) = @_;
+    if ($ACTIVE_WORKER_ID && PGAutomation::worker_id($status) ne $ACTIVE_WORKER_ID) {
+        $::LAST_ERROR = $status->{message} || 'Refusing to archive series evidence from another worker attempt';
+        $::LAST_ERROR_CODE = $status->{error_code} || 'worker-identity-mismatch';
+        return undef;
+    }
     my $directory = PGAutomation::item_dir($RUN_ID, $item_number) . '/' . $which;
     if (!-d $directory && !eval { make_path($directory, { mode => 0775 }); 1 }) {
         $::LAST_ERROR = "Unable to create series artifact directory $directory";
         return undef;
     }
     my %snapshot;
-    foreach my $field (qw(type points steps readings white_reading black_reading signal_mode target_gamma target_gamut calibration_target_context max_luma dv_map_mode color_format max_bpc signal_range pattern_signal_range transport_signal_range status report_key)) {
+    foreach my $field (qw(type points steps readings white_reading black_reading signal_mode target_gamma target_gamut calibration_target_context max_luma dv_map_mode color_format max_bpc signal_range pattern_signal_range transport_signal_range status report_key automation_worker_id full_autocal_run_id worker_pid worker_start_ticks)) {
         $snapshot{$field} = $status->{$field} if exists($status->{$field});
     }
     $snapshot{type} = (_series_info($key))[0] if !exists($snapshot{type});
@@ -1213,9 +1223,12 @@ sub _run_series {
         $ACTIVE_WORKER = 'series';
         ($ACTIVE_SERIES_KEY, $ACTIVE_SERIES_PHASE) = ($key, $which);
         _update_run(sub { $_[0]{active_series} = {key=>$key, phase=>$which}; });
-        my $started = _api('POST', '/api/meter/series', _series_payload($item, $key, $RUN_ID));
+        # Series are workers too: give each sweep a fresh attempt and reconcile
+        # lost start replies through the same ownership-fenced launch path.
+        my $started = _start_worker('/api/meter/series', '/api/meter/series/status',
+            _series_payload($item, $key, $RUN_ID));
         if (!$started || ($started->{status} || '') ne 'started') {
-            $ACTIVE_WORKER = '';
+            _clear_active_worker();
             $::LAST_ERROR = $started->{message} || 'Unable to start meter series';
             return 0;
         }
@@ -1227,7 +1240,7 @@ sub _run_series {
         return 0 if !ref($status);
         my $snapshot = _snapshot_series($item_number, $which, $key, $status);
         if (!ref($snapshot)) {
-            $ACTIVE_WORKER = '';
+            _clear_active_worker();
             return 0;
         }
         if (($status->{status} || '') ne 'complete') {
@@ -1235,7 +1248,7 @@ sub _run_series {
             $::LAST_ERROR_CODE = $status->{error_code} || $status->{error} || 'meter-series-failed';
             return 0;
         }
-        $ACTIVE_WORKER = '';
+        _clear_active_worker();
         _update_run(sub {
             my ($run) = @_;
             $run->{last_series} = { item => $item_number, phase => $which, key => $key };
@@ -1452,7 +1465,7 @@ sub _read_and_verify_settings {
         }
         my $unverifiable = ref($response) eq 'HASH' && ($response->{virtual_picture_settings}
             || $response->{manual_confirmation_required}
-            || $response->{picture_mode_read_forbidden});
+            || lg_picture_mode_read_forbidden($response));
         my $unsupported = ref($response) eq 'HASH' && ref($response->{unsupported_picture_keys}) eq 'HASH'
             ? $response->{unsupported_picture_keys} : {};
         my %native=map {$_=>1} @{$response->{supported_picture_keys}||[]};
@@ -1795,7 +1808,7 @@ sub _mode_read_from_response {
     my ($live) = @_;
     my $mode = ref($live) eq 'HASH' ? (_observed_settings($live)->{pictureMode} || '') : '';
     my $trusted = ref($live) eq 'HASH' && _response_ok($live) && $mode ne ''
-        && !$live->{virtual_picture_settings} && !$live->{picture_mode_read_forbidden}
+        && !$live->{virtual_picture_settings} && !lg_picture_mode_read_forbidden($live)
         && !$live->{manual_confirmation_required} ? 1 : 0;
     return { no_echo => 1, verified => $trusted, picture_mode => $mode,
         current_input => ref($live) eq 'HASH' ? ($live->{current_input}||'') : '', response => $live };
@@ -2595,7 +2608,7 @@ sub _calibration_greyscale_stage {
     $ACTIVE_WORKER = 'grey';
     my $grey_start = _start_worker('/api/meter/lg-autocal', '/api/meter/lg-autocal/status', _grey_payload($item));
     if (!$grey_start || ($grey_start->{status} || '') ne 'started') {
-        $ACTIVE_WORKER = '';
+        _clear_active_worker();
         $::LAST_ERROR = $grey_start->{message} || 'Unable to start LG greyscale AutoCal';
         return 0;
     }
@@ -2611,7 +2624,7 @@ sub _calibration_greyscale_stage {
         $::LAST_ERROR_DETAIL = $grey->{failure_detail} if ref($grey->{failure_detail}) eq 'HASH';
         return 0;
     }
-    $ACTIVE_WORKER = '';
+    _clear_active_worker();
     my $verified = $grey->{ddc_upload_verified} || $grey->{final_1d_lut_upload_verified};
     return {verified => $verified ? JSON::PP::true : 'unverifiable',
         final_1d_lut_upload_verified => $grey->{final_1d_lut_upload_verified},
@@ -2627,7 +2640,7 @@ sub _calibration_volume_stage {
         $ACTIVE_WORKER = 'dv';
         my $start = _start_worker('/api/lg/dv-profile/start', '/api/lg/dv-profile/status', _dv_payload($item));
         if (!$start || ($start->{status} || '') ne 'started') {
-            $ACTIVE_WORKER = '';
+            _clear_active_worker();
             $::LAST_ERROR = $start->{message} || 'Unable to start Dolby Vision profile measurement';
             return 0;
         }
@@ -2642,7 +2655,7 @@ sub _calibration_volume_stage {
             $::LAST_ERROR = (ref($dv) && ($dv->{message} || $dv->{error})) || 'Dolby Vision profile worker did not complete';
             return 0;
         }
-        $ACTIVE_WORKER = '';
+        _clear_active_worker();
         my $measurements = $dv->{measurements} || $dv->{dv_profile_measurements} || $dv->{result};
         if (ref($measurements) ne 'HASH') {
             $::LAST_ERROR = 'Dolby Vision profile did not return measurements';
@@ -2687,7 +2700,7 @@ sub _calibration_volume_stage {
     $ACTIVE_WORKER = '3d';
     my $start = _start_worker('/api/meter/lg-3d-autocal/start', '/api/meter/lg-3d-autocal/status', _three_d_payload($item, _run(), $item_number));
     if (!$start || ($start->{status} || '') ne 'started') {
-        $ACTIVE_WORKER = '';
+        _clear_active_worker();
         $::LAST_ERROR = $start->{message} || 'Unable to start LG 3D LUT AutoCal';
         return 0;
     }
@@ -2721,7 +2734,7 @@ sub _calibration_volume_stage {
         $::LAST_ERROR = $three_d->{message} || '3D LUT AutoCal did not complete';
         return 0;
     }
-    $ACTIVE_WORKER = '';
+    _clear_active_worker();
     return {verified => ($three_d->{terminal_commit_verified} || $three_d->{upload_verified})
         ? JSON::PP::true : 'unverifiable', terminal_commit_verified => $three_d->{terminal_commit_verified}};
 }
@@ -3167,7 +3180,7 @@ sub _stage {
         return 0;
     }
     $ACTIVE_STAGE = '';
-    $ACTIVE_WORKER = '';
+    _clear_active_worker();
     _refresh_control();
     return 1;
 }
@@ -3207,7 +3220,7 @@ sub _park_interrupted {
     });
     unlink($RUN_DIR . '/runner.pid');
     $ACTIVE_STAGE = '';
-    $ACTIVE_WORKER = '';
+    _clear_active_worker();
     _log('runner parked an interrupted run for resume');
 }
 
@@ -3753,9 +3766,9 @@ sub _preflight_read_mode {
     my $generation=ref($live->{lg_generation}) eq 'HASH' ? $live->{lg_generation} : {};
     my $limited=$allow_limited && _response_ok($live)
         && $profile->{capability_library_valid} && $profile->{capability_platform_profile_applied}
-        && ($live->{picture_mode_read_forbidden} || $generation->{picture_mode_read_forbidden});
+        && lg_picture_mode_read_forbidden($live);
     die 'Cannot safely probe modes: the current TV mode cannot be read independently. No unverified mode will be used for restoration.'
-        if !$limited && (!_response_ok($live) || $live->{virtual_picture_settings} || $live->{picture_mode_read_forbidden}
+        if !$limited && (!_response_ok($live) || $live->{virtual_picture_settings} || lg_picture_mode_read_forbidden($live)
             || !$mode || !_signal_mode_compatible($signal,$mode));
     $mode='' if $limited; # Never retain an echoed selector as a restoration target.
     die 'Cannot safely probe modes: TV input or compatibility signature is unavailable'

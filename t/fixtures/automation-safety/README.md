@@ -138,3 +138,36 @@ quality with a deliberately failed limit and verify no propagation occurs.
 
 Hardware-free tests and hosted CI do not substitute for these checks or for an
 independent agent/human code review. No hardware deployment is part of this change.
+
+## Review follow-up: worker series, readback limits and archive bookends
+
+Follow-up baseline: `a787bbe5fab9e4a88e1300e34fca1967724b47cb`.
+
+Before/After Reading sweeps use the same attempt-fenced start path as AutoCal.
+Each sweep has a fresh identity, including after AutoCal and across job boundaries.
+The shell worker retains its run/attempt/PID metadata even when a state payload
+already contains `points`. Saved measurements retain provenance; a mismatched
+status cannot overwrite a previous snapshot. Regression tests drive the real
+start/wait/snapshot functions and execute the shell state writer in isolation.
+
+Mode-read limitations are read from `lg_generation.picture_mode_read_forbidden`
+(or the legacy direct shape), never inferred solely from DDC-only white balance.
+The C1 virtual/nested preflight fix remains in place. Readable and unknown TVs
+still need independent mode evidence. An explicitly rejected transient DV
+CAL_START can retry at most three times on a read-banned generation, retaining
+its resolved target and reporting unavailable mode verification. A timeout,
+missing acknowledgement or permission error does not authorise a retry.
+
+The 3D LUT and both DV profile history upload routes now require requested
+calibration entry to be acknowledged before upload, preserve upload failures,
+and report unconfirmed exit instead of success. The existing 1D restore route
+already enforced those bookends and is covered without changing its policy.
+Successful explicit caller-managed bookend options remain supported.
+
+Limited readiness results count as jobs checked, not completed calibrations, in
+both live and saved preflight displays. The optional HTML-attribute hardening
+escapes catalogue numeric limits without changing their valid numeric values.
+
+These are source/test fixes, not an additional physical calibration or a
+reproduction of the reported Pi daemon freeze. The hardware acceptance checklist
+above still applies to the exact follow-up commit before deployment is certified.

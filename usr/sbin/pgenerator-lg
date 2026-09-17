@@ -22,6 +22,7 @@ use PGCalibrationMath qw(calibration_rgb_to_xyz_matrix);
 use PGLGCapabilities qw(
  lg_recipe
  lg_readback_unavailable_reason
+ lg_picture_mode_read_forbidden
  lg_panel_light_binding
  lg_picture_mode_catalogue
  lg_picture_mode_record
@@ -8194,11 +8195,13 @@ our $CALIBRATION_START_RETRY_DELAY=2;
 
 # A DV driver rejection can be transient while HDMI is reacquiring its map.
 # Retry only an explicit error-20 rejection, never an ambiguous timeout, and
-# only with fresh proof that the intended picture mode is still selected.
+# with fresh mode proof where it is available. On a generation that explicitly
+# forbids independent mode readback, retain the same resolved target and report
+# the limitation instead of treating an impossible read as a mode change.
 # No CAL_END, reset or data writes are used to force another client's session
 # closed. A successful CAL_START response remains mandatory.
 sub lg_calibration_start_with_retry (@) {
- my ($session,$cal_mode,$timeout)=@_;
+ my ($session,$cal_mode,$timeout,$generation)=@_;
  # Legacy resolvers can supply the wire name (dolby_cinema_dark), while
  # native readback maps to the internal dolby_hdr_cinema_dark spelling.
  # Normalize only retry eligibility; do not broaden other workflows' rules
@@ -8212,11 +8215,15 @@ sub lg_calibration_start_with_retry (@) {
   last if(&lg_calibration_start_confirmed($response) || $attempt==3);
   my ($failed,$message)=&response_is_app_failure($response);
   last if(!$failed || !&lg_dv_calibration_session_rejection_is_tolerable($response,$message,$retry_mode));
-  $observed=&lg_current_picture_mode($session,$timeout,"calibration_retry_picture_mode_$attempt");
-  last if($observed eq "" || &lg_wire_pic_mode(&lg_picture_mode_for_calibration($observed)) ne &lg_wire_pic_mode($cal_mode));
+  my $read_banned=lg_picture_mode_read_forbidden($generation);
+  if(!$read_banned) {
+   $observed=&lg_current_picture_mode($session,$timeout,"calibration_retry_picture_mode_$attempt");
+   last if($observed eq "" || &lg_wire_pic_mode(&lg_picture_mode_for_calibration($observed)) ne &lg_wire_pic_mode($cal_mode));
+  }
   &diag_log_append("calibration_mode:start-retry",{
    attempt => $attempt, next_attempt => $attempt+1, picture_mode => $observed,
    calibration_picture_mode => $cal_mode, message => $message,
+   mode_verification => $read_banned ? "unavailable-read-ban" : "readback-matched",
   });
   select(undef,undef,undef,$CALIBRATION_START_RETRY_DELAY) if($CALIBRATION_START_RETRY_DELAY>0);
  }
@@ -8246,7 +8253,7 @@ sub lg_calibration_mode_workflow (@) {
  }
  my ($response,$start_attempts,$observed_picture_mode);
  if($enable) {
-  ($response,$start_attempts,$observed_picture_mode)=&lg_calibration_start_with_retry($session,$cal_mode,$connect_timeout + 4);
+  ($response,$start_attempts,$observed_picture_mode)=&lg_calibration_start_with_retry($session,$cal_mode,$connect_timeout + 4,$generation);
  } else {
   $response=&lg_calibration_request($session,"calibration_mode_end","CAL_END",undef,1,$cal_mode,$connect_timeout + 4);
  }
@@ -8286,6 +8293,7 @@ sub lg_calibration_mode_workflow (@) {
   active_picture_mode => $active_picture_mode,
   calibration_picture_mode => $cal_mode,
   start_attempts => $start_attempts,
+  start_retry_mode_readback_unavailable => &json_bool($enable && ($start_attempts||0)>1 && lg_picture_mode_read_forbidden($generation)),
   response => $response,
   cal_start_tolerated => &json_false(),
   cal_end_tolerated => &json_bool($end_tolerated),

@@ -31,6 +31,7 @@ our @EXPORT_OK = qw(
  lg_best_settings_plan
  lg_setting_write_accepted
  lg_readback_unavailable_reason
+ lg_picture_mode_read_forbidden
  validate_lg_library
 );
 
@@ -800,6 +801,17 @@ sub _control_for_key {
  return undef;
 }
 
+# A settings response carries generation capabilities under lg_generation.
+# Older fixtures/callers may supply the generation itself. Do not derive this
+# flag from DDC-only white balance: those are separate capability claims.
+sub lg_picture_mode_read_forbidden {
+ my ($value)=@_;
+ return 0 if(ref($value) ne 'HASH');
+ return 1 if($value->{picture_mode_read_forbidden});
+ my $generation=$value->{lg_generation};
+ return ref($generation) eq 'HASH' && $generation->{picture_mode_read_forbidden} ? 1 : 0;
+}
+
 # Shared policy: model-specific evidence is data in the matrix, never a model
 # branch here. A refused read must not become an assertion that writes fail.
 sub lg_readback_unavailable_reason {
@@ -833,7 +845,7 @@ sub lg_best_settings_plan {
   return $plan;
  }
  if(!$mode_native && ($profile->{data}{runtime}{picturemode_readable}
-    || !($response->{virtual_picture_settings} || $response->{picture_mode_read_forbidden}))) {
+    || !($response->{virtual_picture_settings} || lg_picture_mode_read_forbidden($response)))) {
   $plan->{context_error}='Picture mode could not be confirmed under the TV matrix.';
   return $plan;
  }
