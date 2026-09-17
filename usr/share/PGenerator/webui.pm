@@ -13932,6 +13932,19 @@ sub webui_automation_preflight_status (@) {
   $state->{message}="Startup checks stopped reporting progress. Check the TV connection and generator status before retrying.";
   $state->{error_code}="preflight-stale";
  }
+ # "started" means the queue was handed to the runner, and from then on the run
+ # record is what the card shows. If that run is gone -- deleted from History,
+ # or never written because the launch failed silently -- this record is all
+ # that is left, and it would claim a launch for ever: no run to follow and no
+ # dismissal offered for "started". Treat an unreachable run as interrupted.
+ if(($state->{status}||"") eq "started") {
+  my $run_id=PGAutomation::safe_component($state->{run_id}||"");
+  if($run_id eq "" ? $state->{update_age}>120 : !-d PGAutomation::run_dir($run_id)) {
+   $state->{status}="interrupted";
+   $state->{message}="The run this start handed to the runner is no longer on the generator. Check readiness again before starting.";
+   $state->{error_code}="preflight-run-missing";
+  }
+ }
  return $state;
 }
 
@@ -13951,7 +13964,11 @@ sub webui_automation_preflight_event (@) {
 sub webui_automation_dismiss_readiness (@) {
  my ($payload)=@_;
  my ($locked,$result,$error)=&webui_automation_lock(sub {
-  my $state=PGAutomation::read_json_file(PGAutomation::base_dir().'/preflight.json');
+  # Read the same derived view the card shows: a check that stopped reporting
+  # and a start whose run is gone both recover to "interrupted" there, and the
+  # card offers Dismiss for exactly that. Reading the raw file instead left the
+  # button visible but every click refused.
+  my $state=&webui_automation_preflight_status();
   return {status=>'error',message=>'Readiness has changed. Refresh before dismissing it.',error_code=>'readiness-changed'}
    if(ref($state) ne 'HASH' || !$payload->{request_id} || ($state->{id}||'') ne $payload->{request_id});
   my $execution=&webui_automation_read_execution();

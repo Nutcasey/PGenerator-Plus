@@ -24,10 +24,20 @@ $state->{id}='new-check';save();
 is(current()->{preflight}{id},'new-check','new check is never hidden by an earlier dismissal');
 $state->{id}='old-check';$state->{started_at}=3;save();
 ok(defined(current()->{preflight}),'even a reused request ID with a new start time remains visible');
+# In-flight means recent: the status view only recovers a record that stopped
+# reporting, so give these fixtures a live heartbeat.
 for my $status(qw(checking started)){
- $state->{status}=$status;save();
+ $state->{status}=$status;$state->{started_at}=PGAutomation::now();$state->{updated_at}=PGAutomation::now();$state->{completed_at}=PGAutomation::now();save();
  is(dismiss()->{error_code},'automation-active',"cannot dismiss $status check");
 }
+# A record the status view recovers to "interrupted" is what the card offers
+# Dismiss for, so the endpoint accepts exactly those.
+$state->{status}='checking';$state->{started_at}=PGAutomation::now()-600;$state->{updated_at}=PGAutomation::now()-600;delete $state->{completed_at};save();
+is(dismiss()->{status},'ok','a check that stopped reporting can be dismissed');
+$state->{status}='started';$state->{run_id}='20260101-000000-missing';$state->{updated_at}=PGAutomation::now();$state->{completed_at}=PGAutomation::now();save();
+is(dismiss()->{status},'ok','a start whose run is no longer on the generator can be dismissed');
+delete $state->{run_id};
+$state->{started_at}=3;$state->{completed_at}=2;$state->{updated_at}=2;
 $state->{status}='blocked';save();
 for my $status(qw(starting running paused interrupted stopping completing)){
  PGAutomation::write_json_atomic(PGAutomation::base_dir().'/execution.json',{status=>$status,run_id=>'owned'});
