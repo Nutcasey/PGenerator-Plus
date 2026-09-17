@@ -9882,6 +9882,24 @@ function meterOnRgbBalanceNoiseFloorClear(){
  input.value='';
  meterOnRgbBalanceNoiseFloorChange();
 }
+// Commit-time normalization: the effective floor (meterRgbBalanceNoiseFloor)
+// caps at 10 and resolves non-positive/non-finite input to Off, but the field
+// used to keep whatever was typed — '20' annotated the chart with ±10 while
+// the input read 20. Rewrite the field to the applied value at commit time
+// (change/Enter/blur) so the number shown always matches the band, tooltip,
+// and bar dimming. Mid-typing (oninput) is deliberately untouched.
+function meterCommitRgbBalanceNoiseFloorInput(){
+ const input=document.getElementById('meterRgbBalanceNoiseFloor');
+ if(!input) return;
+ const raw=String(input.value==null?'':input.value);
+ const trimmed=raw.trim();
+ if(!trimmed) return;
+ const n=Number(trimmed);
+ if(!Number.isFinite(n)||n<=0){ input.value=''; return; }
+ const capped=Math.min(10,n);
+ const norm=String(capped);
+ if(norm!==raw) input.value=norm;
+}
 
 // Dispatcher — keeps every existing caller working while honoring the
 // new <select id="meterRgbBalanceFormula"> selector. All three formulas here
@@ -11586,6 +11604,8 @@ function meterQueueGreyAnalysisRefresh(){
 // is identical to a formula change (chart band, hover annotations, live bars),
 // so reuse it. Debounced via rAF by the shared handler.
 function meterOnRgbBalanceNoiseFloorChange(){
+ // Normalize the field first so the redraw and the displayed number agree.
+ try{ meterCommitRgbBalanceNoiseFloorInput(); }catch(e){}
  meterOnRgbBalanceFormulaChange();
 }
 
@@ -11719,6 +11739,10 @@ function meterLoadColorPrefs(){
   setVal('meterGrayWorld',   p.gray_world);
   setVal('meterRgbBalanceFormula', p.rgb_formula);
   setVal('meterRgbBalanceNoiseFloor', p.rgb_noise_floor);
+  // A pref restored from an older client can exceed the cap or be garbage;
+  // normalize the field to the applied value immediately so the displayed
+  // number always matches the annotation, then re-persist the clean value.
+  try{ meterCommitRgbBalanceNoiseFloorInput(); meterSaveColorPrefs(); }catch(e3){}
   try{ meterUpdateNoiseFloorControlAvailability(); }catch(e2){}
   setVal('meterDeltaEForm',  meterNormalizeSavedGreyDeltaEForm(p.de_form));
   setVal('meterColorDeltaEForm', p.color_de_form);
