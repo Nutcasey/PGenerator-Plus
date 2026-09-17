@@ -9873,6 +9873,23 @@ function meterUpdateNoiseFloorControlAvailability(){
  // touch screen, so show a × only when the floor is actually on.
  const clear=document.getElementById('meterRgbBalanceNoiseFloorClear');
  if(clear&&clear.style) clear.style.display=meterRgbBalanceNoiseFloor()>0?'':'none';
+ // Highlight the preset whose value equals the applied floor, so the button
+ // row answers 'which one is in play' (a typed 0.35 matches none, which is
+ // itself information). aria-pressed carries the same state to AT.
+ // try/catch: availability runs very early on pages whose DOM may not carry
+ // the preset row yet; the × / dim logic above is the critical path.
+ try{
+  const applied=meterRgbBalanceNoiseFloor();
+  const btns=(typeof document!=='undefined'&&document.querySelectorAll)?document.querySelectorAll('.noise-floor-preset'):[];
+  for(let i=0;i<btns.length;i++){
+   const btn=btns[i];
+   const v=Number(btn.dataset&&btn.dataset.value);
+   const on=applied>0&&Number.isFinite(v)&&Math.abs(v-applied)<1e-9;
+   btn.style.borderColor=on?'var(--accent,#5b7fff)':'';
+   btn.style.color=on?'var(--accent,#5b7fff)':'';
+   btn.setAttribute('aria-pressed',on?'true':'false');
+  }
+ }catch(e){}
  // Floor set but formula not Perceptual: the dimming says "inactive" but only
  // the hover title says why, and touch screens never hover. Show an inline
  // hint that doubles as a one-tap switch to the formula that uses the floor.
