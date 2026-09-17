@@ -4662,7 +4662,16 @@ sub _claim_queue_item {
         if ($number>=@{$state->{items}}) {$state->{status}='completing';return;}
         my $item=$state->{items}[$number];
         return if ($item->{status}||'') =~ /^complete(?:-with-warnings)?$/;
-        if (!PGAutomationPlan::matches($item,$item->{preflight_contract})) {
+        # A job that has already run stages carries what those stages measured
+        # (the settled panel-light target luminance, the calibration headroom),
+        # so its frozen intent hash can never match again. Re-admitting it after
+        # a Pause is not a plan change: an operator edit bumps queue_revision,
+        # which the check above catches, and the queue editor only offers
+        # pending jobs. Verify the TV it was planned for instead, or the reused
+        # whole-queue check is thrown away on every Resume (P13).
+        my $started=ref($item->{checkpoints}) eq 'ARRAY' && @{$item->{checkpoints}};
+        if (!($started ? PGAutomationPlan::identity_matches($item,$item->{preflight_contract})
+                       : PGAutomationPlan::matches($item,$item->{preflight_contract}))) {
             delete $state->{preflight_revision};$changed=1;return;
         }
         $state->{active_item}=$number;$item->{status}='running';

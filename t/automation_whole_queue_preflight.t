@@ -222,6 +222,35 @@ fixture();$r=run_check();
  ($claimed,$changed)=main::_claim_queue_item(0);
  ok($changed,'even a changed option without a revision bump is rejected');
  ok(!defined($claimed->{preflight_revision}),'changed intent forces full preflight on the next loop');
+ # A Pause during job 1 leaves the job carrying what its own stages measured.
+ # That must not throw away the whole-queue check the Resume just reused (P13),
+ # while a TV that changed underneath still forces a re-check.
+ PGAutomation::with_lock($run_file,sub {
+  $_[0]{queue_revision}=0;$_[0]{preflight_revision}=0;
+  my $item=$_[0]{items}[0];
+  $item->{settings}{brightness}=50;
+  $item->{preflight_contract}=PGAutomationPlan::contract($item);
+  $item->{checkpoints}=[{name=>'panel-light-settled',status=>'done'}];
+  $item->{status}='queued';
+  $item->{target_luminance}=411.328618;
+  $item->{calibration}{headroom_target_luminance}=511.144543231037;
+  return $_[0];});
+ ($claimed,$changed)=main::_claim_queue_item(0);
+ ok(!$changed,'a resumed job keeps the reused queue check despite its own measured values');
+ is($claimed->{items}[0]{status},'running','the resumed job is admitted for execution');
+ is($claimed->{preflight_revision},0,'and the verified plan revision survives the claim');
+ PGAutomation::with_lock($run_file,sub {$_[0]{items}[0]{status}='queued';$_[0]{items}[0]{tv_input}='hdmi2';return $_[0];});
+ ($claimed,$changed)=main::_claim_queue_item(0);
+ ok($changed,'a resumed job on a different TV input still forces a full re-check');
+ ok(!defined($claimed->{preflight_revision}),'and drops the verified plan revision');
+ PGAutomation::with_lock($run_file,sub {
+  my $item=$_[0]{items}[0];
+  $item->{tv_input}=$item->{preflight_contract}{tv_input};$item->{status}='queued';
+  $_[0]{preflight_revision}=0;delete $item->{checkpoints};
+  $item->{target_luminance}=411.328618;
+  return $_[0];});
+ ($claimed,$changed)=main::_claim_queue_item(0);
+ ok($changed,'a job that never started is still held to its exact frozen intent');
  PGAutomation::with_lock($run_file,sub {$_[0]{items}=[{name=>'Already done',status=>'complete'}];return $_[0];});
  @calls=();$r=run_check();
  ok($r->{ready},'a resumed run with no pending jobs can finish without re-calibrating');
