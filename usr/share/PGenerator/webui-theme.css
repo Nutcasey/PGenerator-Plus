@@ -353,7 +353,11 @@ padding:4px 24px 4px 8px;border-radius:6px;font-size:.74rem;outline:none;transit
    interactive members of this row to 44px hit height/width. min-* is used
    rather than a padding override because the compact padding lives in each
    element's inline style; min-height wins the box regardless. Scoped to the
-   labeled row so no other compact control changes. */
+   labeled row so no other compact control changes.
+   NOTE: the inactive hint is never dimmed via a parent opacity — opacity
+   inherits multiplicatively (a child cannot exceed its parent's 0.45), so
+   meterUpdateNoiseFloorControlAvailability dims the input/presets directly
+   and keeps #meterNoiseFloorControl itself at full opacity. */
 @media(pointer:coarse){
  #meterNoiseFloorControl .noise-floor-preset,
  #meterNoiseFloorControl #meterRgbBalanceNoiseFloorClear,

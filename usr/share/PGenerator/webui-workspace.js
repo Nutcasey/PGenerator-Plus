@@ -15058,8 +15058,10 @@ function drawRGBChart(gs,allSteps,readingMap){
  // Keep the exact plotted values on the canvas. Hover registration consumes
  // this same map instead of independently recalculating RGB balance. The key
  // is the full input tuple (formula, grey-ref mode, black level, gamut,
- // readings generation), not the formula alone — see meterRgbBalancePlotKey.
- ctx.canvas._meterRgbBalancePlot={key:meterRgbBalancePlotKey(greyMode,blackLevel,meterReadingsGenerationValue()),balanceByIre:balMap};
+ // readings generation, white ref, entry count), not the formula alone —
+ // see meterRgbBalancePlotKey.
+ ctx.canvas._meterRgbBalancePlot={key:meterRgbBalancePlotKey(greyMode,blackLevel,meterReadingsGenerationValue(),
+   effectiveWhiteRGB.X+'/'+effectiveWhiteRGB.Y+'/'+effectiveWhiteRGB.Z,Object.keys(balMap).length),balanceByIre:balMap};
  // Auto-scale Y axis based on actual data, but keep the chart centered on 100
  // with the conventional +/-5% minimum span in every RGB balance mode.
  const allVals=Object.values(balMap).filter(b=>b&&!b.noChroma).flatMap(b=>[b.R,b.G,b.B]);
@@ -15102,7 +15104,10 @@ function drawRGBChart(gs,allSteps,readingMap){
    // Same point set as the trace: a noChroma (zero-light) step has no
    // balance, so its noise threshold would annotate nothing.
    if(!bal||bal.noChroma) return;
-   const gain=meterPerceptualRgbBalanceGain(step);
+   // Gain must come from the READING (the analysis_ire/patch stamps live on
+   // readings), same object rgbBalance and the hover tooltip divide by — a
+   // step definition can carry a different slot IRE and skew the envelope.
+   const gain=meterPerceptualRgbBalanceGain(readingMap&&readingMap[step.ire]?readingMap[step.ire]:step);
    const dev=noiseFloor*gain;
    zone.push({x:meterGreyCategoryChartX(xSteps,idx),hi:toNorm(100+dev),lo:toNorm(100-dev)});
   });
@@ -15167,11 +15172,16 @@ function drawRGBChart(gs,allSteps,readingMap){
   }
  });
  if(rPts.length>1){drawLine(ctx,chart,rPts,'#f44',2);drawLine(ctx,chart,gPts,'#4caf50',2);drawLine(ctx,chart,bPts,'#42a5f5',2);}
- if(offScale.length>0){
+ if(offScale.length>0&&rPts.length>1){
   // Triangle at the clamped edge pointing outward from the view, one per
-  // overflowing channel. True value stays available on hover.
+  // overflowing channel. True value stays available on hover. Gated on the
+  // same rPts.length>1 as the trace: a lone marker with no line behind it
+  // reads as a rendering artifact.
   const colors=['#f44','#4caf50','#42a5f5'];
   ctx.save();
+  // Clip to the plot rect like the band does — the apex sits s+1 px beyond
+  // the edge value, which without clipping bleeds into the x-labels/header.
+  ctx.beginPath();ctx.rect(chart.pad.l,chart.pad.t,chart.w,chart.h);ctx.clip();
   ctx.globalAlpha=0.9;
   offScale.forEach(pt=>{
    // A horizontal box-zoom can push the whole column out of view; the axis
@@ -18416,10 +18426,11 @@ function chartRegisterInteraction(){
    if(visibleX<0||visibleX>1) return;
    const cx=pad.l+xInset+visibleX*dw;
    const plotted=(cid==='chartRGB'&&canvas._meterRgbBalancePlot
-    &&canvas._meterRgbBalancePlot.key===meterRgbBalancePlotKey(greyMode,rgbBlackLevel,meterReadingsGenerationValue()))
+    &&canvas._meterRgbBalancePlot.key===meterRgbBalancePlotKey(greyMode,rgbBlackLevel,meterReadingsGenerationValue(),
+     effectiveWhiteRGB.X+'/'+effectiveWhiteRGB.Y+'/'+effectiveWhiteRGB.Z,gs.length))
     ? canvas._meterRgbBalancePlot.balanceByIre[rd.ire]
     : null;
-   const bal=plotted||(effectiveWhiteRGB?rgbBalance(rd,effectiveWhiteRGB,greyMode,rgbBlackLevel):{R:100,G:100,B:100});
+   const bal=plotted||(effectiveWhiteRGB?rgbBalance(rd,effectiveWhiteRGB,greyMode,rgbBlackLevel):{R:100,G:100,B:100,noChroma:true});
    _chartHitZones.push({canvasId:cid, cx:cx, cy:cH/2, radius:isBarChart?18:8, ire:step.ire, reading:rd,
     rgbBalance:bal, deSelected:deSelected[rd.ire], de2000:de2000[rd.ire], deChroma:sepLum?deChroma[rd.ire]:null, deLabel:deLabel});
   });
@@ -18479,7 +18490,11 @@ function chartHandleHover(e,canvasId){
   // all points, not just the shadow-magnified ones. Show the pre-gain L*
   // deviation next to the flag so the operator can judge HOW deep into the
   // noise the point sits instead of trusting the floor blindly.
-  if(meterRgbBalanceNoiseFloor()>0){
+  // noChroma (zero-light) points are excluded: their 100/100/100 sentinel
+  // computes deviation 0 and would read "within meter noise" for a patch
+  // that emitted no measurable light — the chart omits the point for the
+  // same reason (PR-16 review finding).
+  if(meterRgbBalanceNoiseFloor()>0&&!bal.noChroma){
    const within=[bal.R,bal.G,bal.B].map(v=>meterRgbBalanceWithinNoise(v,perceptualGain));
    if(within.some(Boolean)){
     const pg=(Number.isFinite(perceptualGain)&&perceptualGain>0)?perceptualGain:1;

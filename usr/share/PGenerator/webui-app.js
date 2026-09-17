@@ -9625,10 +9625,10 @@ function ynToLstar(yn){
 function meterRgbBalanceFormula(){
  const sel=document.getElementById('meterRgbBalanceFormula');
  if(sel && sel.value) return sel.value;
- // Fallback default. The same 'absolute' default is declared at three sibling
+ // Fallback default. The same 'absolute' default is declared at four sibling
  // sites and must be changed together: webui-body.html (select 'selected'
- // option), meterRgbBalanceFormula (here), and webui.pm saved-config injection
- // ("rgb_formula":"absolute" in webui_meter_custom_series_json).
+ // option), meterRgbBalanceFormula (here), and the two webui.pm saved-config
+ // injection sites in webui_meter_settings_load.
  return 'absolute';
 }
 
@@ -9822,10 +9822,16 @@ function meterRgbBalanceOffScaleDir(normValue,vLo,vHi){
 // mode, gamut, black level, or reading set — the exact desync the cache exists
 // to prevent. Callers must pass the same greyMode/blackLevel tuple members
 // they passed to rgbBalance, and bump generation on any re-read/series reset.
-function meterRgbBalancePlotKey(greyMode,blackLevel,generation){
+// whiteId is the white-reference identity (its Y) and plotCount the number of
+// balance entries: the plotted values also depend on the white ref and the
+// reading subset, which a caller-filtered `gs` can differ on while every other
+// key member coincides. Hover's fallback recompute is always correct, so a
+// false-positive key match is the only failure mode this guards.
+function meterRgbBalancePlotKey(greyMode,blackLevel,generation,whiteId,plotCount){
  const gamut=(typeof meterActiveGamutKey==='function')?meterActiveGamutKey():'';
  return meterRgbBalanceFormula()+'|'+(greyMode==null?'':greyMode)+'|'
-  +(blackLevel==null?'':String(blackLevel))+'|'+gamut+'|'+(generation==null?'0':String(generation));
+  +(blackLevel==null?'':String(blackLevel))+'|'+gamut+'|'+(generation==null?'0':String(generation))
+  +'|'+(whiteId==null?'':String(whiteId))+'|'+(plotCount==null?'':String(plotCount));
 }
 
 // Operator-selectable noise floor in L* points (pre-gain deviation), read from
@@ -9865,7 +9871,12 @@ function meterUpdateNoiseFloorControlAvailability(){
  const applies=meterRgbBalanceNoiseFloorApplies();
  const label=input.closest('label');
  const target=label||input;
- target.style.opacity=applies?'':'0.45';
+ // Dim the editable members, NOT the label: the inactive hint lives inside
+ // the label and opacity inherits multiplicatively — dimming the label would
+ // dim the very affordance that explains the dim below legibility (PR-16
+ // review finding). The label keeps only the title (hover context).
+ target.style.opacity='';
+ input.style.opacity=applies?'':'0.45';
  target.title=applies
   ? 'Perceptual noise floor in L* points (pre-gain): deviations at or below this are labeled \'within meter noise\' in the tooltip at every IRE, because the shadow gain magnifies meter repeatability noise as much as signal. Type a value (0-10) or pick a preset; values above 10 snap to 10; empty or 0 = Off. Typical colorimeter repeatability is ~0.2-0.5 L* points near black. Plotted values never change.'
   : 'Noise floor applies to the Perceptual RGB bal formula only — switch RGB bal to Perceptual to use it. The saved value is kept.';
@@ -9885,6 +9896,7 @@ function meterUpdateNoiseFloorControlAvailability(){
    const btn=btns[i];
    const v=Number(btn.dataset&&btn.dataset.value);
    const on=applied>0&&Number.isFinite(v)&&Math.abs(v-applied)<1e-9;
+   btn.style.opacity=applies?'':'0.45';
    btn.style.borderColor=on?'var(--accent,#5b7fff)':'';
    btn.style.color=on?'var(--accent,#5b7fff)':'';
    btn.setAttribute('aria-pressed',on?'true':'false');
@@ -9936,12 +9948,17 @@ function meterCommitRgbBalanceNoiseFloorInput(){
  if(!input) return;
  const raw=String(input.value==null?'':input.value);
  const trimmed=raw.trim();
- if(!trimmed) return;
+ // Whitespace-only text is Off like empty — and must be erased from the
+ // field so the display never shows blank-space instead of the placeholder.
+ if(!trimmed){ if(raw!=='') input.value=''; return; }
  const n=Number(trimmed);
  if(!Number.isFinite(n)||n<=0){ input.value=''; return; }
  const capped=Math.min(10,n);
  const norm=String(capped);
- if(norm!==raw) input.value=norm;
+ // Whitespace-padded text always rewrites to the clean form even when the
+ // numeric value matches (type=number hides this today; prefs restore and
+ // programmatic callers can still land here with padded text).
+ if(trimmed!==raw||norm!==trimmed) input.value=norm;
 }
 
 // Dispatcher — keeps every existing caller working while honoring the
@@ -11782,10 +11799,13 @@ function meterLoadColorPrefs(){
   setVal('meterGrayWorld',   p.gray_world);
   setVal('meterRgbBalanceFormula', p.rgb_formula);
   setVal('meterRgbBalanceNoiseFloor', p.rgb_noise_floor);
-  // A pref restored from an older client can exceed the cap or be garbage;
-  // normalize the field to the applied value immediately so the displayed
-  // number always matches the annotation, then re-persist the clean value.
-  try{ meterCommitRgbBalanceNoiseFloorInput(); meterSaveColorPrefs(); }catch(e3){}
+  // Normalize immediately so the field never displays a stale out-of-range
+  // value — but do NOT save here: meterSaveColorPrefs serializes the live DOM
+  // for ALL prefs, and everything below this line has not been restored yet,
+  // so a mid-load save writes HTML defaults over the operator's stored EOTF/
+  // chart/gamma preferences (silent loss on the next reload). The re-save of
+  // the committed value happens after the last restore below.
+  try{ meterCommitRgbBalanceNoiseFloorInput(); }catch(e3){}
   try{ meterUpdateNoiseFloorControlAvailability(); }catch(e2){}
   setVal('meterDeltaEForm',  meterNormalizeSavedGreyDeltaEForm(p.de_form));
   setVal('meterColorDeltaEForm', p.color_de_form);
@@ -11807,6 +11827,11 @@ function meterLoadColorPrefs(){
   setVal('meterHdrDiffuseWhite', p.hdr_diffuse_white);
   setChk('meterHdrDiffuseWhiteAuto', p.hdr_diffuse_white_auto==null?'1':p.hdr_diffuse_white_auto);
   meterSyncHdrDiffuseWhiteControl();
+  // All controls are restored now: re-commit the noise floor (a pref from an
+  // older client can exceed the cap or be garbage) and re-persist the clean
+  // value. Saving here is safe because the DOM now mirrors the full saved
+  // prefs object; saving earlier would serialize un-restored defaults.
+  try{ meterCommitRgbBalanceNoiseFloorInput(); meterSaveColorPrefs(); }catch(e3){}
   try{ meterUpdateCie3dLabel(); meterApplyCie3dLayout(); }catch(e2){}
  }catch(e){}
 }
@@ -14490,12 +14515,21 @@ function drawDeltaBarsVertical(canvasId,spec){
  if(!c) return;
  // Canvas has no per-bar tooltip, so a dimmed (within-noise) bar would look
  // like a render bug on hover. Summarize the flagged channels once on the
- // canvas title element instead; empty title when nothing is flagged.
+ // canvas title element; empty title when nothing is flagged. Only specs
+ // built by meterRgbDeltasForLive carry boolean per-entry noise flags —
+ // xyY/other specs share this renderer and must keep their own (untouched)
+ // title (PR-16 review finding). A null spec is a clear-redraw: reset ours.
  try{
-  const flagged=spec&&Array.isArray(spec.entries)?spec.entries.filter(e=>e.noise&&e.v!=null).map(e=>e.label):[];
-  c.title=flagged.length
-   ? flagged.join(', ')+' within meter noise floor (±'+meterRgbBalanceNoiseFloor()+' L* pre-gain) — noise, not a real error.'
-   : '';
+  const entries=spec&&Array.isArray(spec.entries)?spec.entries:null;
+  const rgbSpec=!!(entries&&entries.some(e=>e&&typeof e.noise==='boolean'));
+  if(rgbSpec){
+   const flagged=entries.filter(e=>e.noise&&e.v!=null).map(e=>e.label);
+   c.title=flagged.length
+    ? flagged.join(', ')+' within meter noise floor (±'+meterRgbBalanceNoiseFloor()+' L* pre-gain) — noise, not a real error.'
+    : '';
+  } else if(!spec&&c.title&&c.title.indexOf('within meter noise floor')>=0){
+   c.title='';
+  }
  }catch(e){}
  const rect=c.getBoundingClientRect();
  if(rect.width<2||rect.height<2) return;
