@@ -14421,6 +14421,15 @@ function meterXYYDeltasForLive(reading){
 function drawDeltaBarsVertical(canvasId,spec){
  const c=document.getElementById(canvasId);
  if(!c) return;
+ // Canvas has no per-bar tooltip, so a dimmed (within-noise) bar would look
+ // like a render bug on hover. Summarize the flagged channels once on the
+ // canvas title element instead; empty title when nothing is flagged.
+ try{
+  const flagged=spec&&Array.isArray(spec.entries)?spec.entries.filter(e=>e.noise&&e.v!=null).map(e=>e.label):[];
+  c.title=flagged.length
+   ? flagged.join(', ')+' within meter noise floor (±'+meterRgbBalanceNoiseFloor()+' L* pre-gain) — noise, not a real error.'
+   : '';
+ }catch(e){}
  const rect=c.getBoundingClientRect();
  if(rect.width<2||rect.height<2) return;
  const dpr=pgCanvasPixelRatio();

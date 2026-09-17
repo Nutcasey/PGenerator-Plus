@@ -3510,11 +3510,17 @@ function meterGreyTvColumnHtml(channelKey,label,color,tvValue,liveEntry,halfRang
  const magnitude=(delta!=null&&halfRange>0)?Math.min(50,Math.abs(delta)/halfRange*50):0;
 	 // liveEntry.noise: deviation is inside the meter noise floor (Perceptual)
 	 // — dim the fill so it reads as "not a real error", same convention as the
-	 // canvas live-RGB bars.
-	 const noiseOpacity=(liveEntry&&liveEntry.noise)?'opacity:.45;':'';
+	 // canvas live-RGB bars. The dim alone is cryptic, so also carry a hover
+	 // title naming the floor: without it the faded bar looks like a render bug.
+	 const isNoise=!!(liveEntry&&liveEntry.noise);
+	 const noiseOpacity=isNoise?'opacity:.45;':'';
+	 // Hover explanation for a dimmed fill; plain text, no quotes introduced.
+	 const noiseTitleAttr=isNoise
+	 	? ' title="Deviation is within the meter noise floor (±'+meterRgbBalanceNoiseFloor()+' L* pre-gain) — noise, not a real error."'
+	 	: '';
 	 const fillStyle=(delta==null)
-		  ? 'display:none;'
-		  : 'top:'+(delta>=0?(50-magnitude):50)+'%;height:'+magnitude+'%;background:'+color+';color:'+color+';border-radius:'+(delta>=0?'4px 4px 0 0':'0 0 4px 4px')+';'+noiseOpacity;
+	 	  ? 'display:none;'
+	 	  : 'top:'+(delta>=0?(50-magnitude):50)+'%;height:'+magnitude+'%;background:'+color+';color:'+color+';border-radius:'+(delta>=0?'4px 4px 0 0':'0 0 4px 4px')+';'+noiseOpacity;
 	 const inputValue=meterGreyTvFormatInputValue(tvValue);
 	 if(readOnly){
 		 return `
@@ -3522,7 +3528,7 @@ function meterGreyTvColumnHtml(channelKey,label,color,tvValue,liveEntry,halfRang
 		   <div class="meter-lg-rgb-label" style="color:${color}">${label}</div>
 		   <div class="meter-lg-rgb-bar">
 		    <div class="meter-lg-rgb-zero"></div>
-		    <div class="meter-lg-rgb-fill" style="${fillStyle}"></div>
+		    <div class="meter-lg-rgb-fill"${noiseTitleAttr} style="${fillStyle}"></div>
 		   </div>
 		   <div class="meter-lg-rgb-live">${meterGreyTvFormatLiveValue(liveEntry)}</div>
 			  </div>`;
@@ -3533,7 +3539,7 @@ function meterGreyTvColumnHtml(channelKey,label,color,tvValue,liveEntry,halfRang
 	   <button class="btn btn-sm btn-secondary meter-lg-rgb-button" title="${label} up ${meterGreyTvChannelStep(channelKey)}" onclick="meterGreyAdjustCurrentStepChannel('${channelKey}',1)" ${disabled?'disabled':''}>&#9650;</button>
 	   <div class="meter-lg-rgb-bar">
 	    <div class="meter-lg-rgb-zero"></div>
-	    <div class="meter-lg-rgb-fill" style="${fillStyle}"></div>
+	    <div class="meter-lg-rgb-fill"${noiseTitleAttr} style="${fillStyle}"></div>
 	   </div>
 	   <button class="btn btn-sm btn-secondary meter-lg-rgb-button" title="${label} down ${meterGreyTvChannelStep(channelKey)}" onclick="meterGreyAdjustCurrentStepChannel('${channelKey}',-1)" ${disabled?'disabled':''}>&#9660;</button>
 	   <div class="meter-lg-rgb-tv"><input class="meter-lg-rgb-tv-input" data-channel="${channelKey}" type="text" inputmode="decimal" value="${inputValue}" title="Set ${label} value" aria-label="Set ${label} LG RGB value" onkeydown="meterGreyTvInputKeydown(event,'${channelKey}',this)" ${disabled?'disabled':''}><button class="btn btn-sm btn-secondary meter-lg-rgb-apply" title="Apply ${label} value" aria-label="Apply ${label} LG RGB value" onclick="meterGreyTvApplyInput('${channelKey}',this)" ${disabled?'disabled':''}>&#10003;</button></div>
