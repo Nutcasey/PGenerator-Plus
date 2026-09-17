@@ -43,10 +43,16 @@ ok(!defined(&main::_shell_quote), 'unused and incorrect _shell_quote is gone');
 {
  no warnings qw(redefine once);
  local *main::_log=sub {};
- my $reply={status=>'ok',verification_state=>'acknowledged_unverified'};
+ my $reply={status=>'ok',verification_state=>'acknowledged_unverified',
+  setting_verification=>{autoPowerOff=>{status=>'acknowledged_unverified',expected=>'off'}},
+  setting_contracts=>{autoPowerOff=>{write_decision=>'allowed',allow_unverified_readback=>JSON::PP::true}}};
  local *main::_api=sub {$reply};
  my $item={hazard_restore=>{autoPowerOff=>{value=>'off',category=>'power'}}};
- is(scalar @{main::_restore_hazards($item)},1,'acknowledged-only hazard restoration is a cleanup failure');
+ # P19: a restore the TV accepted but cannot read back is not a failure that
+ # holds the TV forever; it is reported as unverified for the operator.
+ my @unverified;
+ is(scalar @{main::_restore_hazards($item,\@unverified)},0,'acknowledged-only hazard restoration is not a cleanup failure');
+ is_deeply([map {$_->{key}} @unverified],['autoPowerOff'],'it is recorded as unverified instead');
  delete $reply->{verification_state};
  is(scalar @{main::_restore_hazards($item)},1,'missing hazard verification cannot be treated as restored');
  $reply->{verification_state}='verified';

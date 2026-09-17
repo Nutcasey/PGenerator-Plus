@@ -7,6 +7,9 @@ use JSON::PP ();
 use Test::More;
 local $ENV{PGEN_AUTOMATION_DIR}=tempdir(CLEANUP=>1);
 { local @ARGV=('mode-skip-test','test-token'); local $SIG{__WARN__}=sub {}; do "$Bin/../usr/bin/pgen_automation_runner.pl"; die $@ if $@; }
+# A real run always has a manifest; mode writes are journalled in it (P14).
+PGAutomation::ensure_store();
+PGAutomation::write_json_atomic(PGAutomation::run_dir('mode-skip-test').'/run.json',{id=>'mode-skip-test',token=>'test-token',status=>'running',items=>[{}]});
 # A picture mode the TV already reports on the expected input is confirmed
 # by that independent read; no write, no settle, no second read.
 my (@calls,@checks,@settles,@logs);

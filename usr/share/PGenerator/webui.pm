@@ -1085,6 +1085,26 @@ sub webui_complete_renderer_restart (@) {
  return 0;
 }
 
+# The accept thread must never block: a listener in blocking mode can wedge on
+# accept() after select() reported a connection the client already dropped.
+sub webui_http_prepare_listener (@) {
+ my ($server)=@_;
+ $server->blocking(0);
+ return $server;
+}
+
+# Overload reply, sent from the accept thread. Never block on a client which
+# does not read: a partial best-effort 503 is preferable to a wedged listener.
+sub webui_http_shed_request (@) {
+ my ($h)=@_;
+ $h->blocking(0);
+ my $msg='{"status":"error","message":"WebUI is busy; retry shortly"}';
+ my $reply="HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: ".length($msg)."\r\nConnection: close\r\nRetry-After: 2\r\n\r\n$msg";
+ eval { syswrite($h,$reply); };
+ eval { close($h); };
+ return 1;
+}
+
 sub webui_http (@) {
  # An optional pre-bound listener lets integration tests exercise the real
  # accept loop and lane dispatcher without binding the appliance's port 80.
@@ -1111,7 +1131,7 @@ sub webui_http (@) {
      ReuseAddr => 1,
     ) || do { &log("WebUI: failed to bind port $http_port: $!"); return; };
  }
- $http_server->blocking(0);
+ &webui_http_prepare_listener($http_server);
  $http_port=$http_server->sockport();
  &log("WebUI: HTTP server started on port $http_port");
 
@@ -1252,13 +1272,7 @@ sub webui_http (@) {
    if($queue->pending() >= $queue_max) {
     $sel->remove($h);
     delete($pending{$fno});
-    # This overload reply runs on the accept thread: never block on a client
-    # which does not read. A partial best-effort 503 is preferable to a wedged listener.
-    $h->blocking(0);
-    my $msg='{"status":"error","message":"WebUI is busy; retry shortly"}';
-    my $reply="HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: ".length($msg)."\r\nConnection: close\r\nRetry-After: 2\r\n\r\n$msg";
-    eval { syswrite($h,$reply); };
-    eval { close($h); };
+    &webui_http_shed_request($h);
     &log("WebUI: shed $lane-lane request for $peek_path (queue limit $queue_max)");
     next;
    }
@@ -13158,7 +13172,9 @@ sub webui_automation_public_run (@) {
   my $cleanup=$run->{stop_cleanup};
   $public->{worker_status}={message=>($cleanup->{verified}?"Cleanup complete: ":"Cleanup failed: ").($cleanup->{message}||"Cleanup result unavailable")};
  }
- foreach my $key (qw(queue_id created_at created_at_iso completed_at stage_started_at finish_policy viewing_restore_outcome pause_context_released)) {
+ # Run warnings and protective-restore outcomes belong on the live card too,
+ # not only in History (P16/P19).
+ foreach my $key (qw(queue_id created_at created_at_iso completed_at stage_started_at finish_policy viewing_restore_outcome pause_context_released warnings hazard_restore_unverified hazard_restore_failures)) {
   $public->{$key}=$run->{$key} if(exists($run->{$key}));
  }
  if(ref($run->{failure}) eq "HASH") {
@@ -13413,13 +13429,50 @@ sub webui_automation_listing_run (@) {
  };
 }
 
+# The History list used to decode every run manifest (52 runs, up to 0.5 MB
+# each) on every request: 20-26 s on the appliance. The listing depends only
+# on run.json, so each run keeps a small summary keyed by the manifest's
+# inode, size and sub-second mtime (atomic writes always change the inode).
+sub webui_automation_listing_key (@) {
+ my ($path)=@_;
+ my @st=eval { require Time::HiRes; Time::HiRes::stat($path) };
+ @st=stat($path) if(!@st);
+ return @st ? join(':',$st[1],$st[7],$st[9]) : "";
+}
+
+# Write the listing summary without ever creating the run directory: a run
+# deleted meanwhile must not reappear as a directory holding only its cache.
+sub webui_automation_write_listing_cache (@) {
+ my ($dir,$value)=@_;
+ return 0 if(!-d $dir || !-f "$dir/run.json");
+ my $tmp="$dir/.listing-cache.$$.".int(rand(1_000_000_000)).".tmp";
+ my $fh;
+ return 0 if(!sysopen($fh,$tmp,O_WRONLY|Fcntl::O_CREAT()|Fcntl::O_EXCL(),0600));
+ my $ok=print {$fh} PGAutomation::encode_json($value);
+ $ok=close($fh) && $ok;
+ if(!$ok || !rename($tmp,"$dir/listing-cache.json")) { unlink($tmp); return 0; }
+ return 1;
+}
+
 sub webui_automation_list_runs (@) {
  my @runs;
  foreach my $id (PGAutomation::list_run_ids()) {
+  my $dir=PGAutomation::run_dir($id);
+  my $key=&webui_automation_listing_key("$dir/run.json");
+  next if($key eq "");
+  my $cached=PGAutomation::read_json_file("$dir/listing-cache.json");
+  if(ref($cached) eq "HASH" && ($cached->{key}||"") eq $key && ref($cached->{summary}) eq "HASH") {
+   push @runs,$cached->{summary};
+   next;
+  }
   my $run=&webui_automation_read_run($id);
   next if(ref($run) ne "HASH");
   my $summary=&webui_automation_listing_run($run);
-  push @runs,$summary if(ref($summary) eq "HASH");
+  next if(ref($summary) ne "HASH");
+  push @runs,$summary;
+  # Only cache what was read from the manifest version that was stat'ed.
+  &webui_automation_write_listing_cache($dir,{key=>$key,summary=>$summary})
+   if(&webui_automation_listing_key("$dir/run.json") eq $key);
  }
  @runs=sort { ($b->{created_at}||0) <=> ($a->{created_at}||0) } @runs;
  return \@runs;
@@ -13939,7 +13992,7 @@ sub webui_automation_checked_readiness (@) {
  my $result;
  eval {
   die "Unable to create automation storage" if(!PGAutomation::ensure_store());
-  $state->{message}="Checking TV connection and meter";
+  $state->{message}=$payload->{static_only} ? "Validating the queue, meter and storage" : "Checking TV connection and meter";
   &webui_automation_preflight_event($state,$state->{message});$write->();
   my %request=%$payload;
   $request{_progress}=sub {
@@ -13995,6 +14048,11 @@ sub webui_automation_readiness_data (@) {
  $payload={} if(ref($payload) ne "HASH");
  my $job_checks=($payload->{scope}||"") eq "job";
  my $preview=($payload->{scope}||"") eq "preview";
+ # Starting a batch only needs what cannot wait: a valid queue, a physical
+ # idle meter and storage. The runner's first act is the same batch check
+ # with the TV conversation (status, reconnect, CAL_END) under its own
+ # execution claim, so repeating that here only delayed the start by 20 s+.
+ my $static_only=$payload->{static_only} && !$job_checks && !$preview ? 1 : 0;
  my $items=$payload->{items};
  $items=$payload->{queue}{items} if(ref($items) ne "ARRAY" && ref($payload->{queue}) eq "HASH");
  $items=[] if(ref($items) ne "ARRAY");
@@ -14010,9 +14068,9 @@ sub webui_automation_readiness_data (@) {
   push @checks,{ name=>$name, ok=>$ok, level=>$level||($ok?"ok":"error"), message=>$message||"", item_number=>$item_number, time=>PGAutomation::now() };
  };
  $check->(@$items ? (1,"queue-present","Queue contains items") : (0,"queue-present","Add at least one automation item"));
- $progress->(undef,"Checking TV connection");
- my $lg=PGAutomation::decode_json(eval { &webui_lg_status_json("Automation readiness") }||"")||{};
- my $lg_connected=($lg->{paired} && !$lg->{disconnected}) || ($lg->{connected} && !$lg->{disconnected});
+ $progress->(undef,"Checking TV connection") if(!$static_only);
+ my $lg=$static_only ? {} : PGAutomation::decode_json(eval { &webui_lg_status_json("Automation readiness") }||"")||{};
+ my $lg_connected=$static_only ? 1 : ($lg->{paired} && !$lg->{disconnected}) || ($lg->{connected} && !$lg->{disconnected});
  $progress->(undef,"Checking physical meter");
  my $meter=PGAutomation::decode_json(eval { &webui_meter_status() }||"")||{};
  my $meter_detected=$meter->{detected} ? 1 : 0;
@@ -14028,14 +14086,14 @@ sub webui_automation_readiness_data (@) {
  my $meter_message=$busy ? "Stop the active meter operation before starting automation" : ($session_alive ? "Meter session is reusable" : "Meter is idle");
  $check->(!$busy,"meter-idle",$meter_message);
  my $connection_message=$lg_connected ? "LG TV is paired and connected" : $lg->{paired} ? "LG TV is paired but disconnected. Connect it in LG Display, or retry after resolving the meter checks." : "Pair the LG TV in LG Display before starting automation.";
- if(!$lg_connected && $lg->{paired} && @$items && $meter_detected && !$meter_simulated && !$busy) {
+ if(!$static_only && !$lg_connected && $lg->{paired} && @$items && $meter_detected && !$meter_simulated && !$busy) {
   $progress->(undef,"Reconnecting the paired LG TV using its saved key; calibration has not started");
   my $connection=&webui_automation_reconnect_for_readiness($lg,$payload->{automation_token});
   $lg_connected=($connection->{status}||"") eq "ok";
   $lg=$connection->{lg} if($lg_connected);
   $connection_message=$lg_connected ? "Reconnected the paired LG TV" : $connection->{message};
  }
- $check->($lg_connected,"lg-paired",$connection_message);
+ $check->($lg_connected,"lg-paired",$connection_message) if(!$static_only);
  my $free_mb;
  if(open(my $df,"-|","df","-Pk",PGAutomation::base_dir())) {
   my @lines=<$df>; close($df);
@@ -14048,10 +14106,12 @@ sub webui_automation_readiness_data (@) {
  my $disk_level=!defined($free_mb) ? "warning" : $free_mb>=256 ? "ok" : "error";
  $check->(!defined($free_mb) || $free_mb>=256,"disk-space",defined($free_mb) ? "Automation storage has ${free_mb}MB free" : "Unable to measure automation storage; verify disk space manually",undef,$disk_level);
  if(!$lg_connected || !$meter_detected || $meter_simulated || $busy) {
-  $progress->(undef,"Startup blocked: resolve the TV or meter connection before checking jobs");
-  return {status=>"ok",ready=>0,checks=>\@checks,items=>[],message=>"Startup blocked: resolve the TV or meter checks below. No calibration has started."};
+  # A static start never read the TV, so it must not tell the operator to fix one.
+  my $what=$static_only ? "meter or equipment" : "TV or meter";
+  $progress->(undef,"Startup blocked: resolve the $what checks before checking jobs");
+  return {status=>"blocked",ready=>0,checks=>\@checks,items=>[],message=>"Startup blocked: resolve the $what checks below. No calibration has started."};
  }
- if(@$items) {
+ if(@$items && !$static_only) {
   # The status flag is persisted state, not a live TV readback. A fresh
   # CAL_END acknowledgement establishes normal viewing even after a crash
   # left that flag stale. Never run this while another worker owns the TV.
@@ -14068,7 +14128,7 @@ sub webui_automation_readiness_data (@) {
    : "Unable to establish normal viewing before baseline measurements: $reason",undef);
   if(!$normal) {
    $progress->(undef,"Startup blocked: TV calibration exit could not be confirmed");
-   return {status=>"ok",ready=>0,checks=>\@checks,items=>[],message=>"Startup blocked: TV calibration mode is unconfirmed. No baseline measurements or calibration have started."};
+   return {status=>"blocked",ready=>0,checks=>\@checks,items=>[],message=>"Startup blocked: TV calibration mode is unconfirmed. No baseline measurements or calibration have started."};
   }
  }
  my @prepared;
@@ -14320,7 +14380,7 @@ sub webui_automation_readiness_data (@) {
   }
  }
  return {
-  status => "ok",
+  status => $ready ? "ok" : "blocked",
   ready => $ready ? 1 : 0,
   checks => \@checks,
   items => \@prepared,
@@ -14404,8 +14464,10 @@ sub webui_automation_start (@) {
  }
  $queue=&webui_automation_normalize_queue($queue||{name=>$payload->{queue_name}||$payload->{name}||"Automation queue",items=>$payload->{items}});
  return &webui_automation_error("Unable to create the automation store","store-unavailable") if(!PGAutomation::ensure_store());
- my $readiness=&webui_automation_checked_readiness({items=>$queue->{items},queue_name=>$queue->{name},request_id=>$payload->{request_id},automation_token=>""},"start");
- return &webui_automation_json($readiness) if(!$readiness->{ready});
+ my $readiness=&webui_automation_checked_readiness({items=>$queue->{items},queue_name=>$queue->{name},request_id=>$payload->{request_id},automation_token=>"",static_only=>1},"start");
+ # A refused start is not "ok". Keep the readiness payload for the UI, but
+ # make the refusal unambiguous to API clients.
+ return &webui_automation_json({%$readiness,status=>(($readiness->{status}||"") eq "error"?"error":"blocked"),error_code=>$readiness->{error_code}||"queue-not-ready"}) if(!$readiness->{ready});
  my $items=$readiness->{items};
  return &webui_automation_error("Queue has no automation items","empty-queue") if(ref($items) ne "ARRAY" || !@$items);
  my $run_id=PGAutomation::new_id();
@@ -14790,8 +14852,13 @@ sub webui_automation_boot_recover (@) {
  return 0 if(!PGAutomation::ensure_store());
  foreach my $run_id (PGAutomation::list_run_ids()) {
   PGAutomation::with_lock(PGAutomation::run_dir($run_id).'/run.json',sub {
-   my ($state)=@_;return undef if(ref($state) ne 'HASH' || ($state->{status}||'') ne 'paused'
-    || !@{PGAutomation::restoration_problems($state)});
+   my ($state)=@_;return undef if(ref($state) ne 'HASH' || ($state->{status}||'') ne 'paused');
+   # Manifests written before hazard_restore_pending existed record the
+   # protective values to restore but not the obligation itself.
+   my $legacy_hazards=!exists($state->{hazard_restore_pending})
+    && (grep { ref($_) eq 'HASH' && ref($_->{hazard_restore}) eq 'HASH' && %{$_->{hazard_restore}} } ($state,@{$state->{items}||[]}));
+   $state->{hazard_restore_pending}=JSON::PP::true if($legacy_hazards);
+   return undef if(!@{PGAutomation::restoration_problems($state)});
    $state->{status}='interrupted';$state->{cleanup_required}=JSON::PP::true;$state->{pending_terminal_status}='paused';$state->{pause_park_pending}=JSON::PP::true;
    $state->{failure}={stage=>'pause',error_code=>'daemon-restarted',message=>'Paused run still has temporary device changes; safe cleanup is required'};
    return $state;

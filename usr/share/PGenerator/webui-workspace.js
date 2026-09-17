@@ -7976,6 +7976,10 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries){
   selectedThumb:meterSelectedThumbIre
  };
  const cacheBackup=meterFullAutoCalCloneValue(meterSeriesCache||{});
+ // Saved runs render through the live series cache; keep them out of browser
+ // storage (they are on the Pi) so reports never fill the operator's quota.
+ const suspendsPersistence=typeof meterSeriesCachePersistSuspended!=='undefined';
+ if(suspendsPersistence) meterSeriesCachePersistSuspended++;
  let sectionHtml='';
  try{
   for(const entry of entries){
@@ -8042,6 +8046,10 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries){
   else window._meterSnapshotReportTargetGamma=previousReportGamma;
   reportControls.forEach(({el,value,checked})=>{el.value=value;el.checked=checked;});
   meterSeriesCache=cacheBackup||{};
+  if(suspendsPersistence) meterSeriesCachePersistSuspended=Math.max(0,meterSeriesCachePersistSuspended-1);
+  // Keys only the report touched have nothing to persist; the operator's own
+  // keys that the report temporarily overwrote are rewritten from the backup.
+  if(typeof meterSeriesCacheDirtyKeys!=='undefined') Array.from(meterSeriesCacheDirtyKeys).forEach(key=>{if(!Object.prototype.hasOwnProperty.call(meterSeriesCache,key))meterSeriesCacheDirtyKeys.delete(key);});
   meterPersistSeriesCache();
   if(restore.key){
    meterRestoreSeriesFromCache(restore.key);
@@ -11927,6 +11935,9 @@ async function meterRunSelectedPatches(){
 // Run a full automated series, or a thumbnail subset from Read Selection.
 async function meterRunSeries(options){
  options=options||{};
+ // A series started from this browser is never automation-owned; clear the
+ // ownership flag a recovered automation series may have left behind.
+ if(typeof meterActiveSeriesAutomationOwned!=='undefined')meterActiveSeriesAutomationOwned=false;
  if(meterSeriesCacheDirtyKeys&&meterSeriesCacheDirtyKeys.size) meterFlushScheduledSeriesCache();
  const requestedDvMapModeOverride=(String(options.dvMapModeOverride||'')==='1')?'1':((String(options.dvMapModeOverride||'')==='2')?'2':'');
  const requestedTargetGamutOverride=/^(?:bt709|bt2020|p3d65|p3dci)$/.test(String(options.targetGamutOverride||'').toLowerCase())
@@ -12328,6 +12339,10 @@ async function meterPollSeries(){
 	     &&r.readings.some(rd=>String(rd&&rd.name||'').trim().toLowerCase()==='white ref')){
 	   meterSeriesWaitingForWhiteReference=false;
 	  }
+	  // Ownership comes from the polled series itself, not from whatever was
+	  // recovered earlier: the drive-code toast is meaningless for a series the
+	  // automation runner drives.
+	  if(typeof meterActiveSeriesAutomationOwned!=='undefined')meterActiveSeriesAutomationOwned=!!(r&&r.automation_worker_id);
 	  const incoming=meterAttachSeriesMeta(meterFilterReadingsForCurrentSteps(r.readings,meterActiveSeriesType));
 	  // Read Selection: merge into the pre-run chart. Full series: replace.
 	  if(meterSeriesSelectionRunActive){
@@ -14069,6 +14084,46 @@ function drawGammaValuePreset(gsSteps){
  drawGammaLegend(ctx,chart,targetLabel,'');
 }
 
+// HDR "gamma" is the log-ratio exponent ln(Y/Yw)/ln(V) against the measured
+// white. Once a panel hard-clips (a G3 holds 1,335 cd/m2 from the 80% step),
+// every step at the clip has Y/Yw ~ 1, so its exponent collapses to ~0: a
+// flat zero tail that is not a gamma at all, and it dragged the headline
+// average from 3.48 to 2.76 (P26). Readings within 2% of the measured white
+// below 100% are at the clip. The clip starts at the lowest such step, and
+// every step from there up to (not including) 100% is left out of the gamma
+// line, the target line, the per-channel overlay, the average, the tooltip,
+// the report table and the CSV: a step above the onset that meter noise put
+// just under the 2% band is still at the clip.
+const METER_HDR_GAMMA_CLIP_FRACTION=0.98;
+function meterGammaReadingAtPanelClip(luminance,whiteY,ire,hdr){
+ if(!hdr||!(whiteY>0)) return false;
+ const stimulus=Number(ire)||0;
+ return stimulus>0&&stimulus<100&&Number(luminance)>=METER_HDR_GAMMA_CLIP_FRACTION*whiteY;
+}
+// Every non-SDR view (HDR10, Dolby Vision, HLG) can hit a panel clip.
+function meterGammaClipAwareView(){
+ return (typeof meterChartIsHdr==='function')&&!!meterChartIsHdr();
+}
+// Lowest stimulus below 100% whose reading is at the panel clip, or null.
+function meterGammaClipOnsetIre(readings,whiteY,hdr,ireOf){
+ if(!hdr||!(whiteY>0)||!Array.isArray(readings)) return null;
+ const stimulusOf=typeof ireOf==='function'?ireOf:(rd=>rd.ire);
+ let onset=null;
+ readings.forEach(rd=>{
+  if(!rd) return;
+  const ire=Number(stimulusOf(rd));
+  if(!Number.isFinite(ire)) return;
+  const y=rd.luminance!=null?rd.luminance:rd.Y;
+  if(meterGammaReadingAtPanelClip(y,whiteY,ire,true)) onset=onset==null?ire:Math.min(onset,ire);
+ });
+ return onset;
+}
+function meterGammaExcludedAtClip(ire,onset){
+ if(onset==null) return false;
+ const stimulus=Number(ire);
+ return Number.isFinite(stimulus)&&stimulus>=onset&&stimulus<100;
+}
+
 function drawGammaValueChart(gs,allSteps,readingMap){
 	 const ctx=getChartCtx('chartGammaValue');
 	 if(!ctx) return;
@@ -14093,24 +14148,27 @@ function drawGammaValueChart(gs,allSteps,readingMap){
  const targetChartYw=meterChartIsHdr()?meterGreyTargetPeak(chartYw):chartYw;
  const gammaMap={};
  const targetMap={};
+	 const clipAware=meterGammaClipAwareView();
+	 const clippedFrom=meterGammaClipOnsetIre(sorted,chartYw,clipAware);
 	 sorted.forEach((rd,idx)=>{
 	  const y=rd.luminance!=null?rd.luminance:rd.Y;
 	  const topGamma=(Number(rd.ire)||0)>=100;
 	  if(topGamma) return;
+	  const atClip=meterGammaExcludedAtClip(rd.ire,clippedFrom);
 	  const analysisIre=meterReadingGammaAnalysisIre(rd)||rd.ire;
 	  const prev=topGamma
 	   ? (meterGammaPreviousSeriesReading(rd,xSteps,readingMap)||(!allSteps&&idx>0?sorted[idx-1]:null))
 	   : (idx>0?sorted[idx-1]:null);
 	  const prevY=prev?(prev.luminance!=null?prev.luminance:prev.Y):null;
 	  const prevIre=prev?(meterReadingGammaAnalysisIre(prev)||prev.ire||0):null;
-	  if(!(topGamma&&allSteps&&!prev)){
+	  if(!(topGamma&&allSteps&&!prev)&&!atClip){
 	  const g=((topGamma && (meterChartIsHdr()||meterChartIsDv()))
 	      ? effectiveGammaTopSlope(y,chartYw,analysisIre,prevY,prevIre)
 	      : meterGreyscaleGammaValue(rd,chartYw,Lb));
 	   if(g!=null&&isFinite(g)) gammaMap[rd.ire]=g;
 	  }
 		  const targetIreForRd=((typeof meterGreyscaleTargetSlotIre==='function')?meterGreyscaleTargetSlotIre(rd):null)||analysisIre;
-		  const tg=meterGreyTargetGamma(targetIreForRd,targetChartYw,Lb,rd.r_code,prevIre,prev?(prev.r_code!=null?prev.r_code:prev.r):null);
+		  const tg=atClip?null:meterGreyTargetGamma(targetIreForRd,targetChartYw,Lb,rd.r_code,prevIre,prev?(prev.r_code!=null?prev.r_code:prev.r):null);
 	  if(tg!=null&&isFinite(tg)) targetMap[rd.ire]=tg;
 	 });
  xSteps.forEach((step,idx)=>{
@@ -14119,6 +14177,7 @@ function drawGammaValueChart(gs,allSteps,readingMap){
 	  const prevRd=(readingMap&&prev)?readingMap[prev.ire]:null;
 		  const targetIre=rd?(((typeof meterGreyscaleTargetSlotIre==='function')?meterGreyscaleTargetSlotIre(rd):null)||step.ire):meterGreyscaleTargetIreForStep(step,readingMap);
 		  if((Number(step.ire)||0)>=100 || (targetIre||0)>=100) return;
+		  if(meterGammaExcludedAtClip(step.ire,clippedFrom)) return;
 		  const targetCode=rd&&rd.r_code!=null?rd.r_code:meterGreyscaleTargetCodeForStep(step,readingMap);
 		  const prevIre=prevRd?(((typeof meterGreyscaleTargetSlotIre==='function')?meterGreyscaleTargetSlotIre(prevRd):null)||prev.ire):(prev?meterGreyscaleTargetIreForStep(prev,readingMap):null);
 	  const prevCode=prevRd&&prevRd.r_code!=null?prevRd.r_code:(prev?meterGreyscaleTargetCodeForStep(prev,readingMap):null);
@@ -14169,7 +14228,7 @@ function drawGammaValueChart(gs,allSteps,readingMap){
   const rPts=[],gPts=[],bPts=[];
   xSteps.forEach((step,idx)=>{
    const rd=readingMap[step.ire];
-   if(!rd || !rd._gamma_rgb) return;
+   if(!rd || !rd._gamma_rgb || meterGammaExcludedAtClip(step.ire,clippedFrom)) return;
    const gr=rd._gamma_rgb;
    const x=meterGammaChartX(step,xSteps,idx);
    const toY=(v)=>(v!=null&&isFinite(v))?Math.max(0,Math.min(1,(v-yMin)/(yMax-yMin))):null;
@@ -14185,7 +14244,7 @@ function drawGammaValueChart(gs,allSteps,readingMap){
  let avgText='';
  if(mPts.length>0){
   const avg=measuredVals.reduce((s,v)=>s+v,0)/measuredVals.length;
-  avgText='Avg: '+avg.toFixed(2);
+  avgText='Avg: '+avg.toFixed(2)+(clippedFrom!=null?' (panel clip from '+clippedFrom+'% excluded)':'');
  }
  drawGammaLegend(ctx,chart,targetLabel,avgText);
 }
@@ -18427,7 +18486,9 @@ function chartHandleHover(e,canvasId){
  const targetY=(lumInfo.targetY!=null&&Number.isFinite(Number(lumInfo.targetY)))?Number(lumInfo.targetY).toFixed(3):'--';
  let gammaReferenceReadings=meterGreyscaleReadings(meterReadings);
  if(canvasId==='chartGammaValue') gammaReferenceReadings=meterFilterLgAutoCalChartItems(gammaReferenceReadings);
- const gamma=meterGreyscaleGammaValue(rd,meterGammaValueReferenceY(gammaReferenceReadings));
+ const gammaWhiteY=meterGammaValueReferenceY(gammaReferenceReadings);
+ const gammaAtClip=meterGammaExcludedAtClip(rd.ire,meterGammaClipOnsetIre(gammaReferenceReadings,gammaWhiteY,meterGammaClipAwareView()));
+ const gamma=gammaAtClip?null:meterGreyscaleGammaValue(rd,gammaWhiteY);
  let html='<b>'+rd.ire+'%</b><br>';
  html+='<span>Read Y: '+readY+' cd/m\u00B2</span>';
  if(targetY!=='--') html+=' &nbsp; <span>Target Y: '+targetY+' cd/m\u00B2</span>';
@@ -18438,7 +18499,8 @@ function chartHandleHover(e,canvasId){
   const perceptualGain=meterPerceptualRgbBalanceGain(rd);
   if(perceptualGain>1.0005) html+='<br>Perceptual gain: '+perceptualGain.toFixed(2)+'x';
  }
- if(gamma!=null) html+='<br>Gamma: '+gamma.toFixed(2);
+ if(gammaAtClip) html+='<br>Gamma: at panel clip (excluded)';
+ else if(gamma!=null) html+='<br>Gamma: '+gamma.toFixed(2);
  if(hit.deChroma!=null&&hit.deSelected!=null){
   // Separate-luminance split: bar total with its chroma/luminance parts.
   const _chroma=Math.min(hit.deChroma,hit.deSelected);
@@ -18673,10 +18735,12 @@ function meterBuildGreyscaleReportTable(){
  const white=report.white;
  const Lw=white?(white.luminance||white.Y||0):0;
  const Lb=meterChartBlackLevel(report.raw);
+ const clipOnset=meterGammaClipOnsetIre(gs,Lw,meterGammaClipAwareView());
  let rows='';
  gs.forEach(rd=>{
   const bal=white?rgbBalance(rd,white,greyMode,Lb):{R:100,G:100,B:100};
-  const gamma=effectiveGamma(rd.luminance,white?(white.Y||white.luminance||rd.Y):rd.Y,rd.ire);
+  const atClip=meterGammaExcludedAtClip(rd.ire,clipOnset);
+  const gamma=atClip?null:effectiveGamma(rd.luminance,white?(white.Y||white.luminance||rd.Y):rd.Y,rd.ire);
   let de='--';
   // Do not force 0.00 for a Y=0 reading: meterColorDeltaE2000 scores a
   // measured black against a lit target itself (still 0 against a black
@@ -18691,7 +18755,7 @@ function meterBuildGreyscaleReportTable(){
    +'<td>'+(rd.x!=null?rd.x.toFixed(4):'--')+'</td>'
    +'<td>'+(rd.y!=null?rd.y.toFixed(4):'--')+'</td>'
    +'<td>'+(rd.cct?rd.cct+'K':'--')+'</td>'
-   +'<td>'+(gamma!=null&&isFinite(gamma)?gamma.toFixed(2):'--')+'</td>'
+   +'<td>'+(atClip?'clip':(gamma!=null&&isFinite(gamma)?gamma.toFixed(2):'--'))+'</td>'
    +'<td>'+bal.R.toFixed(1)+'</td>'
    +'<td>'+bal.G.toFixed(1)+'</td>'
    +'<td>'+bal.B.toFixed(1)+'</td>'
@@ -19319,6 +19383,9 @@ function meterExportCSV(){
   if(!(exportCodeRange.span>0)) return '';
   return Number(((r-exportCodeRange.min)*100/exportCodeRange.span).toFixed(2));
  };
+ // Same panel-clip rule as the gamma chart: the Gamma column is left blank
+ // from the clip onset up to (not including) 100% (P26).
+ const csvClipOnset=colorSeries?null:meterGammaClipOnsetIre(sorted.filter(isGrey),Lw,meterGammaClipAwareView(),csvIre);
  // Greyscale dEuv / dE2000 via HCFR grey-ref at a forced mode.
  const greyHcfrPair=(rd,mode)=>{
   const X=rd.X||0,Y=rd.Y||0,Z=rd.Z||0;
@@ -19375,7 +19442,7 @@ function meterExportCSV(){
    }
   }
   const ire=csvIre(rd);
-  const g=colorSeries?null:effectiveGamma(rd.luminance,Lw,ire);
+  const g=(colorSeries||meterGammaExcludedAtClip(ire,csvClipOnset))?null:effectiveGamma(rd.luminance,Lw,ire);
   // Reuse the exact RGB analysis shown by the live WebUI so neutral color
   // patches export the same 100-centered greyscale balance as the chart.
   const bal=whiteR?(colorSeries?meterLiveRgbData(rd):rgbBalance(rd,whiteR,greyMode,Lb)):{R:100,G:100,B:100};

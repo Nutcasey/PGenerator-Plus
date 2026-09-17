@@ -89,6 +89,29 @@ function pgAutomationStateBadge(status){
 function pgAutomationEscape(value){return String(value==null?'':value).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
 function pgAutomationClone(value){return value==null?value:JSON.parse(JSON.stringify(value));}
 function pgAutomationEl(id){return document.getElementById('pgAutomation'+id);}
+// In-app confirmation. window.confirm() blocks the page and every browser
+// automation driving it; this dialog does not. Tests set
+// window.pgAutomationConfirmOverride to answer without a dialog.
+function pgAutomationConfirm(message,confirmLabel){
+ const hook=globalThis.pgAutomationConfirmOverride;
+ if(typeof hook==='function')return Promise.resolve(!!hook(message));
+ return new Promise(resolve=>{
+  let dialog=document.getElementById('pgAutomationConfirmDialog');
+  if(!dialog){
+   dialog=document.createElement('dialog');dialog.id='pgAutomationConfirmDialog';dialog.setAttribute('aria-labelledby','pgAutomationConfirmText');
+   dialog.innerHTML='<form method="dialog"><p id="pgAutomationConfirmText"></p><div class="auto-actions"><button class="btn btn-sm btn-secondary" type="submit" value="cancel">Cancel</button><button class="btn btn-sm btn-primary" type="submit" value="ok" id="pgAutomationConfirmOk">Continue</button></div></form>';
+   (document.getElementById('pgAutomationQueueDialog')?.parentNode||document.body).appendChild(dialog);
+  }
+  // One question at a time: a second request while one is open is declined
+  // rather than replacing the question the user is reading.
+  if(typeof dialog.showModal!=='function'||dialog.open){resolve(false);return;}
+  dialog.querySelector('#pgAutomationConfirmText').textContent=message;
+  dialog.querySelector('#pgAutomationConfirmOk').textContent=confirmLabel||'Continue';
+  const done=()=>{dialog.removeEventListener('close',done);resolve(dialog.returnValue==='ok');};
+  dialog.returnValue='';dialog.addEventListener('close',done);
+  dialog.showModal();dialog.querySelector('#pgAutomationConfirmOk').focus();
+ });
+}
 function pgAutomationValue(id,fallback){const el=pgAutomationEl(id);return el&&el.value!==''?el.value:fallback;}
 function pgAutomationChecked(id){return !!(pgAutomationEl(id)&&pgAutomationEl(id).checked);}
 function pgAutomationStageEnabled(stages,key){
@@ -97,6 +120,9 @@ function pgAutomationStageEnabled(stages,key){
 function pgAutomationNotice(message,error){
  const level=error==='warning'?'warning':error?'error':'info';error=level==='error';
  if(message){pgAutomation.logNotices.push({time:Date.now()/1000,level,message,source:'Browser'});pgAutomation.logNotices=pgAutomation.logNotices.slice(-100);pgAutomationRenderActivity();}
+ // Info notices describe a moment ("Automation resumed"); the live render
+ // clears them once the run has since parked or finished.
+ pgAutomation.noticeLevel=message?level:'';pgAutomation.noticeRunStatus=null;pgAutomation.noticeAt=Date.now();
  const el=pgAutomationEl('Notice');if(!el)return;
  el.textContent=message||'';el.style.display=message?'block':'none';el.style.color=error?'var(--red)':level==='warning'?'var(--orange)':'var(--text2)';
  el.setAttribute('role',error?'alert':'status');
@@ -131,8 +157,15 @@ function pgAutomationUpgradeReference(item){
  item.manual_checks=['TruMotion: verify Off in the TV menu; this control is not available through the API.'];item.template_id='reference-settings-v3';
 }
 function pgAutomationSaveDraft(){
- try{localStorage.setItem('pgen.automation.queueDraft',JSON.stringify({queue:pgAutomation.queue,editingRunId:pgAutomation.editingRunId,firstPending:pgAutomation.firstPending,selectedQueue:pgAutomation.selectedQueue,loadedQueueSnapshot:pgAutomation.loadedQueueSnapshot}));}
- catch(e){pgAutomationNotice('Browser draft storage is unavailable. Use Save queue to keep edits on the Pi before refreshing.', 'warning');}
+ const draft=JSON.stringify({queue:pgAutomation.queue,editingRunId:pgAutomation.editingRunId,firstPending:pgAutomation.firstPending,selectedQueue:pgAutomation.selectedQueue,loadedQueueSnapshot:pgAutomation.loadedQueueSnapshot});
+ try{localStorage.setItem('pgen.automation.queueDraft',draft);}
+ catch(e){
+  // A full storage quota is usually cached series data, which is disposable;
+  // the queue draft is not. Free series space and try once more.
+  let saved=false;
+  if(typeof meterSeriesCacheReclaimSpace==='function'&&meterSeriesCacheReclaimSpace()){try{localStorage.setItem('pgen.automation.queueDraft',draft);saved=true;}catch(retry){}}
+  if(!saved)pgAutomationNotice('Browser draft storage is unavailable. Use Save queue to keep edits on the Pi before refreshing.', 'warning');
+ }
  const ready=pgAutomationEl('Readiness');if(ready)ready.innerHTML='';
 }
 function pgAutomationModes(signal){
@@ -301,11 +334,14 @@ function pgAutomationModeEligibility(){
   :contract&&!contract.allowed?'This mode is available for readings, not AutoCal.':contract?.message||'';
  pgAutomationEl('ModeEligibility').textContent=message;
  select.setAttribute('aria-invalid',blocked?'true':'false');
- pgAutomationEl('EditorSave').disabled=!!pgAutomation.planPending||!!pgAutomation.planError||blocked;
+ // A pending check no longer blocks Save: job readiness re-checks every
+ // control against the TV, so the wait (30-50 s on a busy appliance) only
+ // guided the choice. A failed check still needs attention before saving.
+ pgAutomationEl('EditorSave').disabled=!!pgAutomation.editorSaving||!!pgAutomation.planError||blocked;
  pgAutomationEl('EditorSave').title=blocked?message:'';
  let footer=pgAutomationEl('ModeSaveHelp');
  if(!footer){footer=document.createElement('p');footer.id='pgAutomationModeSaveHelp';footer.className='auto-muted';footer.style.cssText='flex-basis:100%;margin:0';pgAutomationEl('EditorSave').parentElement.prepend(footer);}
- footer.textContent=pgAutomation.planPending?'Checking TV compatibility — required before saving. You can continue editing while this runs.'
+ footer.textContent=pgAutomation.planPending?'Checking TV compatibility. You can keep editing or save now; unsupported controls are flagged when the queue is checked.'
   :pgAutomation.planError?'TV compatibility check failed. Review the error above and retry before saving.'
   :blocked?message:'';
  footer.hidden=!footer.textContent;
@@ -319,7 +355,7 @@ function pgAutomationRenderCompatibilityStatus(modeBlockMessage){
  let state='required',label='Check required',detail='Required before saving. Connect your TV, then check which controls this job can use.',action='Check TV compatibility';
  if(pgAutomation.planPending){
   state='checking';label='Checking…';action='Checking compatibility…';
-  detail='Required before saving. Reading the connected TV and matching its controls to this job. Keep the TV connected; you can continue editing.';
+  detail='Reading the connected TV and matching its controls to this job. Keep the TV connected; you can keep editing or save now, and Check Readiness flags any control the TV rejects.';
  }else if(pgAutomation.planError){
   state='error';label='Check failed — action needed';action='Retry compatibility check';
   detail=pgAutomation.planError+' Keep your TV connected, then retry. This check must complete before you can save.';
@@ -403,7 +439,7 @@ async function pgAutomationResolveSettingsPlan(){
  if(typeof fetchJSON!=='function')return;
  const epoch=pgAutomation.editorEpoch,request=(pgAutomation.planRequest||0)+1;
  pgAutomation.planRequest=request;pgAutomation.planPending=true;pgAutomation.planError='';
- pgAutomationEl('EditorSave').disabled=true;pgAutomationEl('PanelBinding').textContent='Checking TV compatibility…';
+ pgAutomationEl('PanelBinding').textContent='Checking TV compatibility…';
  pgAutomationEl('KeysButton').disabled=true;pgAutomationUpdateEditor();
  try{
   Object.assign(pgAutomation.supportedValues,pgAutomationReadSettingsEditor());
@@ -426,7 +462,7 @@ async function pgAutomationResolveSettingsPlan(){
   pgAutomation.planError=e.message;pgAutomationEl('PanelBinding').textContent='TV compatibility unavailable';
   pgAutomationEl('PanelBindingHelp').textContent=e.message+' Refresh TV compatibility to retry.';
  }finally{
-  if(epoch===pgAutomation.editorEpoch&&request===pgAutomation.planRequest){pgAutomation.planPending=false;pgAutomationEl('EditorSave').disabled=!!pgAutomation.planError;pgAutomationEl('KeysButton').disabled=false;pgAutomationUpdateEditor();}
+  if(epoch===pgAutomation.editorEpoch&&request===pgAutomation.planRequest){pgAutomation.planPending=false;pgAutomationEl('EditorSave').disabled=!!pgAutomation.editorSaving||!!pgAutomation.planError;pgAutomationEl('KeysButton').disabled=false;pgAutomationUpdateEditor();}
  }
 }
 function pgAutomationRenderManualSettings(){
@@ -534,7 +570,7 @@ function pgAutomationNumber(id,fallback,min,max){
  return value;
 }
 function pgAutomationRecipeFromForm(){
- if(pgAutomation.planPending||pgAutomation.planError)throw new Error(pgAutomation.planError||'Wait for the TV compatibility check to finish.');
+ if(pgAutomation.planError)throw new Error(pgAutomation.planError);
  const admission=pgAutomation.settingsPlan?.calibration_mode;
  if(pgAutomationChecked('Cal')&&admission&&!admission.allowed)throw new Error(admission.message);
  const recipe=pgAutomationSnapshot(pgAutomation.editingRecipe),signal=pgAutomationValue('Signal','sdr'),settings=pgAutomationReadSettingsEditor();
@@ -663,21 +699,28 @@ function pgAutomationNewRecipe(target){
  pgAutomationDisplayTypeChanged();
 }
 async function pgAutomationSaveRecipe(){
- const button=pgAutomationEl('EditorSave');if(button.disabled)return;button.disabled=true;
+ const button=pgAutomationEl('EditorSave');if(button.disabled||pgAutomation.editorSaving)return;button.disabled=true;
+ // A compatibility reply can land while a recipe POST is in flight; this flag
+ // keeps every Save re-enable path shut until the save finishes (no double save).
+ pgAutomation.editorSaving=true;
+ let saved=false;
  try{
   const item=pgAutomationRecipeFromForm();
   if(pgAutomation.editorTarget==='recipe'||pgAutomationChecked('SaveAsRecipe')){
-   const saved=pgAutomationClone(item);if(pgAutomation.editorTarget!=='recipe')delete saved.id;
-   await pgAutomationRequest('recipes',{recipe:saved});
+   const recipe=pgAutomationClone(item);if(pgAutomation.editorTarget!=='recipe')delete recipe.id;
+   await pgAutomationRequest('recipes',{recipe});
   }
   if(pgAutomation.editorTarget!=='recipe'){
    if(pgAutomation.editingQueueIndex!=null)pgAutomation.queue.items[pgAutomation.editingQueueIndex]=item;
    else pgAutomation.queue.items.push(item);
    pgAutomationSaveDraft();pgAutomationRenderQueue();pgAutomationTab('queue');
   }
-  pgAutomationCancelEditor();pgAutomationNotice(pgAutomation.editorTarget==='recipe'?'Recipe saved':'Queue item saved');await pgAutomationRefresh();
+  pgAutomationCancelEditor();pgAutomationNotice(pgAutomation.editorTarget==='recipe'?'Recipe saved':'Queue item saved');saved=true;
  }catch(e){pgAutomationNotice(e.message,true);}
- finally{button.disabled=false;if(pgAutomationEl('Editor').open)pgAutomationModeEligibility();}
+ finally{pgAutomation.editorSaving=false;button.disabled=false;if(pgAutomationEl('Editor').open)pgAutomationModeEligibility();}
+ // The save is finished once it is stored: a slow page refresh must not keep
+ // the editor's Save locked (P8).
+ if(saved){try{await pgAutomationRefresh();}catch(e){pgAutomationNotice(e.message,true);}}
 }
 function pgAutomationItemSummary(item){
  const signal=item.signal_format||'sdr',cal=item.calibration||{},stages=item.stages||{},panel=item.panel_light||{};
@@ -705,7 +748,7 @@ function pgAutomationRenderRecipeList(){
 function pgAutomationEditRecipe(index){pgAutomationOpenEditor('recipe',pgAutomation.recipes[index]);}
 function pgAutomationDuplicateRecipe(index){const copy=pgAutomationSnapshot(pgAutomation.recipes[index]);delete copy.id;copy.name+=' (copy)';pgAutomationOpenEditor('recipe',copy);}
 async function pgAutomationDeleteRecipe(index){
- const recipe=pgAutomation.recipes[index];if(!recipe||!confirm('Delete saved recipe “'+recipe.name+'”? Queued copies remain.'))return;
+ const recipe=pgAutomation.recipes[index];if(!recipe||!await pgAutomationConfirm('Delete saved recipe “'+recipe.name+'”? Queued copies remain.','Delete recipe'))return;
  try{await pgAutomationRequest('recipes/delete',{id:recipe.id});await pgAutomationRefresh();}catch(e){pgAutomationNotice(e.message,true);}
 }
 function pgAutomationQueueAdd(){
@@ -806,7 +849,7 @@ function pgAutomationNameQueue(action){
 async function pgAutomationSubmitQueueName(){
  const button=pgAutomationEl('QueueDialogSave'),name=pgAutomationValue('QueueName','').trim();if(!name||button.disabled)return;
  const action=pgAutomation.queueNameAction;
- if(action==='new'&&pgAutomation.queue.items.length&&pgAutomationQueueDirty()&&!confirm('Create a new queue and leave these unsaved changes? Save or copy this queue first to keep them.'))return;
+ if(action==='new'&&pgAutomation.queue.items.length&&pgAutomationQueueDirty()&&!await pgAutomationConfirm('Create a new queue and leave these unsaved changes? Save or copy this queue first to keep them.','Leave changes'))return;
  button.disabled=true;
  try{
   const queue=action==='new'?{name,items:[]}:pgAutomationClone(pgAutomation.queue);queue.name=name;
@@ -841,18 +884,20 @@ function pgAutomationRenderSavedQueues(){
  pgAutomationQueueSelectionChanged();
 }
 function pgAutomationQueueSelectionChanged(load){
+ let pending=null;
  if(load){
-  if(pgAutomationValue('SavedQueueSelect',''))pgAutomationLoadQueue();
+  if(pgAutomationValue('SavedQueueSelect',''))pending=pgAutomationLoadQueue();
   else{pgAutomation.selectedQueue='';pgAutomation.loadedQueueSnapshot='';pgAutomationSaveDraft();}
  }
  const value=pgAutomationValue('SavedQueueSelect',''),button=pgAutomationEl('DeleteQueueButton');
  if(button)button.disabled=value===''||value==='reference-settings';
  const reload=pgAutomationEl('ReloadQueueButton');if(reload)reload.disabled=value==='';
+ return pending;
 }
-function pgAutomationLoadQueue(){
+async function pgAutomationLoadQueue(){
  const value=pgAutomationValue('SavedQueueSelect',''),queue=value==='reference-settings'?pgAutomationReferenceQueue():pgAutomation.queues.find(queue=>'saved:'+queue.id===value);if(!queue)return;
  const changed=pgAutomation.editingRunId||JSON.stringify(pgAutomation.queue)!==pgAutomation.loadedQueueSnapshot;
- if(pgAutomation.queue.items.length&&changed&&!confirm('Replace this draft with queue “'+pgAutomationQueueName(queue.name)+'”? Save your current queue first to keep its edits.')){
+ if(pgAutomation.queue.items.length&&changed&&!await pgAutomationConfirm('Replace this draft with queue “'+pgAutomationQueueName(queue.name)+'”? Save your current queue first to keep its edits.','Replace draft')){
   pgAutomationEl('SavedQueueSelect').value=pgAutomation.selectedQueue;pgAutomationQueueSelectionChanged();return;
  }
  pgAutomation.queue=pgAutomationClone(queue);pgAutomation.queue.name=pgAutomationQueueName(pgAutomation.queue.name);pgAutomation.editingRunId='';pgAutomation.firstPending=0;pgAutomation.selectedQueue=value;pgAutomation.loadedQueueSnapshot=JSON.stringify(pgAutomation.queue);pgAutomationSaveDraft();pgAutomationRenderQueue();pgAutomationQueueSelectionChanged();
@@ -860,7 +905,7 @@ function pgAutomationLoadQueue(){
 }
 async function pgAutomationDeleteQueue(){
  const value=pgAutomationValue('SavedQueueSelect',''),queue=pgAutomation.queues.find(queue=>'saved:'+queue.id===value);
- if(!queue||!confirm('Delete saved queue “'+pgAutomationQueueName(queue.name)+'”? Run history remains.'))return;
+ if(!queue||!await pgAutomationConfirm('Delete saved queue “'+pgAutomationQueueName(queue.name)+'”? Run history remains.','Delete queue'))return;
  try{await pgAutomationRequest('queues/delete',{id:queue.id});if(pgAutomation.queue.id===queue.id){delete pgAutomation.queue.id;pgAutomation.selectedQueue='';pgAutomation.loadedQueueSnapshot='';pgAutomationSaveDraft();}await pgAutomationRefresh();}catch(e){pgAutomationNotice(e.message,true);}
 }
 function pgAutomationStageLabel(stage){
@@ -1031,7 +1076,7 @@ function pgAutomationEstimateText(run,now){
  if(m.state==='updating')return 'Updating time estimate…';
  const subject=m.preflight?'Initial checks':m.jobLabel==='this stage left'?'Current stage':'Current job';
  const parts=[subject+': '+(m.job?'about '+pgAutomationEstimateRange(m.job)+' left'+(m.jobPartial?' plus untimed stages':''):'estimating'),
-  'Whole batch: '+(m.batch?'about '+pgAutomationEstimateRange(m.batch)+' left':'estimating')];
+  'Whole batch: '+(m.batch?'about '+pgAutomationEstimateRange(m.batch)+' left'+(m.batchPartial?' plus untimed stages':''):'estimating')];
  if(m.note)parts.push(m.note);
  return parts.join('. ')+'.';
 }
@@ -1059,7 +1104,8 @@ function pgAutomationReadouts(run,pre,now){
   elapsed:slot(start?pgAutomationClock(end-start):'—','elapsed'),
   stage:slot(active&&run.stage_started_at?pgAutomationClock(now-run.stage_started_at):'—','this stage'),
   job:model.job?slot(pgAutomationEstimateRange(model.job),jobLabel+(model.jobPartial?', timed stages only':'')):slot('—',jobLabel+pending),
-  batch:model.batch?slot(pgAutomationEstimateRange(model.batch),'whole batch left'):slot('—','whole batch left'+pending),
+  // Untimed stages are unknown, not zero: a partial batch figure is a floor.
+  batch:model.batch?slot(pgAutomationEstimateRange(model.batch),'whole batch left'+(model.batchPartial?', timed stages only':'')):slot('—','whole batch left'+pending),
   note:model.note,liveState,
   live:{live:'Live',delayed:'Updates delayed',lost:'Connection lost'}[liveState]||'',
  };
@@ -1083,7 +1129,12 @@ function pgAutomationProgressMeters(run,pre){
  const measured=Number.isFinite(total)&&total>0;
  const value=Math.max(0,Math.min(total,done));
  const held=(run&&['paused','interrupted','stopped','failed'].includes(run.status))||pgAutomation.statusError||(!run&&pre?.status!=='checking');
- let html='<div class="auto-progress-label"><span>'+pgAutomationEscape(label)+'</span><span>'+pgAutomationEscape(measured?value+' of '+total+' '+unit:held?'Paused':'In progress')+'</span></div>'
+ // Name the held state from its own source: the run's status, a lost status
+ // poll on a live run, or the preflight state when there is no run.
+ const heldLabel=pgAutomation.statusError?'Status unavailable':run
+  ?(({paused:'Paused',interrupted:'Interrupted',stopped:'Stopped',failed:'Failed'})[run.status]||'Paused')
+  :(({blocked:'Blocked',failed:'Failed',interrupted:'Interrupted',ready:'Ready'})[pre?.status]||(pre?.status?String(pre.status).replace(/-/g,' ').replace(/^./,ch=>ch.toUpperCase()):'Paused'));
+ let html='<div class="auto-progress-label"><span>'+pgAutomationEscape(label)+'</span><span>'+pgAutomationEscape(measured?value+' of '+total+' '+unit:held?heldLabel:'In progress')+'</span></div>'
   +'<progress aria-label="'+pgAutomationEscape(label)+'" '+(measured?'value="'+value+'" max="'+total+'"':held?'value="0" max="1"':'')+'></progress>';
  if(p?.total>0&&!run.preflight_only){
   const fraction=Math.max(0,Math.min(1,Number(p.completed)/Number(p.total)));
@@ -1179,9 +1230,31 @@ function pgAutomationBeginChecks(intent){
  pgAutomation.pendingChecks={id,status:'checking',intent,started_at:Date.now()/1000,queue_name:pgAutomation.queue.name,total_items:pgAutomation.queue.items.length,message:'Waiting for the generator to begin startup checks. No calibration has started.',items:[]};
  pgAutomationRenderProgress();pgAutomationRenderActivity();pgAutomationPollLive();return id;
 }
-function pgAutomationRenderReadiness(result){
+// A saved readiness result describes the queue it checked. The open queue may
+// be a different or empty one, so name the mismatch instead of showing stale
+// checks under it.
+function pgAutomationReadinessQueueMatches(run){
+ if(!run)return true;
+ if(pgAutomation.editingRunId&&pgAutomation.editingRunId===run.id)return true;
+ // Compare names the way the server stores them (blank becomes
+ // "Automation item", then 120 characters), so a saved run matches its own
+ // draft. An empty draft matches nothing: it cannot own a readiness result.
+ const perlTrue=value=>value!=null&&value!==''&&String(value)!=='0';
+ const label=item=>Array.from(String(perlTrue(item?.name)?item.name:perlTrue(item?.title)?item.title:'Automation item')).slice(0,120).join('');
+ const mine=(pgAutomation.queue?.items||[]).map(label),theirs=(run.items||[]).map(label);
+ return mine.length>0&&mine.length===theirs.length&&mine.every((name,i)=>name===theirs[i]);
+}
+function pgAutomationRenderReadiness(result,run){
  const box=pgAutomationEl('Readiness');if(!result){box.textContent='Readiness request failed';return;}
- const checks=[...(result.checks||[])].sort((a,b)=>Number(a.ok)-Number(b.ok));
+ if(run&&!pgAutomationReadinessQueueMatches(run)){
+  box.innerHTML='<p class="auto-muted" data-readiness-other-queue>The last readiness result belongs to “'+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'another queue')+'” ('+(run.items||[]).length+' job'+((run.items||[]).length===1?'':'s')+'). Check Readiness again for this queue.</p>';
+  return;
+ }
+ // The batch pass and a job's own pass can both report that job's manual
+ // checks; list each distinct (job, outcome, message) once. The outcome is
+ // part of the key so a passing duplicate can never hide a failing check.
+ const seen=new Set();
+ const checks=[...(result.checks||[])].filter(check=>{const key=String(check.item_number??'')+'|'+(check.ok?1:0)+'|'+String(check.level||'')+'|'+String(check.message||check.name||'');if(seen.has(key))return false;seen.add(key);return true;}).sort((a,b)=>Number(a.ok)-Number(b.ok));
  const problems=checks.filter(check=>!check.ok);
  box.innerHTML='<p class="auto-muted">'+pgAutomationEscape(result.message||'Readiness')+' · '+checks.length+' checks. See the activity log for details.</p>'
   +(problems.length?'<ul class="auto-readiness-problems">'+problems.map(check=>'<li data-level="'+(check.level==='warning'?'warning':'error')+'">'+pgAutomationEscape(pgAutomationIssueText(check))+'</li>').join('')+'</ul>':'');
@@ -1192,7 +1265,11 @@ function pgAutomationRenderReadiness(result){
 async function pgAutomationReadiness(){
  if(pgAutomation.pendingChecks||pgAutomation.busy||pgAutomation.current?.preflight?.status==='checking')return;
  if(!pgAutomation.queue.items.length){pgAutomationNotice('Add a job before checking readiness. No device checks were started.');return;}
- if(!confirm('Check every queued job? This temporarily switches generator signals and TV picture modes, then restores them. It does not reset calibration, upload LUTs or take measurements. A neutral grey pattern is left afterwards.'))return;
+ if(!await pgAutomationConfirm('Check every queued job? This temporarily switches generator signals and TV picture modes, then restores them. It does not reset calibration, upload LUTs or take measurements. A neutral grey pattern is left afterwards.','Check all jobs'))return;
+ // The question can stay open for a while: re-check that nothing else started
+ // and the queue still has jobs before switching any TV modes.
+ if(pgAutomation.pendingChecks||pgAutomation.busy||pgAutomation.current?.preflight?.status==='checking')return;
+ if(!pgAutomation.queue.items.length){pgAutomationNotice('Add a job before checking readiness. No device checks were started.');return;}
  const button=pgAutomationEl('ReadinessButton');button.disabled=true;button.textContent='Checking all jobs…';
  const request_id=pgAutomationBeginChecks('readiness');
  try{const result=await pgAutomationRequest('readiness',{scope:'queue',confirm_mode_switches:true,items:pgAutomation.queue.items,queue_name:pgAutomation.queue.name,request_id},300000);
@@ -1238,6 +1315,14 @@ function pgAutomationRenderLiveRun(run,execution){
  pgAutomationRenderActivity();
  const pre=pgAutomation.current?.preflight,checking=pgAutomation.pendingChecks||pre?.status==='checking';
  const status=run?.status||(checking?'checking':'idle');pgAutomationStateBadge(status);pgAutomationRenderProgress();
+ if(pgAutomation.noticeLevel==='info'){
+  // An info notice describes one moment. It stays while the run is in the
+  // state it was raised in (at least 5 s), clears on the next status change,
+  // and expires after 2 min on a parked or idle run. It remains in the log.
+  const age=Date.now()-(pgAutomation.noticeAt||0);
+  if(pgAutomation.noticeRunStatus==null)pgAutomation.noticeRunStatus=status;
+  else if((pgAutomation.noticeRunStatus!==status&&age>5000)||(age>120000&&['idle','paused','interrupted','stopped','failed','complete','complete-with-warnings'].includes(status)))pgAutomationNotice('');
+ }
  const occupied=checking||run?.cleanup_required||['starting','running','paused','interrupted','stopping','completing'].includes(run?.status);
  pgAutomationEl('StartButton').disabled=!!(occupied||pgAutomation.busy);
  pgAutomationEl('ReadinessButton').disabled=!!(occupied||pgAutomation.pendingChecks);
@@ -1250,7 +1335,7 @@ function pgAutomationRenderLiveRun(run,execution){
  pgAutomationEl('StopButton').disabled=!run?.cleanup_required&&!['starting','running','paused','interrupted','stopping','completing'].includes(status);
  pgAutomationEl('StopButton').textContent=run?.cleanup_required?'Retry cleanup':'Stop';
  const live=pgAutomationEl('Live');
- if(run?.preflight_result)pgAutomationRenderReadiness(run.preflight_result);
+ if(run?.preflight_result)pgAutomationRenderReadiness(run.preflight_result,run);
  if(!run){live.innerHTML='<div class="auto-empty">'+(checking?'Checking the whole queue against the connected TV before calibration. Signal and picture modes are temporarily switched and restored.':pre&&['blocked','failed','interrupted'].includes(pre.status)?'Calibration has not started. Resolve the startup problems shown above, then retry.':'No active batch. Completed and stopped runs are in History.')+'</div>';pgAutomationEl('LiveDetail').innerHTML='';delete pgAutomation.jobViews.live;return;}
  const terminal=pgAutomationTerminal(run),active=run.active_item!=null?Number(run.active_item):-1,items=run.items||[],worker=terminal?{}:{...(run.worker_status||{}),message:(run.status==='running'?run.operation_progress?.message:null)||run.worker_status?.message};
  if(terminal){
@@ -1321,13 +1406,18 @@ async function pgAutomationOpenHistory(index){
   +pgAutomationRunWarningsHtml(run)
   +pgAutomationFailureHtml(run)
   +'<button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationRecoverQueue()">Copy this run to an editable queue</button><p class="auto-muted">Recovers the jobs saved on the Pi, including failed runs. Does not resume or start calibration.</p>'
+  +(Array.isArray(run.hazard_restore_unverified)&&run.hazard_restore_unverified.length?'<div style="color:var(--orange);margin-bottom:8px" data-hazard-unverified>TV protections sent but not confirmed (this TV cannot read them back): '+pgAutomationEscape(run.hazard_restore_unverified.map(x=>(x&&x.key)||String(x)).join(', '))+'. Check them in the TV menu.</div>':'')
   +(Array.isArray(run.hazard_restore_failures)&&run.hazard_restore_failures.length?'<div style="color:var(--red);margin-bottom:8px">TV protections were not restored: '+pgAutomationEscape(run.hazard_restore_failures.map(x=>typeof x==='string'?x:(x.key||'')+(x.message?' ('+x.message+')':'')).join(', '))+'. Check the TV\'s energy saving, screen saver and power-off settings.</div>':'')
   +'<div class="auto-job-layout"><div id="pgAutomationHistoryJobs">'+(run.items||[]).map((item,i)=>pgAutomationJobButton(item,i,'history',run.id,false)).join('')+'</div><aside id="pgAutomationHistoryJobDetail" class="auto-job-detail" aria-label="Selected historical job details"></aside></div>';
+ // The detail renders below the full history list; bring it into view so
+ // the click visibly does something.
+ detail.style.scrollMarginTop='calc(var(--pg-header-height, 61px) + 12px)'; // clear the sticky header at any width
+ detail.scrollIntoView({block:'start'});
  if(run.items?.length)pgAutomationSelectJob('history',run.id,0);
 }
 async function pgAutomationRecoverQueue(){
  const run=pgAutomation.historyActivity?.run;if(!Array.isArray(run?.items)||!run.items.length)return;
- if(pgAutomation.queue.items.length&&!confirm('Replace the current draft with a copy of this run? Save your draft first if you want to keep it.'))return;
+ if(pgAutomation.queue.items.length&&!await pgAutomationConfirm('Replace the current draft with a copy of this run? Save your draft first if you want to keep it.','Replace draft'))return;
  const before=JSON.stringify(pgAutomation.queue);
  let result;
  try{result=await pgAutomationRequest('runs/'+encodeURIComponent(run.id)+'/queue');if(!Array.isArray(result.queue?.items))throw new Error('Saved queue is unavailable.');if(before!==JSON.stringify(pgAutomation.queue))throw new Error('Your draft changed while loading. Retry recovery to replace it.');}
@@ -1444,7 +1534,13 @@ async function pgAutomationFetchJob(view,state){
   }
   target.querySelector('[data-job-error]').textContent='';
   const meta=target.querySelector('[data-job-meta]'),configExpanded=meta.querySelector('details')?.open;
-  meta.innerHTML=(view==='calibration'?'':'<h3>'+pgAutomationEscape(item.name||'Job '+(state.index+1))+'</h3><p class="auto-muted">'+pgAutomationEscape(pgAutomationJobStatus(item,data.run_status))+' · Results updated '+new Date(data.fetched_at*1000).toLocaleTimeString()+'</p>')+pgAutomationJobFailureHtml(item)+'<details><summary>Configured settings and targets</summary>'+pgAutomationItemSummary(item)+'</details>';
+  // "Results saved" is when the runner last recorded a checkpoint for this
+ // job; the fetch time only says when the browser asked.
+ // Only completed measurement stages count, After Readings first: skipped,
+ // interrupted and setup-only records carry a timestamp but measured nothing.
+ const doneAt=names=>Math.max(0,...(item.checkpoints||[]).filter(c=>c&&c.status==='done'&&(!names||names.includes(c.name))).map(c=>Number(c.completed_at)||0));
+ const saved=doneAt(['post-readings-done'])||doneAt(['pre-readings-done','greyscale-done','volume-done']);
+ meta.innerHTML=(view==='calibration'?'':'<h3>'+pgAutomationEscape(item.name||'Job '+(state.index+1))+'</h3><p class="auto-muted">'+pgAutomationEscape(pgAutomationJobStatus(item,data.run_status))+(saved?' · Results saved '+new Date(saved*1000).toLocaleTimeString():' · Results updated '+new Date(data.fetched_at*1000).toLocaleTimeString())+'</p>')+pgAutomationJobFailureHtml(item)+'<details><summary>Configured settings and targets</summary>'+pgAutomationItemSummary(item)+'</details>';
   if(configExpanded)meta.querySelector('details').open=true;
   const settings=target.querySelector('[data-job-settings]'),expanded=settings.querySelector('details')?.open;
   const manualChecks=[...new Set([...(item.manual_checks||[]),...(data.readiness_issues||[]).map(issue=>issue.message).filter(Boolean)])];
@@ -1673,7 +1769,7 @@ async function pgAutomationBuildHistoryReport(run){
 
 async function pgAutomationDeleteRun(index){
  const run=pgAutomation.history[index];
- if(!run||!confirm('Delete this run and its saved results? This cannot be undone.'))return;
+ if(!run||!await pgAutomationConfirm('Delete this run and its saved results? This cannot be undone.','Delete run'))return;
  const result=await fetchJSON('/api/automation/runs/'+encodeURIComponent(run.id)+'/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
  if(!result||result.status==='error'){pgAutomationNotice((result&&result.message)||'Unable to delete run',true);return;}
  const detail=document.getElementById('pgAutomationHistoryDetail');if(detail)detail.innerHTML='';

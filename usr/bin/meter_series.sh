@@ -725,21 +725,81 @@ write_state_on_exit() {
   cur=$(cat "$STATE_FILE" 2>/dev/null) || cur=""
  fi
  if [[ "$cur" == *'"status":"running"'* || "$cur" == *'"status":"setup"'* ]]; then
-  local last_step=0 last_name="Series helper exited unexpectedly"
+  # Another helper owns the state file now: leave its record alone, like
+  # every other writer does. The bash match still sees a foreign owner when
+  # python is unavailable.
+  local file_sid=""
+  if [[ "$cur" =~ \"series_id\":[[:space:]]*\"([^\"]*)\" ]]; then
+   file_sid="${BASH_REMATCH[1]}"
+  fi
+  if [[ -n "$file_sid" && -n "${SERIES_ID:-}" && "$file_sid" != "$SERIES_ID" ]] || series_state_claim_lost; then
+   rm -f "$READY_FILE" "$STOP_FILE" 2>/dev/null || true
+   return 0
+  fi
+  local last_step=0 safe_name="Series helper exited unexpectedly"
   if [[ "$cur" =~ \"current_step\":[[:space:]]*([0-9]+) ]]; then
    last_step="${BASH_REMATCH[1]}"
   fi
   if [[ "$cur" =~ \"current_name\":[[:space:]]*\"([^\"]*)\" ]]; then
-   last_name="${BASH_REMATCH[1]} (exited unexpectedly)"
+   # Cut the patch name, not the marker, so a long name still says why.
+   safe_name="$(printf '%s' "${BASH_REMATCH[1]}" | tr -d '\n\r' | head -c 170) (exited unexpectedly)"
   fi
-  local safe_name
-  safe_name=$(printf '%s' "$last_name" | tr -d '\n\r' | head -c 200)
+  # The flat fallback cannot clean a character cut mid-way without python:
+  # keep it to printable ASCII without quote or backslash so JSON stays valid.
+  local flat_name
+  flat_name=$(printf '%s' "$safe_name" | LC_ALL=C tr -cd '\040\041\043-\133\135-\176')
   local safe_sid="${SERIES_ID:-}"
   safe_sid=$(printf '%s' "$safe_sid" | tr -cd 'A-Za-z0-9_.-')
   local total="${TOTAL:-0}"
-  printf '{"status":"error","series_id":"%s","current_step":%s,"total_steps":%s,"current_name":"%s","readings":[],"white_reading":null,"error":"series_helper_exited_unexpectedly"}\n' \
-   "$safe_sid" "$last_step" "$total" "$safe_name" > "$STATE_FILE" 2>/dev/null || true
-  chmod 666 "$STATE_FILE" 2>/dev/null || true
+  # Keep the worker attempt identity: without it the runner reports a
+  # worker-identity mismatch instead of the crash itself.
+  # The in-place update below keeps it from the file itself; the flat
+  # fallback (no python) can only use what this helper loaded earlier.
+  local worker_meta="${SERIES_WORKER_META_JSON:-}"
+  # Prefer mutating the live state in place: that keeps the readings taken
+  # so far and the identity exactly as written. The flat rewrite below is
+  # only the fallback when python is unavailable or the file is unreadable.
+  local mutated=""
+  mutated=$(python - "$STATE_FILE" "$safe_name" <<'PY' 2>/dev/null
+import io, json, sys
+# Bytes in, ASCII out: independent of the helper's locale and of whether
+# python is 2.7 or 3.x on the appliance.
+try:
+    with io.open(sys.argv[1], "rb") as fh:
+        state = json.loads(fh.read().decode("utf-8", "replace"))
+except Exception:
+    raise SystemExit(1)
+if not isinstance(state, dict):
+    raise SystemExit(1)
+name = sys.argv[2]
+if isinstance(name, bytes):
+    name = name.decode("utf-8", "ignore")
+else:
+    # A byte cut mid-character arrives as a lone surrogate; drop it.
+    name = name.encode("utf-8", "surrogateescape").decode("utf-8", "ignore")
+state["status"] = "error"
+state["error"] = "series_helper_exited_unexpectedly"
+state["current_name"] = name
+sys.stdout.write(json.dumps(state, separators=(",", ":")) + "\n")
+PY
+) || mutated=""
+  # Publish by rename, like write_state_json: a poll must never read a
+  # half-written crash record.
+  # A write that fails partway (full /tmp) is discarded, never renamed in.
+  local tmp="${STATE_FILE}.$$.exit.tmp" written=0
+  if [[ -n "$mutated" ]]; then
+   printf '%s\n' "$mutated" > "$tmp" 2>/dev/null && written=1
+  else
+   printf '{"status":"error","series_id":"%s","current_step":%s,"total_steps":%s,"current_name":"%s","readings":[],"white_reading":null,"error":"series_helper_exited_unexpectedly"%s}\n' \
+    "$safe_sid" "$last_step" "$total" "$flat_name" "${worker_meta:+,$worker_meta}" > "$tmp" 2>/dev/null && written=1
+  fi
+  if [[ "$written" == "1" ]]; then
+   chmod 666 "$tmp" 2>/dev/null || true
+   chown pgenerator:pgenerator "$tmp" 2>/dev/null || true
+   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+  else
+   rm -f "$tmp" 2>/dev/null || true
+  fi
  fi
  rm -f "$READY_FILE" "$STOP_FILE" 2>/dev/null || true
 }

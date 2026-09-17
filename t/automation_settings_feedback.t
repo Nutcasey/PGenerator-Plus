@@ -7,6 +7,9 @@ use JSON::PP ();
 use Test::More;
 local $ENV{PGEN_AUTOMATION_DIR}=tempdir(CLEANUP=>1);
 {local @ARGV=('feedback-test','test-token');do "$Bin/../usr/bin/pgen_automation_runner.pl";die $@ if $@;}
+# A real run always has a manifest; mode writes are journalled in it (P14).
+PGAutomation::ensure_store();
+PGAutomation::write_json_atomic(PGAutomation::run_dir('feedback-test').'/run.json',{id=>'feedback-test',token=>'test-token',status=>'running',items=>[{}]});
 my (@calls,@checks,@logs,$mode,$gamut,$read_error,$write_error,$tv_brightness);
 local *main::_verify_live_capability_profile=sub {1}; # admitted-job feedback ordering
 local *main::_log=sub {push @logs,$_[0]};

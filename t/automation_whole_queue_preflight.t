@@ -55,7 +55,9 @@ sub fake_api {
         $mode_writes++;$modes{$config{signal_mode}}=$payload->{settings}{pictureMode};return tv_response();
     }
     if($path eq '/api/automation/readiness') {
-        return {status=>'ok',ready=>1,checks=>[],items=>$payload->{items}} if $payload->{scope} eq 'batch';
+        return {status=>'ok',ready=>1,items=>$payload->{items},
+            checks=>[map {{ok=>0,level=>'warning',name=>"item-$_-manual",item_number=>$_,message=>'TruMotion: verify Off'}} 0..$#{$payload->{items}}]}
+            if $payload->{scope} eq 'batch';
         die 'Only one mode may be queried in its actual signal context' if @{$payload->{items}}!=1;
         $prepares++;
         my $raw=$payload->{items}[0];
@@ -64,10 +66,16 @@ sub fake_api {
         if($cancel && $prepares==2) {PGAutomation::write_json_atomic(PGAutomation::run_dir($run_id).'/control.json',{request=>'stop'});select undef,undef,undef,.55;}
         my $item=main::webui_automation_normalize_item($raw);
         $item->{tv_input}=$input;$item->{generation_profile}=tv_response()->{generation_profile};
+        delete $item->{generation_profile} if $main::omit_generation_profile;
+        # Real job readiness adds derived fields the intent hash does not exclude.
+        $item->{panel_protection_supported}=JSON::PP::true;
         $item->{capability_profile}={hash=>$profile,id=>'fixture'};
         $item->{device_identity}={model_name=>'test LG',generation_id=>'lg2023_oled',firmware=>'test'};
         return {status=>'ok',ready=>0,checks=>[{ok=>0,level=>'error',message=>'Unsupported control in job four'}],message=>'Unsupported control in job four'} if $bad_job && $item->{id} eq 'job-4';
-        return {status=>'ok',ready=>1,items=>[$item],checks=>[{ok=>1,level=>'ok',message=>'Mode-specific controls checked'}]};
+        return {status=>'ok',ready=>1,items=>[$item],checks=>[{ok=>1,level=>'ok',message=>'Mode-specific controls checked'},
+            {ok=>1,level=>'ok',name=>'disk-space',message=>'Automation storage has '.(900-$prepares).'MB free'},
+            {ok=>1,level=>'ok',name=>'meter-idle',message=>'Meter is idle'},
+            {ok=>0,level=>'warning',name=>'item-0-manual',item_number=>0,message=>'TruMotion: verify Off'}]};
     }
     return {status=>'ok'} if $path eq '/api/meter/session/stop';
     die "Unexpected device operation $method $path";
@@ -87,6 +95,12 @@ is($r->{checked_items},4,'not just the first job is live checked');
 is($r->{progress_total},15,'four-job preflight includes equipment, snapshot, three checks per job and restoration');
 is($r->{progress_done},15,'successful real preflight completes every reported progress operation');
 is_deeply([map {$_->{status}} @{$r->{jobs}}],[('checked')x4],'all four jobs carry individual results');
+# P2: the batch pass and each job pass both report a job's manual check;
+# equipment checks repeated by every job pass stay global.
+is_deeply([sort map {$_->{item_number}} grep {$_->{message} eq 'TruMotion: verify Off'} @{$r->{checks}}],[0,1,2,3],'each job lists its manual check once');
+is(scalar(grep {$_->{message} eq 'Mode-specific controls checked'} @{$r->{checks}}),1,'an equipment check repeated by every job pass is listed once');
+ok(!grep({$_->{message} eq 'Mode-specific controls checked' && defined $_->{item_number}} @{$r->{checks}}),'and is not attributed to a job');
+is(scalar(grep {($_->{name}||'') eq 'disk-space'} @{$r->{checks}}),1,'an equipment check whose text varies between passes is still listed once');
 # requested_signal_mode is input-only; compare all saved generator fields.
 is_deeply({map {$_=>$config{$_}} keys %original},\%original,'original generator output is restored');
 is_deeply(\%modes,\%original_modes,'each signal family original picture mode is restored');
@@ -244,9 +258,11 @@ fixture();$use_real_transport=1;
 for my $limited (0,1) {
  fixture();$legacy=$limited;my %saved_config=%config;my %saved_modes=%modes;
  $r=run_check();ok($r->{ready},'viewing restoration fixture passed preflight');
+ is(PGAutomation::read_json_file($run_file)->{items}[0]{preflight_contract}{limited}?1:0,$limited,'P24: a limited preflight marks its plan contracts as limited');
  # Simulate the calibration workflow selecting its final signal/mode.
  $config{signal_mode}='dv';$config{max_bpc}='8';$modes{dv}='dolbyVisionFilmMaker';$modes{sdr}='filmMaker';
- PGAutomation::with_lock($run_file,sub {$_[0]{viewing_restore_required}=1;return $_[0];});
+ # The workflow's mode writes are journalled against their signals (P14).
+ PGAutomation::with_lock($run_file,sub {$_[0]{viewing_restore_required}=1;$_[0]{mode_written_signals}={dv=>JSON::PP::true,sdr=>JSON::PP::true};return $_[0];});
  @calls=();
  local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
  ok(main::_restore_preflight_context('viewing'),'run-level original output restoration succeeds');
@@ -260,5 +276,137 @@ for my $limited (0,1) {
   is_deeply(\%modes,\%saved_modes,'readable per-signal original picture modes are restored');
  }
  is(scalar(grep {$_->[1]=~/reset|lut|autocal/} @calls),0,'viewing restoration never overwrites newly calibrated LUTs');
+}
+{
+    # With job 1 already complete the batch pass numbers pending jobs from 0;
+    # they must still be reported against their queue position.
+    fixture();
+    PGAutomation::with_lock($run_file,sub {$_[0]{items}[0]{status}='complete';return $_[0];});
+    my $partial=run_check();
+    ok($partial->{ready},'a queue with a completed first job still passes');
+    is_deeply([sort map {$_->{item_number}} grep {$_->{message} eq 'TruMotion: verify Off'} @{$partial->{checks}}],[1,2,3],'manual checks name the pending jobs by queue position, once each, and never the completed job');
+}
+# P13: reuse a still-valid whole-queue check on Resume, or straight after a
+# passing Check Readiness for the same queue on the same TV.
+sub reuse_for {
+    my ($file)=@_;
+    local *main::_api=\&fake_api;
+    local *main::_sleep_controlled=sub {1};
+    local *main::_log=sub {};local *main::_log_action=sub {};
+    local *main::_ensure_lg_connection=sub {1};
+    return main::_reusable_preflight(PGAutomation::read_json_file($file));
+}
+{
+    fixture();
+    ok(run_check()->{ready},'resume fixture: the queue was checked');
+    PGAutomation::with_lock($run_file,sub {$_[0]{resumed_at}=time();return $_[0];});
+    my ($walks,$writes)=($prepares,$mode_writes);
+    my $reused=reuse_for($run_file);
+    ok($reused && $reused->{reused},'a resume on the same TV with an unchanged queue reuses the check');
+    is($prepares,$walks,'no job is walked through its mode again');
+    is($mode_writes,$writes,'and no picture mode is written');
+    like(PGAutomation::read_json_file($run_file)->{preflight_result}{message},qr/earlier whole-queue check still applies/,'the reuse is visible in the run');
+    $profile='b'x64;
+    ok(!reuse_for($run_file),'a changed compatibility profile forces the full check');
+    $profile='a'x64;$input='hdmi2';
+    ok(!reuse_for($run_file),'a changed input forces the full check');
+    $input='hdmi1';
+    PGAutomation::with_lock($run_file,sub {$_[0]{queue_revision}=1;return $_[0];});
+    ok(!reuse_for($run_file),'an edited queue forces the full check');
+    PGAutomation::with_lock($run_file,sub {$_[0]{queue_revision}=0;delete $_[0]{resumed_at};return $_[0];});
+    ok(!reuse_for($run_file),'a fresh start without a readiness result runs the full check');
+}
+for my $case ('same','mode-changed','queue-changed','stale','output-changed') {
+    fixture();
+    my $pristine=PGAutomation::read_json_file($run_file)->{items};
+    PGAutomation::with_lock($run_file,sub {$_[0]{preflight_only}=JSON::PP::true;return $_[0];});
+    ok(run_check()->{ready},"$case: Check Readiness passed");
+    ok(-f "$store/last-readiness.json","$case: a passing Check Readiness leaves a single-use pointer");
+    my $second="batch-$case";my $second_file=PGAutomation::run_dir($second).'/run.json';
+    my $items=PGAutomation::clone($pristine);
+    $items->[1]{picture_mode}='hdrCinema' if $case eq 'queue-changed';
+    PGAutomation::write_json_atomic($second_file,{id=>$second,token=>'second-token',status=>'running',items=>$items,queue_revision=>0});
+    PGAutomation::write_json_atomic("$store/execution.json",{owner=>'automation',run_id=>$second,token=>'second-token',status=>'running',pid=>0});
+    {local @ARGV=($second,'second-token');local $SIG{__WARN__}=sub {};do "$Bin/../usr/bin/pgen_automation_runner.pl";die $@ if $@;}
+    $modes{sdr}='cinema' if $case eq 'mode-changed';
+    $config{max_bpc}='12' if $case eq 'output-changed';
+    PGAutomation::with_lock("$store/last-readiness.json",sub {$_[0]{completed_at}-=3600;return $_[0];}) if $case eq 'stale';
+    my $walks=$prepares;
+    my $adopted=reuse_for($second_file);
+    ok(!-f "$store/last-readiness.json","$case: the pointer is consumed");
+    if ($case ne 'same') {
+        ok(!$adopted,"$case: the readiness result is not reused");
+        next;
+    }
+    ok($adopted && ($adopted->{reused_from}||'') eq $run_id,'Run queue straight after Check Readiness reuses its whole-queue check');
+    is($prepares,$walks,'no job is walked again');
+    my $saved=PGAutomation::read_json_file($second_file);
+    ok(ref($saved->{items}[0]{preflight_contract}) eq 'HASH','the batch adopts the checked plan contracts');
+    is($saved->{preflight_revision},0,'the adopted plan is tied to the queue revision');
+    ok(-f PGAutomation::run_dir($second).'/viewing-context.json','the original viewing context is kept for restoration');
+    is(PGAutomation::read_json_file("$store/preflight.json")->{run_id},$second,'the startup status names the batch that reused the check');
+}
+{
+    # F1-n (P22): the limited branch drops a job's saved TV context before its
+    # readiness pass, so stale identity cannot survive when readiness omits it.
+    fixture();$legacy=1;$main::omit_generation_profile=1;
+    PGAutomation::with_lock($run_file,sub {$_[0]{items}[0]{generation_profile}={capability_profile_hash=>'stale-context'};return $_[0];});
+    ok(run_check()->{ready},'a limited preflight with stale saved job context passes');
+    isnt((PGAutomation::read_json_file($run_file)->{items}[0]{generation_profile}||{})->{capability_profile_hash}||'','stale-context','the stale generation profile is not carried into the checked plan');
+    $main::omit_generation_profile=0;
+}
+{
+    # A global check that fails only in a later job's pass is kept, and the
+    # job it stopped is still named by its own queue-preflight-job error.
+    fixture();
+    my $real=\&fake_api;
+    local *main::_api=sub {
+        my ($method,$path,$payload)=@_;
+        my $reply=$real->(@_);
+        if($path eq '/api/automation/readiness' && ($payload->{scope}||'') eq 'job' && ($payload->{items}[0]{id}||'') eq 'job-3') {
+            return {status=>'blocked',ready=>0,checks=>[{ok=>0,level=>'error',name=>'meter-idle',message=>'Stop the active meter operation before starting automation'}],message=>'Startup blocked'};
+        }
+        if($path eq '/api/automation/readiness' && ($payload->{scope}||'') eq 'job' && ($payload->{items}[0]{id}||'') eq 'job-4') {
+            return {status=>'blocked',ready=>0,checks=>[{ok=>0,level=>'error',name=>'meter-idle',message=>'A guided meter series is running'}],message=>'Startup blocked'};
+        }
+        return $reply;
+    };
+    local *main::_sleep_controlled=sub {1};local *main::_log=sub {};local *main::_ensure_lg_connection=sub {1};
+    my $late=main::_preflight_queue();
+    ok(!$late->{ready},'a global failure in a later job pass blocks the queue');
+    ok(grep({($_->{name}||'') eq 'meter-idle' && !$_->{ok}} @{$late->{checks}}),'the failing global check is listed despite an earlier passing one');
+    is(scalar(grep {($_->{name}||'') eq 'meter-idle' && !$_->{ok}} @{$late->{checks}}),2,'a different failure reason in a later job pass is listed too');
+    ok(grep({($_->{name}||'') eq 'queue-preflight-job' && ($_->{item_number}//-1)==2} @{$late->{checks}}),'and the stopped job is named');
+}
+# P22 guards on the runner main flow (H-complete-warnings, H-main-terminal,
+# H-preflight-fail-hazards).
+{
+    fixture();
+    local *PGAutomationLaunch::worker_handshake=sub {1};
+    local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
+    local *main::_run_item=sub {my ($number,$item)=@_;$item->{status}='complete-with-warnings';$item->{warnings}=['check me'];main::_update_run(sub {$_[0]{items}[$number]=$item;});return 1;};
+    ok(eval {main::_main();1},'a batch whose jobs warn runs to the end') or diag $@;
+    is(PGAutomation::read_json_file($run_file)->{status},'complete-with-warnings','and finishes complete-with-warnings, not complete');
+    my $calls=0;
+    local *main::_api=sub {$calls++;die 'a finished run must not touch devices'};
+    ok(eval {main::_main();1},'starting the runner on a complete-with-warnings run returns');
+    is($calls,0,'without any device call');
+}
+{
+    fixture();
+    my $restores=0;my $real_restore=\&main::_restore_run_hazards;
+    local *PGAutomationLaunch::worker_handshake=sub {1};
+    local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
+    local *main::_restore_run_hazards=sub {$restores++;$real_restore->(@_)};
+    local *main::_run_item=sub {
+        my ($number,$item)=@_;$item->{status}='complete';
+        # The queue is edited mid-batch and the new plan fails its re-check.
+        main::_update_run(sub {$_[0]{items}[$number]=$item;$_[0]{queue_revision}=($_[0]{queue_revision}||0)+1;});
+        $bad_job=1;return 1;
+    };
+    ok(eval {main::_main();1},'a batch whose edited queue fails its re-check stops') or diag $@;
+    is(PGAutomation::read_json_file($run_file)->{status},'failed','the batch fails');
+    ok($restores>0,'and protective settings are restored before it finishes');
+    $bad_job=0;
 }
 done_testing();

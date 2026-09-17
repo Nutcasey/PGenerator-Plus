@@ -15901,9 +15901,9 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 			autocal_activity_upload($state,$label,$i,\@activity_before,$current_dpg,$idx,$uploaded);
 			$state->{"hdr20_1d_dpg_uploaded"}=$uploaded ? JSON::PP::true : JSON::PP::false;
 			$state->{"hdr20_1d_dpg_upload_message"}=$umsg;
-			$state->{"message"}=$uploaded
-				? sprintf("HDR20 1D DPG %s %d/%d uploaded (max dE=%.3f, target<=%.2f)",$label,$i,$budget,$max_de_overall,$target_de)
-				: sprintf("HDR20 1D DPG %s %d/%d upload failed after retries (max dE=%.3f)",$label,$i,$budget,$max_de_overall);
+			# Headline the point's own result. The run-wide worst value on its
+			# own read as a calibration failure on the live card.
+			$state->{"message"}=autocal_dpg_upload_headline("HDR20",$label,$i,$budget,$uploaded,$de,$best_de,"run max",$max_de_overall,$target_de);
 			write_state($state);
 			# Per-iter trace: push (iter, measured Y, target Y, dE, gain, damp, DPG idx
 			# values) into the state JSON so a run that stalls at 1.4% / 4% IRE is
@@ -17370,9 +17370,9 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale_inner {
   if(ref($state) eq "HASH") {
    $state->{"sdr_1d_dpg_uploaded"}=$uploaded ? JSON::PP::true : JSON::PP::false;
    $state->{"sdr_1d_dpg_upload_message"}=$umsg;
-   $state->{"message"}=$uploaded
-    ? sprintf("SDR26 1D DPG %s %d/%d uploaded (max dE=%.3f, target<=%.2f)",$label,$i,$budget,$max_de_anchor,$target_de)
-    : sprintf("SDR26 1D DPG %s %d/%d upload failed after retries (max dE=%.3f)",$label,$i,$budget,$max_de_anchor);
+   # Headline the point's own result, as the HDR20 path does; the anchor's
+   # worst attempt on its own read as a calibration failure.
+   $state->{"message"}=autocal_dpg_upload_headline("SDR26",$label,$i,$budget,$uploaded,$de,$best_de,"anchor max",$max_de_anchor,$target_de);
    write_state($state);
   }
   if(!$uploaded) {
@@ -22151,6 +22151,20 @@ sub read_step_once {
   sleep(0.35);
  }
 	 return (undef,"Meter read timed out");
+}
+
+# Live worker headline for one 1D DPG upload (P25). The run- or anchor-wide
+# worst value on its own read as a calibration failure on the live card, so
+# lead with this point's own dE and its best so far. "best" can never read
+# worse than the point, and a missing value prints n/a rather than -1.
+sub autocal_dpg_upload_headline {
+	my ($family,$label,$i,$budget,$uploaded,$de,$best_de,$max_name,$max_de,$target_de)=@_;
+	my $point=defined($de) ? $de+0 : (defined($best_de) ? $best_de+0 : undef);
+	my $best=(defined($best_de) && (!defined($point) || $best_de+0 < $point)) ? $best_de+0 : $point;
+	my $text=sub { defined($_[0]) ? sprintf("%.3f",$_[0]) : 'n/a' };
+	return $uploaded
+		? sprintf("%s 1D DPG %s %d/%d uploaded (point dE=%s, best=%s, %s=%.3f, target<=%.2f)",$family,$label,$i,$budget,$text->($point),$text->($best),$max_name,$max_de,$target_de)
+		: sprintf("%s 1D DPG %s %d/%d upload failed after retries (point dE=%s, %s=%.3f)",$family,$label,$i,$budget,$text->($point),$max_name,$max_de);
 }
 
 unless(caller()) {

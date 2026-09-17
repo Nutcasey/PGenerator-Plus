@@ -107,10 +107,15 @@ const html=require('./automation_activity_preview.cjs');
    run.time_estimate.batch_unknown_stages=5;run.time_estimate.known_stages=15;
    text=pgAutomationEstimateText(run,now);
    check(text.includes('Batch estimate covers 15 of 20 remaining stages'),'partial timing coverage cannot masquerade as whole batch');
+   check(text.includes('Whole batch: about ')&&/Whole batch: about .*? left plus untimed stages/.test(text),'the status line calls a partial batch figure a floor');
    pgAutomationRenderProgress();
-   check(slot('batch-label')==='whole batch left'&&pgAutomationEl('Progress').querySelector('[data-automation-eta-note]').textContent.includes('15 of 20'),'partial coverage is named on the readout and in the status line');
+   check(slot('batch-label')==='whole batch left, timed stages only'&&pgAutomationEl('Progress').querySelector('[data-automation-eta-note]').textContent.includes('15 of 20'),'partial coverage is named on the readout and in the status line');
+   // P15 round 3: a partial batch with a fully timed job qualifies only the batch.
+   check(slot('job-label')==='this job left'&&!/Current job: about [^.]*? left plus untimed stages/.test(pgAutomationEstimateText(run,now).replace(/(\d)\.(\d)/g,'$1,$2')),'a fully timed job is not called a floor just because the batch is partial');
    run.time_estimate.scope='unknown';run.time_estimate.job_unknown_stages=2;
-   check(pgAutomationEstimateText(run,now).includes('plus untimed stages'),'useful known timing survives an unknown current stage');
+   check(/Current job: about [^.]*? left plus untimed stages/.test(pgAutomationEstimateText(run,now).replace(/(\d)\.(\d)/g,'$1,$2')),'useful known timing survives an unknown current stage');
+   pgAutomationRenderProgress();
+   check(slot('job-label')==='this job left, timed stages only','a partial job figure is labelled as a floor on the readout');
    run.time_estimate.calculated_at=now-181;
    check(pgAutomationEstimateText(run,now)==='Updating time estimate…','new estimate format also rejects stale timing');
    run.time_estimate.calculated_at=now;

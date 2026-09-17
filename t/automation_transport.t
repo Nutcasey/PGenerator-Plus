@@ -139,7 +139,13 @@ is(scalar @{$dv->{steps}},5,'real profile result has five xyY step measurements'
 is($dv->{target_gamma},'2.2','raw profile state retains native calibration target');
 is($dv->{dv_map_mode},'2','raw profile state retains Relative map mode');
 is($dv->{max_bpc},8,'raw profile state retains tunnel depth');
-my $output=`node "$Bin/js/automation_transport.js" "$file" "$dir/state.json" 2>&1`;
-is($?,0,'production chart transport and coverage checks pass') or diag $output;
-like($output,qr/PASS automation transport/,'all transport cases reached the renderer');
+# The Perl assertions above run everywhere; the renderer half needs node,
+# which the appliance does not have (T3).
+my $node=`sh -c 'command -v node || command -v nodejs' 2>/dev/null`;chomp $node;
+SKIP: {
+ skip 'Node is required for the renderer transport checks',2 if !$node;
+ my $output=`"$node" "$Bin/js/automation_transport.js" "$file" "$dir/state.json" 2>&1`;
+ is($?,0,'production chart transport and coverage checks pass') or diag $output;
+ like($output,qr/PASS automation transport/,'all transport cases reached the renderer');
+}
 done_testing();

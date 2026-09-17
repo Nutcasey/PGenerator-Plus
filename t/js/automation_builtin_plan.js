@@ -12,7 +12,8 @@ const context = vm.createContext({
  document:{querySelectorAll:() => [], getElementById:id => id==='pgAutomationSavedQueueSelect'?select:id==='pgAutomationDeleteQueueButton'?deleteButton:null},
  localStorage:{setItem:(key,value) => {saved[key]=JSON.parse(value);}},
  setTimeout:() => {},
- confirm:message=>{confirmations.push(message);return allowReplace;},
+ // In-app confirmation (P11) is answered through its test hook.
+ pgAutomationConfirmOverride:message=>{confirmations.push(message);return allowReplace;},
  fetchJSON:() => {throw new Error('Loading reference settings must not contact the TV or start a run');},
  getCcssOverride:() => 'my-panel.ccss', getMeterRefreshRate:() => '24',
 });
@@ -83,8 +84,9 @@ vm.runInContext(`
  pgAutomation.queue.items[0].pre_series.pop();
  pgAutomation.editingRunId='existing-run';pgAutomation.firstPending=6;
 `, context);
+(async()=>{
 allowReplace=false;
-vm.runInContext('pgAutomationLoadQueue()', context);
+await vm.runInContext('pgAutomationLoadQueue()', context);
 assert.equal(evaluate('pgAutomation.queue.items.length'), 6, 'cancel preserves existing queue items');
 assert.equal(evaluate('pgAutomation.queue.items[0].settings.contrast'), 12, 'existing edits are preserved');
 assert.equal(evaluate('pgAutomation.editingRunId'), 'existing-run', 'pending-edit context is preserved');
@@ -95,19 +97,19 @@ assert.equal(fresh[0].calibration.target_white.x, .3127);
 assert.equal(fresh[0].pre_series.length, 3);
 assert.equal(fresh[0].panel_light.key, 'backlight', 'offline default uses the existing runner panel key');
 allowReplace=true;
-vm.runInContext('pgAutomationLoadQueue()', context);
+await vm.runInContext('pgAutomationLoadQueue()', context);
 assert.deepEqual(evaluate('pgAutomation.queue.items'),items,'loading again creates six fresh ordinary items');
 assert.equal(evaluate('pgAutomation.editingRunId'),'','loading a draft exits pending-run editing');
 assert.equal(evaluate('pgAutomation.firstPending'),0);
 assert.equal(vm.runInContext('pgAutomation.queue.id',context),undefined,'reference is saved as a new queue, never over another saved queue');
 select.value='';
-vm.runInContext('pgAutomationLoadQueue()', context);
+await vm.runInContext('pgAutomationLoadQueue()', context);
 assert.equal(evaluate('pgAutomation.queue.items.length'),6,'empty selection leaves queue unchanged');
 assert.deepEqual(evaluate('pgAutomationReferenceItems(["unknown"])'), []);
 vm.runInContext('pgAutomation.queues=[{id:"saved-id",name:"My saved queue",items:[{name:"Custom item"}]}]',context);
 select.value='saved:saved-id';
 const beforeCleanSwitch=confirmations.length;
-vm.runInContext('pgAutomationQueueSelectionChanged(true)',context);
+await vm.runInContext('pgAutomationQueueSelectionChanged(true)',context);
 assert.equal(deleteButton.disabled,false,'ordinary saved queues remain deletable');
 assert.equal(evaluate('pgAutomation.queue.id'),'saved-id','ordinary saved queues still load');
 assert.equal(confirmations.length,beforeCleanSwitch,'an unchanged loaded queue switches without a confirmation');
@@ -117,12 +119,12 @@ assert.equal(select.value,'saved:saved-id','refresh keeps the same queue selecte
 assert.equal(evaluate('pgAutomation.queue.items[0].name'),'Custom item','refresh does not reload or replace queue items');
 vm.runInContext('pgAutomation.queue.items[0].name="Unsaved edit"',context);
 allowReplace=false;select.value='reference-settings';
-vm.runInContext('pgAutomationQueueSelectionChanged(true)',context);
+await vm.runInContext('pgAutomationQueueSelectionChanged(true)',context);
 assert.equal(select.value,'saved:saved-id','cancel restores selector to the displayed queue');
 assert.equal(evaluate('pgAutomation.queue.items[0].name'),'Unsaved edit','cancel preserves edited items');
 assert.equal(deleteButton.disabled,false,'cancel restores saved-queue actions');
 allowReplace=true;select.value='reference-settings';
-vm.runInContext('pgAutomationQueueSelectionChanged(true)',context);
+await vm.runInContext('pgAutomationQueueSelectionChanged(true)',context);
 assert.equal(evaluate('pgAutomation.queue.items.length'),6,'confirming a selection replaces items immediately');
 assert.equal(deleteButton.disabled,true,'reference selection disables deletion');
 assert.match(html,/onchange="pgAutomationQueueSelectionChanged\(true\)"/,'actual dropdown change invokes queue loading');
@@ -140,3 +142,4 @@ const savedHome=evaluate('pgAutomationSnapshot({template_id:"reference-settings-
 assert.equal(savedHome.picture_mode,'hdrCinemaBright','existing saved Home jobs are not silently remapped to a different memory slot');
 assert.equal(savedHome.name,'My HDR Home');
 console.log(JSON.stringify(items));
+})().catch(error=>{console.error(error);process.exit(1);});

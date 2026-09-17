@@ -40,6 +40,7 @@ my $exit_calls=0;
  my $job={name=>'SDR reference',signal_format=>'sdr',picture_mode=>'filmMaker',template_id=>'reference-settings-v1',settings=>{truMotionMode=>'off',contrast=>85},stages=>{pre_readings=>1,calibration=>1,post_readings=>1}};
  my $batch=main::webui_automation_checked_readiness({items=>[$job,{%$job,settings=>{contrast=>100},signal_format=>'hdr10',picture_mode=>'hdrCinema'}, {%$job,settings=>{contrast=>100},signal_format=>'dv',picture_mode=>'dolbyVisionCinema'}]},'start');
  ok($batch->{ready},'mixed-format batch passes general readiness and static validation');
+ is($batch->{status},'ok','a passing readiness reports status ok');
  is(scalar @observed,0,'batch startup never probes picture settings for pending modes');
  is(scalar @{$batch->{items}},3,'all pending jobs survive static validation');
  ok(!grep({$_->{name}=~/generation|tv-reachable|key-contrast|hazard-/} @{$batch->{checks}}),'batch does not imply TV control support has already been checked');
@@ -51,6 +52,7 @@ my $exit_calls=0;
  is($conflict->{items}[0]{settings}{contrast},85,'conflicting explicit setting is preserved for correction');
  my $invalid=main::webui_automation_checked_readiness({items=>[{%$job,signal_format=>'hlg',picture_mode=>'hdrCinema'}]},'start');
  ok(!$invalid->{ready},'unsupported HLG calibration still blocks startup without TV probes');
+ is($invalid->{status},'blocked','a refused readiness reports status blocked, not ok');
  is(scalar @observed,0,'invalid queue does not probe inactive settings');
  for my $case (['hdr10','hdrCinema'],['dv','dolbyVisionFilmMaker']) {
   my $bad_target=main::webui_automation_checked_readiness({items=>[{%$job,template_id=>'',signal_format=>$case->[0],picture_mode=>$case->[1],settings=>{},panel_light=>{policy=>'target',key=>'backlight',target_luminance=>100}}]},'start');

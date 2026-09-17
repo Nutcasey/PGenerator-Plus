@@ -78,8 +78,9 @@ is_deeply([sort keys %{$r->{setting_contracts}}],['brightness','pictureMode'],'a
  my $remember=sub {
   my ($mode,$signal,$settings,$input,$profile)=@_;
   my $payload={picture_mode=>$mode,signal_mode=>$signal,category=>'picture'};
+  my $hash=($profile||'a')x64; # scalar context: string repetition, not a 64-element list
   my $response={status=>'ok',ip=>'192.0.2.2',current_input=>$input||'hdmi4',picture_settings=>{pictureMode=>$mode,%$settings},
-   generation_profile=>{capability_profile_hash=>($profile||'a')x64},supported_picture_keys=>[keys %$settings,'pictureMode']};
+   generation_profile=>{capability_profile_hash=>$hash},supported_picture_keys=>[keys %$settings,'pictureMode']};
   main::lg_remember_picture_settings(JSON::PP::encode_json($response),JSON::PP::encode_json($payload));
  };
  $remember->('filmMaker','sdr',{gamma=>'2.4',brightness=>50});
@@ -90,6 +91,17 @@ is_deeply([sort keys %{$r->{setting_contracts}}],['brightness','pictureMode'],'a
  ok(!grep($_ eq 'gamma',@{$cached->{supported_picture_keys}||[]}),'capability envelope does not cross signal modes either');
  $cached=JSON::PP::decode_json(main::lg_browser_picture_settings_while_automation(JSON::PP::encode_json({signal_mode=>'sdr',picture_mode=>'filmMaker'})));
  is_deeply($cached->{picture_settings},{},'an explicit other-mode request is not answered with the current-mode cache');
+ # P21: the answer says whether any remembered context exists, so the Display
+ # card can tell "another context" apart from "nothing read yet".
+ ok(!$cached->{cache_context_available},'the other-mode request is flagged as a different context');
+ ok($cached->{cache_present},'while a remembered context is reported as present');
+ {
+  no warnings 'redefine';
+  local *main::lg_read_picture_settings_cache=sub {{}};
+  my $empty=JSON::PP::decode_json(main::lg_browser_picture_settings_while_automation(JSON::PP::encode_json({signal_mode=>'sdr',picture_mode=>'filmMaker'})));
+  ok(!$empty->{cache_context_available},'with no remembered values the context is unavailable');
+  ok(defined($empty->{cache_present}) && !$empty->{cache_present},'and no remembered context is reported present');
+ }
  $remember->('dolbyHdrCinema','dv',{brightness=>49});
  $remember->('dolbyHdrCinema','dv',{},'hdmi1');
  $cached=JSON::PP::decode_json(main::lg_browser_picture_settings_while_automation('{}'));

@@ -12,7 +12,10 @@ const context={window:{},document:{getElementById:id=>elements[id]},meterGreyCha
  meterSeriesCache:{},meterFullAutoCalCloneValue:x=>JSON.parse(JSON.stringify(x)),meterSeriesSnapshotHasReadings:()=>true,
  meterRecoverSeries:s=>{observed.push(elements.meterTargetGamma.value);target=s.target_gamma||elements.meterTargetGamma.value;},
  meterPrepareCurrentSeriesForReport:async()=>{if(fail)throw new Error('test render failure');},
- meterBuildCurrentSeriesReportSection:()=>context.meterTargetGammaLabel(),meterPersistSeriesCache:()=>{}};
+ meterBuildCurrentSeriesReportSection:()=>context.meterTargetGammaLabel(),
+ // P6: the report builder suspends series-cache persistence while it renders.
+ meterSeriesCachePersistSuspended:0,meterSeriesCacheDirtyKeys:new Set(),
+ meterPersistSeriesCache:()=>{if(context.meterSeriesCachePersistSuspended>0)context.persistWhileSuspended=true;}};
 vm.createContext(context);
 vm.runInContext(app.match(/function meterTargetGammaLabel\([^]*?\n\}/)[0],context);
 vm.runInContext(workspace.match(/async function meterFullAutoCalBuildSnapshotReportSections\([^]*?\n\}/)[0],context);
@@ -27,9 +30,12 @@ vm.runInContext(workspace.match(/async function meterFullAutoCalBuildSnapshotRep
  assert.deepEqual(observed,['2.2','2.4','bt1886'],'each snapshot installs its own gamma, missing context uses original selection');
  assert.equal(elements.meterTargetGamma.value,'bt1886','manual selection restored');
  assert.equal(context.window._meterSnapshotReportTargetGamma,undefined,'report gamma scope is released');
+ assert.equal(context.meterSeriesCachePersistSuspended,0,'series-cache persistence resumes after a report render');
+ assert.ok(!context.persistWhileSuspended,'the restored cache is persisted only after suspension ends');
  context.meterPrepareCurrentSeriesForReport=async()=>{elements.meterTargetGamma.value='bt1886';if(fail)throw new Error('test render failure');};
  assert.equal(await context.meterFullAutoCalBuildSnapshotReportSections([entry('2.2')]),'Gamma 2.2','startup selector restoration cannot retarget an in-flight report');
  fail=true;await assert.rejects(context.meterFullAutoCalBuildSnapshotReportSections([entry('2.2')]),/test render failure/);
+ assert.equal(context.meterSeriesCachePersistSuspended,0,'a failed report render still resumes series-cache persistence');
  assert.equal(elements.meterTargetGamma.value,'bt1886','manual selection restored after renderer failure');
  assert.equal(context.window._meterSnapshotReportTargetGamma,undefined,'report gamma scope released after failure');
  vm.runInContext(app.match(/function meterGreyTargetGammaSelection\([^]*?\n\}/)[0],context);

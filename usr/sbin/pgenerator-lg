@@ -1130,7 +1130,7 @@ sub lg_authenticated_session (@) {
  }
  if(ref($session) ne "HASH") {
   &diag_log_append("connect:failure",{ ip => $ip, attempts => $connect_attempts });
-  return &json_error("Unable to connect to LG WebOS TV at $ip on ws://3000 or wss://3001",{ ip => $ip, connect_attempts => $connect_attempts });
+  return &json_error("Unable to connect to LG WebOS TV at $ip on ws://3000 or wss://3001",{ ip => $ip, connect_attempts => $connect_attempts, delivery_state => "not-sent" });
  }
 
  my $hello_info={};
@@ -8328,7 +8328,7 @@ sub lg_connect_pin_wait_workflow (@) {
   : "LG TV should now be showing a pairing prompt or PIN. Accept it on the TV, or enter the PIN in PGenerator if one appears.";
  my $session=&websocket_open($ip,$connect_timeout);
  if(ref($session) ne "HASH") {
-  my $error=&json_error("Unable to connect to LG WebOS TV at $ip on ws://3000 or wss://3001",{ ip => $ip, token => $token, pairing_mode => $pairing_type, prompt_style => $prompt_style });
+  my $error=&json_error("Unable to connect to LG WebOS TV at $ip on ws://3000 or wss://3001",{ ip => $ip, token => $token, pairing_mode => $pairing_type, prompt_style => $prompt_style, delivery_state => "not-sent" });
   &file_write_json($state_file,$error) if($state_file ne "");
   return $error;
  }

@@ -26,7 +26,9 @@ use Time::HiRes ();
 use PGAutomation ();
 use PGAutomationLaunch ();
 my ($id,$token,$attempt)=@ARGV;
-my $argv_snapshot=PGAutomation::read_raw("/proc/$$/cmdline");
+# The kernel argv is the evidence on Linux. Elsewhere the child's own @ARGV
+# keeps the fixture alive; the argv assertions themselves skip off Linux.
+my $argv_snapshot=PGAutomation::read_raw("/proc/$$/cmdline") // join("\0",$0,@ARGV)."\0";
 $token=PGAutomationLaunch::read_launch_token($id,$attempt) if $token eq '--launch';
 my $dir=PGAutomation::run_dir($id);
 my $mode=$ENV{PGEN_LAUNCH_TEST_MODE}||'';
@@ -61,7 +63,10 @@ sub settle {
  Time::HiRes::sleep(0.02) while Time::HiRes::time()<$until && !$condition->();
  return $condition->();
 }
-{
+SKIP: {
+ # Accepting a launch reads the child's /proc cmdline (PGAutomationLaunch);
+ # the other blocks below (rejections, contention, durability) run everywhere.
+ skip 'an accepted launch reads the child /proc cmdline; Linux only',12 if !-r "/proc/$$/stat";
  my $id=setup();
  PGAutomation::write_atomic(PGAutomation::run_dir($id).'/runner.pid',"$$\n");
  ok(main::webui_automation_launch_runner($id,'test-token'),'production entry point launches a real subprocess with the new handshake');

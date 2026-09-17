@@ -354,6 +354,14 @@ let lgDisplayControlValues={};
 let lgDisplayControlCapabilities={supportedKeys:[],unsupportedKeys:{},settingContracts:{}};
 let lgDisplayControlLoaded=false;
 let lgDisplayControlError='';
+// While automation owns the TV the card shows remembered values. Say which
+// context they came from; values from another input, signal or picture mode
+// are not this context's readings (P21).
+let lgDisplayControlCacheNote='';
+let lgDisplayControlOtherContext=false;
+// The signal and picture mode the shown values were read for. Remembered
+// values merge only into values from that same context; otherwise they replace.
+let lgDisplayControlValuesContext='';
 // While an automation run owns the TV the daemon answers picture-settings
 // reads from its last live read (flagged cached) instead of spawning a TV
 // helper. Hold the periodic pollers for a minute after such an answer so they
@@ -1175,6 +1183,9 @@ function lgDisplayControlOptionHtml(meta,value){
 function lgDisplayControlInvalidate(){
  lgDisplayControlLoaded=false;
  lgDisplayControlValues={};
+ lgDisplayControlValuesContext='';
+ lgDisplayControlOtherContext=false;
+ lgDisplayControlCacheNote='';
  lgDisplayControlCapabilities={supportedKeys:[],unsupportedKeys:{},settingContracts:{}};
  lgDisplayControlError='';
  lgDisplayControlSnapshot=null;
@@ -1197,6 +1208,8 @@ function lgDisplayControlRender(){
  if(!connected){
   grid.innerHTML='';
   grid.dataset.renderedHtml='';
+  grid.dataset.valueContext='';
+  grid.style.opacity='';
   lgDisplayControlSetStatus('Connect display',false);
   return;
  }
@@ -1231,7 +1244,11 @@ function lgDisplayControlRender(){
  // Status polling must not replace focused controls or open native dropdowns
  // when the rendered values and availability have not changed.
  if(grid.dataset.renderedHtml!==html){grid.innerHTML=html;grid.dataset.renderedHtml=html;}
- lgDisplayControlSetStatus(lgDisplayControlError||(lgAutomationHoldsPollers()?'Values from the last read; refresh paused while automation runs':(lgDisplayControlLoaded?'Picture controls loaded':'Refresh settings')),!!lgDisplayControlError);
+ // The mark stays until a live read replaces the values, even after the hold lapses.
+ const otherContext=lgDisplayControlOtherContext;
+ grid.dataset.valueContext=otherContext?'other':'';
+ grid.style.opacity=otherContext?'0.6':'';
+ lgDisplayControlSetStatus(lgDisplayControlError||((lgAutomationHoldsPollers()||otherContext)?(lgDisplayControlCacheNote||'Values from the last read; refresh paused while automation runs'):(lgDisplayControlLoaded?'Picture controls loaded':'Refresh settings')),!!lgDisplayControlError);
 }
 
 function lgDisplayControlSyncNumber(key,value){
@@ -1254,17 +1271,20 @@ async function lgDisplayControlRefresh(force){
   lgDisplayControlInvalidate();
   return;
  }
- if(!force&&lgDisplayControlLoaded) return;
+ // Values shown from another TV context are not a load: read live as soon as the hold allows.
+ if(!force&&lgDisplayControlLoaded&&!lgDisplayControlOtherContext) return;
  if(!force&&lgAutomationHoldsPollers()) return;
  lgDisplayControlPending=true;
  lgDisplayControlSnapshot=null;
  lgDisplayControlError='';
  lgDisplayControlRender();
+ const requestPictureMode=lgDisplayControlPictureMode(),requestSignalMode=lgSignalModeKey();
+ const requestContext=JSON.stringify([String(requestSignalMode||''),String(requestPictureMode||'')]);
  try{
   const r=await fetchJSON('/api/lg/picture-settings',{
    method:'POST',
    headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({keys:['pictureMode',...LG_DISPLAY_CONTROL_KEYS],picture_mode:lgDisplayControlPictureMode(),signal_mode:lgSignalModeKey(),include_current_input:true,category:'picture',ignore_calibration_picture_mode:true}),
+   body:JSON.stringify({keys:['pictureMode',...LG_DISPLAY_CONTROL_KEYS],picture_mode:requestPictureMode,signal_mode:requestSignalMode,include_current_input:true,category:'picture',ignore_calibration_picture_mode:true}),
    _quiet:true,
    _timeoutMs:65000
   });
@@ -1274,9 +1294,26 @@ async function lgDisplayControlRefresh(force){
 	   if(cached){
 	    // Remembered values only: they must not redefine what this TV can do
 	    // nor count as a load, so the next live refresh rebuilds the card.
-	    lgDisplayControlValues={...lgDisplayControlValues,...r.picture_settings};
+	    if(r.cache_context_available===false){
+	     const shown=Object.keys(lgDisplayControlValues||{}).length>0;
+	     lgDisplayControlOtherContext=shown;
+	     lgDisplayControlCacheNote=!shown
+	      ?'No values have been read in this TV context yet. Live reads resume when automation finishes.'
+	      :r.cache_present===false
+	       ?'Showing values from before automation took the TV; they may not apply to the current input, signal or picture mode. Live reads resume when automation finishes.'
+	       :'Showing values read in a different TV context (input, signal or picture mode); they may not apply here. Live reads resume when automation finishes.';
+	    }else{
+	     // Never mix this context's remembered values into another context's.
+	     const sameContext=!lgDisplayControlOtherContext&&lgDisplayControlValuesContext===requestContext;
+	     lgDisplayControlValues=sameContext?{...lgDisplayControlValues,...r.picture_settings}:{...r.picture_settings};
+	     lgDisplayControlValuesContext=requestContext;
+	     lgDisplayControlOtherContext=false;
+	     lgDisplayControlCacheNote='Values from the last read in this TV context; refresh paused while automation runs.';
+	    }
 	   }else{
+	   lgDisplayControlOtherContext=false;lgDisplayControlCacheNote='';
 	   lgDisplayControlValues=r.picture_settings||{};
+	   lgDisplayControlValuesContext=requestContext;
 	   lgDisplayControlSnapshot=r;
 	   lgDisplayControlCapabilities={
 	    supportedKeys:Array.isArray(r.supported_picture_keys)?r.supported_picture_keys:[],
@@ -2283,18 +2320,30 @@ function lgRenderCalHistoryInto(el){
  el.innerHTML=html;
 }
 
+let lgCalHistoryRefreshInFlight=null;
 async function lgRefreshCalHistory(){
- const hosts=[document.getElementById('lgCalHistoryBodyDesktop'),document.getElementById('lgCalHistoryBodyModal')];
- hosts.forEach(h=>{ if(h) h.innerHTML='Loading history...'; });
- try{
-  const r=await fetchJSON('/api/lg/calibration-history?_='+Date.now(),{_quiet:true,_timeoutMs:12000,cache:'no-store'});
-  lgCalHistoryCache=(r&&r.status==='ok'&&Array.isArray(r.items))?r.items:[];
- }catch(e){
-  lgCalHistoryCache=[];
-  hosts.forEach(h=>{ if(h) h.innerHTML='<div class="lg-cal-hist-empty">Unable to load history.</div>'; });
-  return;
- }
- hosts.forEach(h=>lgRenderCalHistoryInto(h));
+ // One scan at a time: entering the workspace and opening the modal both
+ // call this, and each scan holds the single TV lane for 15-20 s on the Pi.
+ if(lgCalHistoryRefreshInFlight) return lgCalHistoryRefreshInFlight;
+ lgCalHistoryRefreshInFlight=(async()=>{
+  const hosts=[document.getElementById('lgCalHistoryBodyDesktop'),document.getElementById('lgCalHistoryBodyModal')];
+  hosts.forEach(h=>{ if(h) h.innerHTML='Loading history...'; });
+  let r=null;
+  try{
+   r=await fetchJSON('/api/lg/calibration-history?_='+Date.now(),{_quiet:true,_timeoutMs:120000,cache:'no-store'});
+  }catch(e){ r=null; }
+  // fetchJSON swallows its own timeout and network errors and returns null,
+  // so a failed scan must not be rendered as "no artifacts found".
+  if(!r||r.status!=='ok'||!Array.isArray(r.items)){
+   lgCalHistoryCache=[];
+   const why=!r?'The generator did not answer (timeout, connection error or unreadable reply).':(r.message||'The generator reported an error.');
+   hosts.forEach(h=>{ if(h) h.innerHTML='<div class="lg-cal-hist-empty">Unable to load history. '+lgEscapeHtml(why)+'</div>'; });
+   return;
+  }
+  lgCalHistoryCache=r.items;
+  hosts.forEach(h=>lgRenderCalHistoryInto(h));
+ })().finally(()=>{ lgCalHistoryRefreshInFlight=null; });
+ return lgCalHistoryRefreshInFlight;
 }
 
 async function lgCalHistoryReupload(id){

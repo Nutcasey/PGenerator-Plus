@@ -36,11 +36,32 @@ sub contract {
         profile_hash=>$item->{capability_profile}{hash}||'',device_identity=>PGAutomation::clone($item->{device_identity}||{})};
 }
 
-sub matches {
+sub identity_matches {
     my ($item, $contract) = @_;
-    return 0 if ref($contract) ne 'HASH' || ($contract->{intent_hash}||'') ne intent_hash($item);
+    return 0 if ref($contract) ne 'HASH';
     return 0 if ($contract->{tv_input}||'') ne ($item->{tv_input}||'')
         || ($contract->{profile_hash}||'') ne ($item->{capability_profile}{hash}||'');
     return PGAutomation::encode_json($contract->{device_identity}||{}) eq PGAutomation::encode_json($item->{device_identity}||{});
+}
+
+sub matches {
+    my ($item, $contract) = @_;
+    return 0 if ref($contract) ne 'HASH' || ($contract->{intent_hash}||'') ne intent_hash($item);
+    return identity_matches($item, $contract);
+}
+
+# Job start re-runs readiness after selecting the job's signal and picture
+# mode. A contract frozen by a full preflight saw that same mode, so the
+# merged result must still match exactly. A limited preflight (a TV whose
+# picture mode cannot be read) never selected the mode, so its readiness
+# output legitimately differs once the mode is active (P24). For those the
+# queue intent is compared as it stood before the job's own readiness merge;
+# the TV input, compatibility profile and device identity must still match.
+sub job_start_matches {
+    my ($planned_intent_hash, $merged_item, $contract) = @_;
+    return 0 if ref($contract) ne 'HASH';
+    return matches($merged_item, $contract) if !$contract->{limited};
+    return 0 if ($contract->{intent_hash}||'') ne ($planned_intent_hash||'');
+    return identity_matches($merged_item, $contract);
 }
 1;

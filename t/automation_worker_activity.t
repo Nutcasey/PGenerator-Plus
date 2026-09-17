@@ -37,6 +37,10 @@ like(main::_worker_progress($reading),qr/Upload failed; retrying: TV disconnecte
 $reading->{message}='HDR20 1D DPG 7% 4/8 uploaded (max dE=2.1, target<=0.50)';
 $reading->{activity_sequence}=5;
 is(main::_worker_progress($reading),$first,'structured upload event replaces vague trajectory-max message');
+$reading->{message}='HDR20 1D DPG 7% 4/8 uploaded (point dE=0.691, best=0.691, run max=23.787, target<=0.50)';
+is(main::_worker_progress($reading),$first,'the point-dE upload headline is filtered the same way');
+$reading->{message}='SDR26 1D DPG 7% 4/8 uploaded (point dE=0.412, best=0.412, anchor max=1.900, target<=0.50)';
+is(main::_worker_progress($reading),$first,'the SDR26 point-dE upload headline is filtered too');
 $reading->{current_step}=28;$reading->{current_name}='Auto Cal 6%';
 isnt(main::_worker_progress($reading),$first,'next point remains visible');
 $reading->{status}='complete';$reading->{message}='Calibration committed';

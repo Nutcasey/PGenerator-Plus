@@ -23,7 +23,7 @@ const root=path.resolve(__dirname,'../..');
   await page.addScriptTag({content:fs.readFileSync(path.join(root,'usr/share/PGenerator/webui-automation.js'),'utf8').replace(/setTimeout\(pgAutomationInit,0\);\s*$/,'')});
   // Async matrix resolution is covered by automation_settings_plan.cjs.
   await page.evaluate(()=>{window.pgAutomationResolveSettingsPlan=async()=>{};});
-  const results=await page.evaluate(()=>{
+  const results=await page.evaluate(async()=>{
    const checks=[];
    const check=(value,label)=>{if(!value)throw new Error(label);checks.push(label);};
    const visible=id=>pgAutomationEl(id).style.display!=='none';
@@ -53,18 +53,20 @@ const root=path.resolve(__dirname,'../..');
    pgAutomationQueueMove(5,-1);pgAutomationQueueDuplicate(4);pgAutomationQueueRemove(6);
    check(pgAutomation.queue.items.length===6&&pgAutomation.queue.items[4].name==='SDR Cinema'&&pgAutomation.queue.items[5].name==='SDR Cinema (copy)','reference items can be reordered, duplicated and removed normally');
    check(pgAutomationReferenceQueue().items[4].name==='SDR Filmmaker','queue edits leave reference settings unchanged');
-   const originalConfirm=window.confirm;
+   // In-app confirmation (P11) is asynchronous; answer it through the test hook.
+   const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
    pgAutomation.queues=[{id:'browser-saved',name:'Browser saved queue',items:[pgAutomationReferenceQueue().items[4]]}];pgAutomationRenderSavedQueues();
-   window.confirm=()=>false;
-   pgAutomationEl('SavedQueueSelect').value='saved:browser-saved';pgAutomationEl('SavedQueueSelect').dispatchEvent(new Event('change'));
+   window.pgAutomationConfirmOverride=()=>false;
+   pgAutomationEl('SavedQueueSelect').value='saved:browser-saved';pgAutomationEl('SavedQueueSelect').dispatchEvent(new Event('change'));await tick();
    check(pgAutomationEl('SavedQueueSelect').value==='reference-settings'&&pgAutomationEl('QueueItems').querySelectorAll('.auto-item').length===6,'cancelling selection restores dropdown and edited queue');
-   window.confirm=()=>true;
-   pgAutomationEl('SavedQueueSelect').value='saved:browser-saved';pgAutomationEl('SavedQueueSelect').dispatchEvent(new Event('change'));
+   window.pgAutomationConfirmOverride=()=>true;
+   pgAutomationEl('SavedQueueSelect').value='saved:browser-saved';pgAutomationEl('SavedQueueSelect').dispatchEvent(new Event('change'));await tick();
    check(pgAutomationEl('QueueItems').querySelectorAll('.auto-item').length===1&&pgAutomationEl('QueueName').value==='Browser saved queue','dropdown change immediately updates the displayed queue items');
-   window.confirm=()=>{throw new Error('Unchanged queue should switch without prompting');};
-   pgAutomationEl('SavedQueueSelect').value='reference-settings';pgAutomationEl('SavedQueueSelect').dispatchEvent(new Event('change'));
+   let prompted=false;window.pgAutomationConfirmOverride=()=>{prompted=true;return false;};
+   pgAutomationEl('SavedQueueSelect').value='reference-settings';pgAutomationEl('SavedQueueSelect').dispatchEvent(new Event('change'));await tick();
+   check(!prompted,'an unchanged queue switches without prompting');
    check(pgAutomationEl('QueueItems').querySelectorAll('.auto-item').length===6,'switching back restores six reference items without an extra Load click');
-   window.confirm=originalConfirm;
+   delete window.pgAutomationConfirmOverride;
    pgAutomation.queue={name:'TV calibration queue',items:[]};pgAutomationRenderQueue();
    pgAutomationNewRecipe('queue');
    check(pgAutomationEl('Delta').value==='0.5','new 1D LUT target defaults to 0.5');

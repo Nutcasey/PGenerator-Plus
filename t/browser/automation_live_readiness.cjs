@@ -25,7 +25,11 @@ if(!base)throw new Error('Supply the generator URL explicitly');
   await page.waitForSelector('#automationCard');
   await page.evaluate(async()=>{pgSelectDesktopWorkspace('automation');await pgAutomationRefresh();});
   await page.select('#pgAutomationSavedQueueSelect','reference-settings');
-  const requestId=await page.evaluate(()=>{window.readinessFinished=false;pgAutomationReadiness().finally(()=>{window.readinessFinished=true;});return pgAutomation.pendingChecks?.id;});
+  // This script already states its intent, so answer the in-page confirmation
+  // (P11) and wait for the check to register after it.
+  const requestId=await page.evaluate(async()=>{window.pgAutomationConfirmOverride=()=>true;window.readinessFinished=false;pgAutomationReadiness().finally(()=>{window.readinessFinished=true;});
+   for(let i=0;i<100&&!pgAutomation.pendingChecks&&!window.readinessFinished;i++)await new Promise(resolve=>setTimeout(resolve,20));
+   return pgAutomation.pendingChecks?.id;});
   let last='',screenshot=false;const jobs=new Set();
   for(let i=0;i<110;i++){
    await new Promise(resolve=>setTimeout(resolve,3000));

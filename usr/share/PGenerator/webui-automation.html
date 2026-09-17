@@ -77,8 +77,9 @@
  #automationCard .auto-job-summary{font-size:.8rem;color:var(--text2);line-height:1.6;margin-top:6px}
  #automationCard .auto-job-details{margin:8px 0 0}
  #automationCard .auto-job-details>summary{font-size:.78rem;padding:3px 0;color:var(--text2)}
- #pgAutomationQueueDialog{position:fixed;inset:0;margin:auto;color:var(--text);background:var(--surface-modal);border:1px solid var(--border);border-radius:12px;padding:22px;width:min(440px,calc(100vw - 32px));max-height:90vh;overflow:auto;box-sizing:border-box}
- #pgAutomationQueueDialog::backdrop{background:rgba(0,0,0,.7)}
+ #pgAutomationQueueDialog,#pgAutomationConfirmDialog{position:fixed;inset:0;margin:auto;color:var(--text);background:var(--surface-modal);border:1px solid var(--border);border-radius:12px;padding:22px;width:min(440px,calc(100vw - 32px));max-height:90vh;overflow:auto;box-sizing:border-box}
+ #pgAutomationQueueDialog::backdrop,#pgAutomationConfirmDialog::backdrop{background:rgba(0,0,0,.7)}
+ #pgAutomationConfirmDialog p{margin:0 0 18px;line-height:1.45}
  #pgAutomationQueueDialog .field{margin:18px 0}
  #automationCard .auto-editor-section{padding:16px 0;border-bottom:1px solid var(--border)}
  #automationCard .auto-editor-section h3{font-size:.95rem;margin:0 0 12px}

@@ -58,16 +58,49 @@ for my $id ('3d:archived','dvfile:archived','dv:run-1','1dfile:archived') {
  like(restore($id)->{message},qr/Upload transport exception/,"$id preserves upload exception");
  is_deeply(\@calls,[qw(enter upload exit)],"$id upload exception cannot skip cleanup");
  fixture();$exit={status=>'error',message=>'CAL_END rejected'};
- is(restore($id)->{error_code},'calibration-exit-unconfirmed',"$id does not report success after failed exit");
+ my $exit_failed=restore($id);
+ is($exit_failed->{error_code},'calibration-exit-unconfirmed',"$id does not report success after failed exit");
+ is($exit_failed->{exit_status},'unconfirmed',"$id reports the unconfirmed viewing state after a failed exit");
+ ok($exit_failed->{cleanup_required},"$id marks cleanup required after a failed exit");
  fixture();$exit_throw=1;
  is(restore($id)->{error_code},'calibration-exit-unconfirmed',"$id exit exception is visible");
+ # F4-h (P22): an exit reply without explicit calibration_mode=false is not proof.
+ fixture();$exit={status=>'ok'};
+ is(restore($id)->{error_code},'calibration-exit-unconfirmed',"$id an exit without calibration_mode evidence is unconfirmed");
+ # Entry and exit both refused: there was never a session to exit, so the
+ # entry failure stays the error and the viewing state is reported unconfirmed.
+ fixture();$entry={status=>'error',message=>'CAL_START rejected'};$exit={status=>'error',message=>'CAL_END rejected'};
+ my $double=restore($id);
+ is($double->{error_code},'calibration-entry-unconfirmed',"$id keeps the entry failure when exit also fails");
+ is($double->{exit_status},'unconfirmed',"$id reports the unconfirmed viewing state after a double failure");
+ unlike($double->{message},qr/Use Exit Calibration/,"$id does not point to Exit Calibration for a session that never started");
+ is_deeply(\@calls,[qw(enter exit)],"$id still attempts cleanup after a double failure");
  fixture();$upload={status=>'error',message=>'Upload rejected'};
  is(restore($id)->{status},'error',"$id successful exit does not hide upload failure");
 }
-# Explicit caller-managed bookends remain available for 3D/DV uploads.
-for my $options ({enable_calibration=>0,disable_calibration=>0},{disable_calibration=>0},{enable_calibration=>0}) {
- fixture();is(restore('dvfile:archived',$options)->{status},'ok','successful caller-managed session is preserved');
- my @expected=(($options->{enable_calibration}//1)?'enter':(),'upload',($options->{disable_calibration}//1)?'exit':());
- is_deeply(\@calls,\@expected,'only requested successful bookends are executed');
+# Explicit caller-managed bookends are honoured for every archive kind,
+# including 1D archives, which used to ignore them.
+for my $id ('dvfile:archived','3d:archived','1dfile:archived') {
+ for my $options ({enable_calibration=>0,disable_calibration=>0},{disable_calibration=>0},{enable_calibration=>0}) {
+  fixture();is(restore($id,$options)->{status},'ok',"$id successful caller-managed session is preserved");
+  my @expected=(($options->{enable_calibration}//1)?'enter':(),'upload',($options->{disable_calibration}//1)?'exit':());
+  is_deeply(\@calls,\@expected,"$id only requested successful bookends are executed");
+ }
+}
+# Round 3 (P20b): the 1D upload only tells the helper a session is already
+# active when this restore entered it; a caller-managed entry leaves the
+# helper to start its own session, as the 3D and DV restores do.
+{
+ my @bodies;
+ local *main::webui_lg_1d_dpg_upload=sub {push @calls,'upload';push @bodies,main::lg_decode_json($_[0]);return main::lg_encode_json($upload);};
+ fixture();@bodies=();
+ is(restore('1dfile:archived')->{status},'ok','1D restore with its own entry succeeds');
+ ok($bodies[0]{calibration_mode_active},'and tells the helper the session it entered is active');
+ ok($bodies[0]{keep_calibration_mode},'while keeping that session open for the exit bookend');
+ for my $options ({enable_calibration=>0},{enable_calibration=>0,disable_calibration=>0}) {
+  fixture();@bodies=();
+  is(restore('1dfile:archived',$options)->{status},'ok','1D restore without its own entry succeeds');
+  ok(!exists($bodies[0]{calibration_mode_active}),'and never claims a session it did not enter');
+ }
 }
 done_testing();

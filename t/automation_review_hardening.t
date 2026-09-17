@@ -33,6 +33,24 @@ fixture();
  ok(!PGAutomation::write_json_atomic($file,{test=>2}),'directory sync failure is not reported as durable success');
 }
 {
+ my $dark="$store/dark";mkdir($dark,0700) or die $!;chmod(0300,$dark);
+ SKIP: {
+  skip 'root ignores directory permissions',2 if $>==0;
+  ok(!PGAutomation::write_json_atomic("$dark/x.json",{test=>3}),'unreadable parent fails before publication');
+  ok(!-e "$dark/x.json",'nothing is published when the parent cannot be synced');
+ }
+ chmod(0700,$dark);
+}
+{
+ my $old=PGAutomation::run_dir('legacy');mkdir($old,0755) or die $!;mkdir("$old/items",0755) or die $!;
+ PGAutomation::write_atomic("$old/launch.json","{}\n",0664);chmod(0664,"$old/launch.json");chmod(0755,$old,"$old/items");
+ unlink("$store/.runs-private");
+ ok(PGAutomation::ensure_store(),'store upgrade walks existing runs once');
+ is((stat("$old/launch.json"))[2]&0777,0600,'legacy run manifests are made owner-only');
+ is((stat("$old/items"))[2]&0777,0700,'legacy run directories are made owner-only');
+ ok(-e "$store/.runs-private",'the walk leaves a marker so it stays off the request path');
+}
+{
  open my $one,'>>',"$store/contention.lock" or die $!;flock($one,LOCK_EX) or die $!;
  open my $two,'>>',"$store/contention.lock" or die $!;
  my $begin=time();ok(!PGAutomation::lock_exclusive($two,0.03),'contended lock has a bounded wait');
@@ -135,7 +153,10 @@ fixture();
  is(main::_wait_worker('/status','test',{})->{status},'complete','matching terminal result is accepted');
  my $state=PGAutomation::stamp_worker_state({status=>'running'},{automation_worker_id=>$worker_id});
  is($state->{worker_pid},$$,'worker stamps its own PID');
- ok(main::_owned_worker_alive($state),'matching process birth identity is live');
+ SKIP: {
+  skip 'process birth ticks need Linux /proc',1 if !-r "/proc/$$/stat";
+  ok(main::_owned_worker_alive($state),'matching process birth identity is live');
+ }
  $state->{worker_start_ticks}='wrong';
  ok(!main::_owned_worker_alive($state),'PID alone cannot impersonate the recorded worker');
  my $statefile="$store/replay.json";

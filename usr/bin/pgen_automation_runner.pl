@@ -985,7 +985,7 @@ sub _worker_progress {
     # Sample counters belong in live status. Save point transitions once,
     # plus actual measurements/events and exceptional state changes.
     $message='' if $message =~ /^Reading\b/i;
-    $message='' if $status->{activity_sequence} && $message =~ / uploaded \(max dE=/;
+    $message='' if $status->{activity_sequence} && $message =~ / uploaded \((?:max|point) dE=/;
     $message='' if $message eq ($status->{current_name}||'');
     return join(' | ', grep { defined($_) && !ref($_) && $_ ne '' }
         $status->{status}, $status->{current_name}, $message,
@@ -1022,6 +1022,10 @@ sub _wait_worker {
     my $point_started=$started;
     my @point_seconds;
     my ($last_progress_write, $last_progress_digest) = (0, '');
+    my ($owned_pid, $owned_ticks) = (0, '');
+    # A worker has not stamped its pid yet right after launch. Tolerate an
+    # unstamped idle for a bounded window then, never by global process match.
+    my $idle_startup_grace = 30;
     while (time() - $started < 21600) {
         _refresh_control();
         if ($STOP_REQUESTED) {
@@ -1030,8 +1034,16 @@ sub _wait_worker {
         }
         my $status = _api('GET', $status_path, undef);
         return $status if $status->{error_code} && $status->{error_code} eq 'daemon-unreachable';
-        if ($ACTIVE_WORKER_ID && PGAutomation::worker_id($status) ne $ACTIVE_WORKER_ID) {
+        my $state = $status->{status} || '';
+        my $status_id = PGAutomation::worker_id($status);
+        # A transient idle poll carries no attempt id. It is never adopted as a
+        # result; it is only tolerated below while the owned worker is alive.
+        my $idle_unstamped = $state eq 'idle' && $status_id eq '';
+        if ($ACTIVE_WORKER_ID && $status_id ne $ACTIVE_WORKER_ID && !$idle_unstamped) {
             return {status=>'error',error_code=>'worker-identity-mismatch',message=>'Worker status belongs to a different run/job/stage attempt; refusing to adopt or archive it'};
+        }
+        if ($ACTIVE_WORKER_ID && $status_id eq $ACTIVE_WORKER_ID && $status->{worker_pid}) {
+            ($owned_pid, $owned_ticks) = ($status->{worker_pid}, $status->{worker_start_ticks} || '');
         }
         my $now = time();
         if ($now - $last_keepalive >= 60) {
@@ -1051,7 +1063,6 @@ sub _wait_worker {
                 return $status;
             }
         }
-        my $state = $status->{status} || '';
         my $step=0+($status->{current_step}||0);
         if ($state eq 'running' && $step<$timing_last) {
             ($timing_started,$timing_base)=($now,$step>0?$step-1:0);
@@ -1084,9 +1095,16 @@ sub _wait_worker {
         }));
         ($last_progress_write,$last_progress_digest)=($now,$digest);
         }
-        if ($state eq 'idle' && (!$ACTIVE_WORKER_ID ? _worker_process_alive($ACTIVE_WORKER) : _owned_worker_alive($status))) {
-            _sleep_controlled(2) or return undef;
-            next;
+        if ($state eq 'idle') {
+            if (_idle_worker_alive($status, $owned_pid, $owned_ticks)
+                || ($idle_unstamped && !$owned_pid && time() - $started < $idle_startup_grace)) {
+                _sleep_controlled(2) or return undef;
+                next;
+            }
+            # An unstamped idle with no live owned worker is not this attempt's
+            # result. Fail fast with the same refusal a foreign status gets.
+            return {status=>'error',error_code=>'worker-identity-mismatch',message=>'Worker status is idle without this attempt\'s identity and no worker this attempt launched is alive; refusing to adopt or archive it'}
+                if $idle_unstamped && $ACTIVE_WORKER_ID;
         }
         return $status if _status_terminal($state);
         return { status => 'error', error_code => 'worker-timeout', message => "$kind exceeded six hours" }
@@ -1094,6 +1112,40 @@ sub _wait_worker {
         _sleep_controlled(2) or return undef;
     }
     return { status => 'error', error_code => 'worker-timeout', message => "$kind exceeded six hours" };
+}
+
+# The batch and per-job readiness passes both report a job's manual checks.
+# Keep one entry per (job, outcome, level, message), or per name for a passing
+# global check whose wording varies between passes.
+sub _push_preflight_check {
+    my ($result,$check,$seen)=@_;
+    return if ref($check) ne 'HASH';
+    # Passing global equipment checks are identified by name: their text can
+    # vary between passes (free disk space, "reconnected") without being new.
+    # A failure keeps its own text, so a different reason in a later job pass
+    # is still listed.
+    my $global=$check->{ok} && !defined($check->{item_number}) && defined($check->{name}) && $check->{name} ne '';
+    my $key=join("\0",$check->{item_number}//'',$check->{ok}?1:0,$check->{level}//'',$global ? "name:$check->{name}" : ($check->{message}//$check->{name}//''));
+    return if $seen->{$key}++;
+    push @{$result->{checks}},$check;
+}
+
+# Idle tolerance: keep waiting while the worker this attempt launched is still
+# running. A stamped status proves ownership by id. An unstamped idle poll
+# cannot, so only the pid this attempt already recorded from a stamped status
+# counts: its start ticks where the kernel exposes them, else a pid liveness
+# probe. Without that evidence there is nothing to wait for, and the global
+# kind-pattern probe is never used as ownership (see _worker_process_alive).
+# _wait_worker separately allows a bounded 30 s startup grace before the first
+# stamped status has recorded a pid.
+sub _idle_worker_alive {
+    my ($status, $owned_pid, $owned_ticks) = @_;
+    return _worker_process_alive($ACTIVE_WORKER) if !$ACTIVE_WORKER_ID;
+    return _owned_worker_alive($status) if PGAutomation::worker_id($status) eq $ACTIVE_WORKER_ID;
+    return 0 if !$owned_pid;
+    my $birth = PGAutomation::process_start_ticks($owned_pid);
+    return ($birth eq $owned_ticks ? 1 : 0) if $birth ne '' && defined($owned_ticks) && $owned_ticks ne '';
+    return kill(0, $owned_pid) ? 1 : 0;
 }
 
 sub _owned_worker_alive {
@@ -1123,7 +1175,7 @@ sub _copy_worker_files {
     my ($item_number, $kind, $state) = @_;
     my $dir = PGAutomation::item_dir($RUN_ID, $item_number) . '/calibration';
     return 0 if $dir eq '';
-    if (!-d $dir && !eval { make_path($dir, { mode => 0775 }); 1 }) {
+    if (!-d $dir && !eval { make_path($dir, { mode => 0700 }); 1 }) {
         _log("unable to create calibration artifact directory $dir");
         return 0;
     }
@@ -1189,7 +1241,7 @@ sub _snapshot_series {
         return undef;
     }
     my $directory = PGAutomation::item_dir($RUN_ID, $item_number) . '/' . $which;
-    if (!-d $directory && !eval { make_path($directory, { mode => 0775 }); 1 }) {
+    if (!-d $directory && !eval { make_path($directory, { mode => 0700 }); 1 }) {
         $::LAST_ERROR = "Unable to create series artifact directory $directory";
         return undef;
     }
@@ -1215,7 +1267,7 @@ sub _run_series {
     my ($item_number, $item, $which) = @_;
     my @keys = _series_selection($item, $which);
     my $item_dir = PGAutomation::item_dir($RUN_ID, $item_number);
-    make_path("$item_dir/$which", { mode => 0775 }) if !-d "$item_dir/$which";
+    make_path("$item_dir/$which", { mode => 0700 }) if !-d "$item_dir/$which";
     foreach my $key (@keys) {
         _refresh_control();
         return 0 if $STOP_REQUESTED;
@@ -1846,6 +1898,24 @@ sub _select_item_picture_mode {
         return 1;
     }
     _log_action('Selecting '.uc(_signal($item)).' picture mode '._picture_mode($item));
+    # Journal before the write: restoration only needs to walk the signals
+    # whose picture mode this run actually changed.
+    my $signal=_signal($item);
+    # Preflight and job writes are marked separately: a preflight restoration
+    # returns only what the preflight changed, so it must not erase a job's
+    # mark that a later viewing restoration still needs. Restoration writes
+    # move back toward the original and are not journalled.
+    my $phase=$point eq 'queue-preflight' ? 'preflight' : $point eq 'preflight-restore' ? '' : 'job';
+    if ($phase ne '' && !ref(_update_run(sub {
+        $_[0]{mode_written_signals}={} if ref($_[0]{mode_written_signals}) ne 'HASH';
+        my $entry=$_[0]{mode_written_signals}{$signal};
+        $entry=ref($entry) eq 'HASH' ? {%$entry} : $entry ? {preflight=>JSON::PP::true,job=>JSON::PP::true} : {};
+        $entry->{$phase}=JSON::PP::true;
+        $_[0]{mode_written_signals}{$signal}=$entry;
+    }))) {
+        $::LAST_ERROR='Unable to journal the picture-mode change before writing it';
+        return 0;
+    }
     my $result=_apply_one_setting($item,'pictureMode',_picture_mode($item),'picture');
     if (!$result || (($result->{status}||'') ne 'ok' && ($result->{status}||'') ne 'started')) {
         $::LAST_ERROR=$result->{message}||'Unable to select LG picture mode';
@@ -3128,17 +3198,43 @@ sub _stage {
         $run->{items}[$item_number] = $item if ref($run->{items}) eq 'ARRAY';
     });
     my $ok = eval { $callback->(); };
-    $ok = 0 if !$ok || $@;
+    # Capture the exception now: _refresh_control() decodes JSON inside its
+    # own eval, which resets $@ before the failure path below reads it.
+    my $exception = $@;
+    my $one_line = sub {
+        my ($text) = @_;
+        return '' if !defined($text);
+        $text =~ s/\s+$//;
+        # One line: runner.log timestamps lines and the UI splits on newlines.
+        $text =~ s/\s*[\r\n]+\s*/ | /g;
+        return $text;
+    };
+    my $raw_exception = '';
+    if (defined($exception)) {
+        # The raw text is kept in the failure record and runner.log to locate
+        # real crashes; the operator sees the reason without the location.
+        ($exception,$raw_exception) = _clean_exception($exception);
+    }
+    $ok = 0 if !$ok || $exception;
     _refresh_control();
     if ($STOP_REQUESTED) {
         _log("stage $name interrupted by stop request for item $item_number");
         return 0;
     }
     if (!$ok) {
-        my $message = $::LAST_ERROR || ($@ || "Stage $name failed");
+        # The exception is what actually stopped the stage. A $::LAST_ERROR
+        # recorded earlier in the stage may be stale (an inner operation that
+        # recovered), so it is kept as context but never replaces the cause.
+        my $last_error = $one_line->($::LAST_ERROR);
+        my $message = $exception
+            ? ($last_error ne '' && index($exception, $last_error) < 0 ? "$exception (last recorded error: $last_error)" : $exception)
+            : ($last_error ne '' ? $last_error : "Stage $name failed");
+        # Worker and daemon messages can be multi-line too; keep one log line.
+        $message =~ s/\s*[\r\n]+\s*/ | /g;
         my $resumable = 1;
         $item->{status} = $resumable ? 'interrupted' : 'failed';
         $item->{failure} = { stage => $name, message => "$message", at => time() };
+        $item->{failure}{raw_exception} = $raw_exception if $raw_exception ne '' && $raw_exception ne $exception;
         $item->{failure}{error_code} = $::LAST_ERROR_CODE if $::LAST_ERROR_CODE;
         $item->{failure}{detail} = PGAutomation::clone($::LAST_ERROR_DETAIL) if ref($::LAST_ERROR_DETAIL) eq 'HASH';
         _update_item_snapshot($item_number, $item);
@@ -3148,7 +3244,7 @@ sub _stage {
             $run->{failure} = $item->{failure};
             $run->{items}[$item_number] = $item if ref($run->{items}) eq 'ARRAY';
         });
-        _log("$name failed: $message");
+        _log("$name failed: $message".($raw_exception ne '' && $raw_exception ne $exception ? " [raw: $raw_exception]" : ''));
         return 0;
     }
     my $verified = ref($ok) eq 'HASH' ? ($ok->{verified} // 1) : 1;
@@ -3200,10 +3296,30 @@ sub _pause_after_checkpoint {
 
 sub _park_interrupted {
     my ($stage) = @_;
+    # Give the TV back the way a safe Pause does: return the original viewing
+    # context now (unless CAL_END is still unconfirmed), so a failed batch does
+    # not need a manual Retry cleanup before anything else can use the TV.
+    my $before = eval { _run() };
+    my $cleanup = ref($before) eq 'HASH' ? $before->{stop_cleanup} : undef;
+    if (ref($before) eq 'HASH' && $before->{viewing_restore_required}
+            && !(ref($cleanup) eq 'HASH' && !$cleanup->{verified})) {
+        _restore_preflight_context('viewing')
+            or _log_action('Original viewing context restoration still pending: '.($::LAST_ERROR||'unconfirmed'));
+    }
     _update_run(sub {
         my ($run) = @_;
         $run->{status} = 'interrupted';
-        $run->{cleanup_required} = JSON::PP::true if @{PGAutomation::restoration_problems($run)};
+        # _finish latches cleanup for failures that are not restoration
+        # problems (for example the meter release after a failed Pause) and
+        # records them in cleanup_failure; those latches stay until a retry.
+        if (@{PGAutomation::restoration_problems($run)} || $run->{cleanup_failure}) {
+            $run->{cleanup_required} = JSON::PP::true;
+        } else {
+            delete $run->{cleanup_required};
+        }
+        # Protections and the viewing context were returned at park, so a
+        # resume must recreate the temporary device state, as after a Pause.
+        $run->{pause_context_released} = JSON::PP::true;
         $run->{runner_pid} = 0;
         $run->{active_stage} = $stage if defined($stage) && $stage ne '';
         $run->{updated_at} = time();
@@ -3353,6 +3469,11 @@ sub _finish {
         _log('Cleanup remains required; retaining automation ownership: '.$message);
         return 0;
     }
+    # Restoration that had to be abandoned or cannot be read back is a
+    # warning the operator must see, not a clean completion.
+    $status = 'complete-with-warnings'
+        if $status eq 'complete' && ((grep { ($run->{$_.'_restore_outcome'}||'') eq 'abandoned-tv-changed' } qw(viewing preflight))
+            || @{$run->{hazard_restore_unverified}||[]});
     my $saved = _update_run(sub {
         my ($state) = @_;
         $state->{status} = $status;
@@ -3378,7 +3499,7 @@ sub _finish {
 }
 
 sub _restore_hazards {
-    my ($item) = @_;
+    my ($item, $unverified) = @_;
     my $restore = ref($item->{hazard_restore}) eq 'HASH' ? $item->{hazard_restore} : {};
     my @failed;
     foreach my $key (keys %$restore) {
@@ -3397,6 +3518,15 @@ sub _restore_hazards {
             settings => { $key => $value }, category => $category,
             picture_mode => _picture_mode($item), signal_mode => _signal($item),
         }, 1, 0);
+        if (_response_ok($result) && ($result->{verification_state} || '') eq 'acknowledged_unverified'
+                && lg_setting_write_accepted($result, $key, $value)) {
+            # The TV accepted the write but offers no readback for this
+            # control. Retrying can never verify it, so it must not hold the
+            # TV; record it for the operator instead (like panel protection).
+            _log("Hazard restoration for $key was accepted but cannot be read back");
+            push @$unverified, { key => $key, value => $value } if ref($unverified) eq 'ARRAY';
+            next;
+        }
         if (!_response_ok($result) || ($result->{verification_state} || '') ne 'verified') {
             my $message = (ref($result) eq 'HASH' && $result->{message}) || 'restoration was not verified';
             _log("Hazard restoration failed for $key: $message");
@@ -3423,7 +3553,8 @@ sub _restore_run_hazards {
     }
     my $context = ref($ACTIVE_ITEM) eq 'HASH' ? $ACTIVE_ITEM
         : (ref($items) eq 'ARRAY' && ref($items->[0]) eq 'HASH' ? $items->[0] : {});
-    my $failed = %restore ? _restore_hazards({ %$context, hazard_restore => \%restore }) : [];
+    my @unverified;
+    my $failed = %restore ? _restore_hazards({ %$context, hazard_restore => \%restore }, \@unverified) : [];
     my $panel_failure = _restore_panel_protection($run);
     push @$failed, $panel_failure if $panel_failure;
     # A TV left with its power-off, screen-saver or panel protection disabled
@@ -3431,6 +3562,13 @@ sub _restore_run_hazards {
     die 'Unable to persist protection restoration; ownership retained' if !ref(_update_run(sub {
         $_[0]{hazard_restore_failures} = $failed;
         $_[0]{hazard_restore_pending} = @$failed ? JSON::PP::true : JSON::PP::false;
+        my %still=map {($_->{key}=>1)} @unverified;
+        # A later pass that verified a key retires its earlier warning.
+        $_[0]{warnings}=[grep { ref($_) || !/^(\S+) was restored to .*, but this TV cannot read the setting back\. Confirm it in the TV menu\.$/ || $still{$1} } @{$_[0]{warnings}}]
+            if ref($_[0]{warnings}) eq 'ARRAY';
+        $_[0]{hazard_restore_unverified} = \@unverified;
+        _add_run_warning($_[0], "$_->{key} was restored to $_->{value}, but this TV cannot read the setting back. Confirm it in the TV menu.")
+            for @unverified;
     }));
     return $failed;
 }
@@ -3695,6 +3833,8 @@ sub _prepare_job_context {
     if (-f $RUN_DIR.'/viewing-context.json' && (_run()->{finish_policy}||'restore-original') ne 'keep-last') {
         die 'Unable to journal original viewing context restoration' if !ref(_update_run(sub {
             $_[0]{viewing_restore_required}=JSON::PP::true;
+            # An outcome from an earlier Pause must not contradict the new obligation.
+            delete @{$_[0]}{qw(viewing_restore_outcome viewing_context_restored_at viewing_restore_abandoned_at)};
         }));
     }
     die($::LAST_ERROR||'Unable to activate job signal') if !_apply_signal($item);
@@ -3702,6 +3842,9 @@ sub _prepare_job_context {
     die($::LAST_ERROR||'Unable to select job picture mode') if !_select_item_picture_mode($number,$item,'job-start',$frozen);
     _log_action('Signal and picture mode selected; checking this job\'s TV controls');
     my $contract=PGAutomation::clone($item->{preflight_contract});
+    # The queue intent exactly as preflight froze it, before this job's own
+    # readiness output (now in its selected mode) is merged in.
+    my $planned_intent=PGAutomationPlan::intent_hash($item);
     my $ready=_require_job_ready($number,$item,'job');
     if(ref($ready->{items}) eq 'ARRAY' && ref($ready->{items}[0]) eq 'HASH') {
         %$item=(%$item,%{$ready->{items}[0]});
@@ -3709,7 +3852,12 @@ sub _prepare_job_context {
     $item->{preflight_contract}=$contract if ref($contract) eq 'HASH';
     die 'Queue preflight is stale: the resolved job settings or device identity changed; no calibration was started'
         if ref($item->{preflight_contract}) eq 'HASH'
-            && !PGAutomationPlan::matches($item,$item->{preflight_contract});
+            && !PGAutomationPlan::job_start_matches($planned_intent,$item,$item->{preflight_contract});
+    # A limited contract was frozen before the job's mode existed. Once job start
+    # has verified the merged plan, pin it so a claim after Pause or Resume
+    # matches without a whole-queue re-check.
+    $item->{preflight_contract}{intent_hash}=PGAutomationPlan::intent_hash($item)
+        if ref($item->{preflight_contract}) eq 'HASH' && $item->{preflight_contract}{limited};
     # Capture global power/screen-saver restoration values only on first use,
     # before this job applies them; later jobs may observe our disabled values.
     die 'Unable to journal protective settings restoration' if !ref(_update_run(sub {
@@ -3798,6 +3946,90 @@ sub _preflight_save_context {
     die 'Unable to retain original viewing context' if !_write_artifact($path,$original);
 }
 
+# P13: walking every pending job through its signal and picture mode takes
+# minutes. When nothing it proved can have changed, a Resume (or a Run queue
+# straight after Check Readiness) reuses that proof. Each job still re-checks
+# its devices, mode and frozen plan contract when it starts, which is where
+# the per-job safety lives; anything that does not match falls back to the
+# full check.
+our $PREFLIGHT_REUSE_RESUME_SECONDS=24*3600;
+our $PREFLIGHT_REUSE_READINESS_SECONDS=15*60;
+
+sub _preflight_identity_matches {
+    my ($context,$require_mode)=@_;
+    return 0 if ref($context) ne 'HASH' || ref($context->{original}) ne 'HASH' || ref($context->{config}) ne 'HASH';
+    my $live=eval { _preflight_read_mode($context->{config}{signal_mode},$context->{mode_readback_unavailable}) };
+    return 0 if ref($live) ne 'HASH';
+    return 0 if ($live->{tv_input}||'') eq '' || ($live->{tv_input}||'') ne ($context->{original}{tv_input}||'');
+    return 0 if (($live->{capability_profile}||{})->{hash}||'') ne (($context->{original}{capability_profile}||{})->{hash}||'');
+    return 0 if $require_mode && !$context->{mode_readback_unavailable}
+        && !_mode_agrees($live->{picture_mode},$context->{original}{picture_mode});
+    return 1;
+}
+
+sub _reusable_preflight {
+    my ($run)=@_;
+    return undef if ref($run) ne 'HASH' || $run->{preflight_only};
+    my $revision=$run->{queue_revision}||0;
+    my ($result,$source);
+    if ($run->{resumed_at}) {
+        my $previous=$run->{preflight_result};
+        return undef if ref($previous) ne 'HASH' || !$previous->{ready}
+            || !defined($run->{preflight_revision}) || $run->{preflight_revision}!=$revision
+            || time()-($previous->{completed_at}||0) > $PREFLIGHT_REUSE_RESUME_SECONDS;
+        return undef if !_preflight_identity_matches(PGAutomation::read_json_file($RUN_DIR.'/preflight-context.json'),0);
+        $result={%{PGAutomation::clone($previous)},reused=>JSON::PP::true,reused_at=>time(),
+            message=>'Resumed on the same TV with an unchanged queue, so the earlier whole-queue check still applies. Each job is rechecked before it starts.'};
+        $source='resume';
+    } else {
+        my $pointer_path=PGAutomation::base_dir().'/last-readiness.json';
+        my $pointer=PGAutomation::read_json_file($pointer_path);
+        # Single use, whether or not it is fresh or matches this queue.
+        unlink($pointer_path) if -e $pointer_path;
+        return undef if ref($pointer) ne 'HASH' || !PGAutomation::safe_component($pointer->{run_id}||'')
+            || time()-($pointer->{completed_at}||0) > $PREFLIGHT_REUSE_READINESS_SECONDS;
+        my $dir=PGAutomation::run_dir($pointer->{run_id});
+        my $plan=PGAutomation::read_json_file($dir.'/preflight-plan.json');
+        my $context=PGAutomation::read_json_file($dir.'/preflight-context.json');
+        my $items=ref($run->{items}) eq 'ARRAY' ? $run->{items} : [];
+        return undef if ref($plan) ne 'HASH' || ref($plan->{result}) ne 'HASH' || !$plan->{result}{ready}
+            || ref($plan->{items}) ne 'ARRAY' || !@$items || @$items!=@{$plan->{items}};
+        for my $i (0..$#$items) {
+            my $checked=$plan->{items}[$i];
+            return undef if ref($items->[$i]) ne 'HASH' || ($items->[$i]{status}||'queued') ne 'queued'
+                || ref($checked) ne 'HASH' || ref($checked->{preflight_contract}) ne 'HASH'
+                || PGAutomationPlan::intent_hash($items->[$i]) ne ($checked->{preflight_contract}{queue_intent_hash}||'');
+        }
+        # The readiness run returned the TV to its original modes and output;
+        # that is only still true if nobody has changed them since.
+        return undef if !_preflight_identity_matches($context,1);
+        my $config=_api('GET','/api/config',undef,0,0);
+        return undef if ref($config) ne 'HASH' || grep {!defined($config->{$_}) || "$config->{$_}" ne "$context->{config}{$_}"} keys %{$context->{config}};
+        return undef if !eval { _preflight_save_context($context); 1 };
+        $result={%{PGAutomation::clone($plan->{result})},reused=>JSON::PP::true,reused_at=>time(),reused_from=>$pointer->{run_id},
+            message=>'Check Readiness passed moments ago for this exact queue on the same TV, so its whole-queue check is reused. Each job is rechecked before it starts.'};
+        my $checked_items=PGAutomation::clone($plan->{items});
+        # Adoption is an optimisation: if it cannot be recorded, run the full check.
+        my $adopted=eval { _update_run(sub {
+            die 'Queue changed while adopting the readiness check' if ($_[0]{queue_revision}||0)!=$revision;
+            $_[0]{items}=$checked_items;$_[0]{preflight_revision}=$revision;
+        }) };
+        return undef if !ref($adopted);
+        $source='readiness';
+    }
+    die 'Unable to publish the reused queue check' if !ref(_update_run(sub {
+        $_[0]{preflight_in_progress}=JSON::PP::false;$_[0]{preflight_result}=$result;
+        $_[0]{worker_status}={message=>$result->{message}};
+    }));
+    # Keep the startup status the web UI shows in step with the reuse.
+    PGAutomation::write_json_atomic(PGAutomation::base_dir().'/preflight.json',{
+        id=>$RUN_ID,run_id=>$RUN_ID,scope=>'queue',status=>'ready',intent=>'start',%$result,updated_at=>time(),
+        items=>$result->{jobs},issues=>[grep {!$_->{ok}} @{$result->{checks}||[]}],
+    },0664);
+    _log_action('Skipping the whole-queue check ('.$source.'): '.$result->{message});
+    return $result;
+}
+
 sub _preflight_snapshot {
     my $config=_api('GET','/api/config',undef,0,0);
     die 'Generator configuration is unavailable for preflight restoration'
@@ -3845,17 +4077,51 @@ sub _restore_preflight_context {
     }
     my ($old_item,$old_stopping,$old_restoring)=($ACTIVE_ITEM,$STOPPING,$RESTORING_PREFLIGHT);
     $STOPPING=1;$RESTORING_PREFLIGHT=1;
+    my $identity_changed='';
     my $ok=eval {
         # Return each signal's selected mode to its original value, with the
         # initially active signal restored last. Never restore TV settings/LUTs.
+        # A run journals the signals it wrote a mode on; the others were never
+        # changed, so switching the output through them only flashed patterns
+        # and HDMI format changes on the TV. Older runs have no journal and
+        # keep walking every saved signal.
+        # Identity first, read on the signal the generator is outputting now. A
+        # changed TV refuses reads that carry the saved context, so switching
+        # the output first would only time out and keep the TV locked (P16).
+        my $now=_api('GET','/api/config',undef,1,0);
+        my $now_signal=ref($now) eq 'HASH' ? ($now->{signal_mode}||'') : '';
+        $now_signal='' if $now_signal !~ /^(?:sdr|hdr10|hlg|dv)$/;
+        # Input and profile only: another source or an app can show a mode
+        # that does not fit the generator's signal, and that must still count.
+        $identity_changed=_restore_identity_changed($context->{original},$now_signal);
+        die 'TV input or compatibility changed during preflight restoration' if $identity_changed;
+        # Any later failure is checked the same way before it is treated as a
+        # retryable restore failure: a refused switch or read may be the TV
+        # having changed, and one odd read must never abandon a restore.
+        my $confirm_identity=sub {
+            my ($saved,$signal,$live,$error)=@_;
+            $identity_changed=_restore_identity_changed($saved,$signal,$live);
+            die 'TV input or compatibility changed during preflight restoration' if $identity_changed;
+            die $error if defined($error);
+        };
+        my $written=_run()->{mode_written_signals};
         for my $signal (reverse @{$context->{order}||[]}) {
+            if (ref($written) eq 'HASH' && !_journal_marks($written,$signal,$kind) && $signal ne ($context->{config}{signal_mode}||'')) {
+                _log_action('No picture mode was changed on '.uc($signal).'; leaving that signal alone during restoration');
+                next;
+            }
             my $item=$context->{modes}{$signal};
             $ACTIVE_ITEM=$item;
-            die($::LAST_ERROR||'Unable to restore preflight signal') if !_apply_signal($item);
-            my $live=_preflight_read_mode($signal);
-            die 'TV input or compatibility changed during preflight restoration'
-                if $live->{tv_input} ne $item->{tv_input}
-                    || $live->{capability_profile}{hash} ne $item->{capability_profile}{hash};
+            $confirm_identity->($item,$signal,undef,($::LAST_ERROR||'Unable to restore preflight signal')."\n") if !_apply_signal($item);
+            my $live=eval { _preflight_read_mode($signal) };
+            $confirm_identity->($item,$signal,undef,$@||"No independent current-mode response\n") if ref($live) ne 'HASH';
+            if ($live->{tv_input} ne $item->{tv_input}
+                    || $live->{capability_profile}{hash} ne $item->{capability_profile}{hash}) {
+                $confirm_identity->($item,$signal,$live);
+                $live=_preflight_read_mode($signal);
+                die 'TV identity reads disagree during preflight restoration; ownership retained'
+                    if $live->{tv_input} ne $item->{tv_input} || $live->{capability_profile}{hash} ne $item->{capability_profile}{hash};
+            }
             if (!_mode_agrees($item->{picture_mode},$live->{picture_mode})) {
                 die($::LAST_ERROR||'Unable to restore picture mode')
                     if !_select_item_picture_mode(0,$item,'preflight-restore',$live);
@@ -3868,27 +4134,172 @@ sub _restore_preflight_context {
         _preflight_wait_config($context->{config},_api('POST','/api/config',$context->{config},1,0));
         my $pattern=_api('POST','/api/pattern',{name=>'gray50',signal_mode=>$context->{config}{signal_mode}},1,0);
         die 'Unable to display neutral pattern after preflight restoration' if !_response_ok($pattern);
-        my $live=_preflight_read_mode($context->{config}{signal_mode},$context->{mode_readback_unavailable});
+        my $final_signal=$context->{config}{signal_mode};
+        my $live=eval { _preflight_read_mode($final_signal,$context->{mode_readback_unavailable}) };
+        $confirm_identity->($context->{original},$final_signal,undef,$@||"No independent current-mode response\n") if ref($live) ne 'HASH';
+        if ($live->{tv_input} ne $context->{original}{tv_input}
+                || $live->{capability_profile}{hash} ne $context->{original}{capability_profile}{hash}) {
+            $confirm_identity->($context->{original},$final_signal,$live);
+            $live=_preflight_read_mode($final_signal,$context->{mode_readback_unavailable});
+            die 'Original viewing context did not restore'
+                if $live->{tv_input} ne $context->{original}{tv_input} || $live->{capability_profile}{hash} ne $context->{original}{capability_profile}{hash};
+        }
         die 'Original viewing context did not restore'
-            if $live->{tv_input} ne $context->{original}{tv_input}
-                || $live->{capability_profile}{hash} ne $context->{original}{capability_profile}{hash}
-                || (!$context->{mode_readback_unavailable} && !_mode_agrees($live->{picture_mode},$context->{original}{picture_mode}));
+            if !$context->{mode_readback_unavailable} && !_mode_agrees($live->{picture_mode},$context->{original}{picture_mode});
         die 'Unable to persist completed context restoration' if !ref(_update_run(sub {
             $_[0]{$flag}=JSON::PP::false;
+            $_[0]{mode_written_signals}=_journal_after_restore($_[0]{mode_written_signals},$kind);
             $_[0]{$kind.'_context_restored_at'}=time();
             $_[0]{$kind.'_restore_outcome'}=$context->{mode_readback_unavailable} ? 'output-restored-mode-unavailable' : 'verified';
         }));
         1;
     };
     my $error=$@;
+    if (!$ok && $identity_changed) {
+        # A different input or a changed TV (firmware, capability library,
+        # device) can never match the saved context again, so retrying would
+        # hold the TV forever. Mode restoration is a courtesy, not a safety
+        # obligation: return the generator output, record why the modes were
+        # left alone, and discharge the obligation with a visible warning.
+        $ACTIVE_ITEM=$context->{original};
+        my $output_restored=eval {
+            _preflight_wait_config($context->{config},_api('POST','/api/config',$context->{config},1,0));
+            _api('POST','/api/pattern',{name=>'gray50',signal_mode=>$context->{config}{signal_mode}},1,0);
+            1;
+        };
+        my $warning="Original picture modes were not restored because $identity_changed since the batch started. Check each signal's picture mode on the TV."
+            .($output_restored ? '' : ' The generator output could not be returned to its original settings either; check the Output page.');
+        my $saved=_update_run(sub {
+            $_[0]{$flag}=JSON::PP::false;
+            $_[0]{mode_written_signals}=_journal_after_restore($_[0]{mode_written_signals},$kind);
+            $_[0]{$kind.'_restore_outcome'}='abandoned-tv-changed';
+            $_[0]{$kind.'_restore_abandoned_at'}=time();
+            _add_run_warning($_[0],$warning);
+        });
+        ($ACTIVE_ITEM,$STOPPING,$RESTORING_PREFLIGHT)=($old_item,$old_stopping,$old_restoring);
+        if (ref($saved)) {
+            _log_action($warning);
+            return 1;
+        }
+        $::LAST_ERROR='Unable to persist abandoned context restoration; ownership retained';
+        return 0;
+    }
     ($ACTIVE_ITEM,$STOPPING,$RESTORING_PREFLIGHT)=($old_item,$old_stopping,$old_restoring);
     $::LAST_ERROR=$error||'Preflight restoration failed' if !$ok;
     return $ok?1:0;
 }
 
+# Does the mode-write journal say this restoration kind must return $signal?
+# Entries from before phase marks (a plain true) count for both kinds.
+sub _journal_marks {
+    my ($written,$signal,$kind)=@_;
+    return 1 if ref($written) ne 'HASH';
+    my $entry=$written->{$signal};
+    return 0 if !$entry;
+    return 1 if ref($entry) ne 'HASH';
+    return $kind eq 'preflight' ? ($entry->{preflight}?1:0) : (($entry->{preflight}||$entry->{job})?1:0);
+}
+
+sub _journal_after_restore {
+    my ($written,$kind)=@_;
+    return {} if $kind ne 'preflight' || ref($written) ne 'HASH';
+    my %kept;
+    foreach my $signal (keys %$written) {
+        my $entry=$written->{$signal};
+        next if !$entry;
+        my %marks=ref($entry) eq 'HASH' ? %$entry : (preflight=>JSON::PP::true,job=>JSON::PP::true);
+        delete $marks{preflight};
+        $kept{$signal}=\%marks if grep {$marks{$_}} keys %marks;
+    }
+    return \%kept;
+}
+
+# ($message,$raw) for an exception: both on one line (runner.log timestamps
+# lines and the UI splits on newlines); the message also drops the runner's
+# " at FILE line N." (with Perl's ", <FH> line M" variant), which is noise for
+# the operator. The raw text keeps the location for diagnosing real crashes.
+sub _clean_exception {
+    my ($text)=@_;
+    $text='' if !defined($text);
+    $text="$text";
+    $text=~s/\s+$//;
+    $text=~s/\s*[\r\n]+\s*/ | /g;
+    my $message=$text;
+    $message=~s/ at \S+ line \d+(?:, <[^>]*> (?:line|chunk) \d+)?\.?$//;
+    return ($message,$text);
+}
+
+# The TV's input and compatibility hash, read without the saved context (a
+# changed TV refuses scoped reads) and without requiring a picture mode that
+# fits the signal. A built-in app reports no HDMI input, only its app id, and
+# that is a different input. Undef when the TV cannot be read or reports no
+# identity. The profile flags let a partial read (for example firmware
+# information that timed out) be told apart from a real change.
+sub _restore_identity_read {
+    my ($signal)=@_;
+    my $saved_item=$ACTIVE_ITEM;$ACTIVE_ITEM=undef;
+    my $live=eval { _api('POST','/api/lg/picture-settings',{
+        keys=>['pictureMode'],include_current_input=>JSON::PP::true,ignore_calibration_picture_mode=>JSON::PP::true,
+        ($signal ? (signal_mode=>$signal) : ()),
+    },1,0) };
+    $ACTIVE_ITEM=$saved_item;
+    return undef if ref($live) ne 'HASH' || !_response_ok($live);
+    my $input=$live->{current_input}||'';
+    $input='app:'.$live->{current_app_id} if $input eq '' && ($live->{current_app_id}||'') ne '';
+    my $profile=ref($live->{generation_profile}) eq 'HASH' ? $live->{generation_profile} : {};
+    my $hash=$profile->{capability_profile_hash}||'';
+    return undef if $input eq '' || $hash !~ /^[a-f0-9]{64}$/;
+    return {tv_input=>$input,capability_profile=>{hash=>$hash},
+        platform_profile_applied=>$profile->{capability_platform_profile_applied}?1:0,
+        library_valid=>$profile->{capability_library_valid}?1:0};
+}
+
+# Text naming the change when the TV no longer matches $saved, else ''. A
+# difference must be seen on two reads two seconds apart; an unreadable TV is
+# not a change (that stays a retryable failure).
+sub _restore_identity_changed {
+    my ($saved,$signal,$first)=@_;
+    my $saved_profile=ref($saved->{generation_profile}) eq 'HASH' ? $saved->{generation_profile} : {};
+    my $differs=sub {
+        my ($live)=@_;
+        return 0 if ref($live) ne 'HASH';
+        return 1 if ($live->{tv_input}||'') ne ($saved->{tv_input}||'');
+        return 0 if (($live->{capability_profile}||{})->{hash}||'') eq (($saved->{capability_profile}||{})->{hash}||'');
+        # A hash computed from a partial read (model table or capability
+        # library missing where the saved context had them) is not evidence
+        # the TV changed: treat it as unreadable, never as a change.
+        return 0 if $saved_profile->{capability_platform_profile_applied} && defined($live->{platform_profile_applied}) && !$live->{platform_profile_applied};
+        return 0 if $saved_profile->{capability_library_valid} && defined($live->{library_valid}) && !$live->{library_valid};
+        return 1;
+    };
+    $first=_restore_identity_read($signal) if ref($first) ne 'HASH';
+    return '' if !$differs->($first);
+    _sleep_controlled(2);
+    my $second=_restore_identity_read($signal);
+    return $differs->($second) ? _identity_change_text($saved,$second) : '';
+}
+
+sub _identity_change_text {
+    my ($saved,$live)=@_;
+    my @changes;
+    push @changes,'the TV input changed ('.($saved->{tv_input}||'unknown').' to '.($live->{tv_input}||'unknown').')'
+        if ($saved->{tv_input}||'') ne ($live->{tv_input}||'');
+    push @changes,"the TV's compatibility profile changed (firmware, capability library or TV identity)"
+        if (($saved->{capability_profile}||{})->{hash}||'') ne (($live->{capability_profile}||{})->{hash}||'');
+    return join(' and ',@changes) || 'the TV identity changed';
+}
+
+sub _add_run_warning {
+    my ($run,$warning)=@_;
+    $run->{warnings}=[] if ref($run->{warnings}) ne 'ARRAY';
+    push @{$run->{warnings}},$warning if !grep {!ref($_) && $_ eq $warning} @{$run->{warnings}};
+    return $run;
+}
+
 sub _preflight_queue {
     $ACTIVE_STAGE='queue-preflight';
-    my $run=_update_run(sub {$_[0]{preflight_in_progress}=JSON::PP::true;$_[0]{stage_started_at}=time();delete $_[0]{operation_progress};});
+    my $run=_update_run(sub {$_[0]{preflight_in_progress}=JSON::PP::true;$_[0]{stage_started_at}=time();delete $_[0]{operation_progress};
+        $_[0]{mode_written_signals}={} if ref($_[0]{mode_written_signals}) ne 'HASH';});
     die 'Unable to reserve queue preflight' if !ref($run);
     my $revision=$run->{queue_revision}||0;
     my $items=PGAutomation::clone($run->{items}||[]);
@@ -3896,12 +4307,20 @@ sub _preflight_queue {
     my $result={scope=>'queue',ready=>0,started_at=>time(),total_items=>scalar(@pending),checked_items=>0,progress_done=>0,progress_total=>3+3*scalar(@pending),
         jobs=>[map {{name=>$_->{name}||'Job',status=>(($_->{status}||'')=~/^complete/ ? 'previously-completed' : 'unchecked')}} @$items],checks=>[]};
     my $context;
+    my %preflight_seen;
     my $setup=eval {
         _preflight_progress($result,undef,'Checking every pending job before any calibration begins');
         if (@pending) {
             # Establish idle devices/confirmed CAL_END under our execution claim.
             my $base=_api('POST','/api/automation/readiness',{scope=>'batch',items=>[map {$items->[$_]} @pending]},0,0);
-            push @{$result->{checks}},@{$base->{checks}||[]};
+            # The batch pass numbers jobs by position in the pending list; report
+            # them by their position in the queue, like the per-job pass does.
+            for my $check (@{$base->{checks}||[]}) {
+                next if ref($check) ne 'HASH';
+                $check->{item_number}=$pending[$check->{item_number}]
+                    if defined($check->{item_number}) && $check->{item_number}=~/^\d+$/ && defined($pending[$check->{item_number}]);
+                _push_preflight_check($result,$check,\%preflight_seen);
+            }
             die($base->{message}||'Equipment is not ready') if !$base->{ready};
             $result->{progress_done}++;
             _preflight_progress($result,undef,'Equipment ready; saving original signal and picture mode');
@@ -3912,8 +4331,10 @@ sub _preflight_queue {
         1;
     };
     if (!$setup) {
-        my $error=$@||'Unable to capture preflight context';
-        push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-context',message=>"$error"};
+        my ($error,$raw)=_clean_exception($@||'Unable to capture preflight context');
+        _log("queue preflight context failed: $error".($raw ne $error ? " [raw: $raw]" : ''));
+        push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-context',message=>$error,
+            ($raw ne $error ? (raw_exception=>$raw) : ())};
     } else {
         for my $number (@pending) {
             _refresh_control();last if $STOP_REQUESTED;
@@ -3955,23 +4376,33 @@ sub _preflight_queue {
                     _preflight_progress($result,$number,'Limited mode readback: checking scoped controls without changing the viewing mode');
                 }
                 my $ready=_api('POST','/api/automation/readiness',{scope=>'job',items=>[$item]},0,0);
-                for my $check (@{$ready->{checks}||[]}) {$check->{item_number}=$number;push @{$result->{checks}},$check;}
+                # Only job-scoped checks belong to this job; equipment checks
+                # repeated by every job pass stay global and are listed once.
+                for my $check (@{$ready->{checks}||[]}) {$check->{item_number}=$number if ref($check) eq 'HASH' && defined($check->{item_number});_push_preflight_check($result,$check,\%preflight_seen);}
                 die($ready->{message}||'Job failed TV compatibility checks') if !$ready->{ready}
                     || ref($ready->{items}) ne 'ARRAY' || ref($ready->{items}[0]) ne 'HASH';
+                # The queue's own intent, before readiness adds derived fields
+                # (panel_protection_supported, lg_generation, hazard settings);
+                # Run queue after Check Readiness compares against this.
+                my $queue_intent=PGAutomationPlan::intent_hash($item);
                 %$item=(%$item,%{$ready->{items}[0]});
                 die 'Job preflight did not return a confirmed input and compatibility signature'
                     if ($item->{tv_input}||'') ne $context->{original}{tv_input}
                         || ($item->{capability_profile}{hash}||'') !~ /^[a-f0-9]{64}$/;
                 $item->{preflight_contract}=PGAutomationPlan::contract($item);
+                $item->{preflight_contract}{queue_intent_hash}=$queue_intent;
+                $item->{preflight_contract}{limited}=JSON::PP::true if $context->{mode_readback_unavailable};
                 $result->{jobs}[$number]{status}=$context->{mode_readback_unavailable}?'checked-limited':'checked';$result->{checked_items}++;
                 $result->{progress_done}++;
                 _preflight_progress($result,$number,'Job '.($number+1).' readiness checks passed');
                 1;
             };
             if (!$ok) {
-                my $error=$@||$::LAST_ERROR||'Job preflight failed';
+                my ($error,$raw)=_clean_exception($@||$::LAST_ERROR||'Job preflight failed');
+                _log('queue preflight job '.($number+1)." failed: $error".($raw ne $error ? " [raw: $raw]" : ''));
                 $result->{jobs}[$number]{status}='blocked';
-                push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-job',item_number=>$number,message=>"$error"};
+                push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-job',item_number=>$number,message=>$error,
+                    ($raw ne $error ? (raw_exception=>$raw) : ())};
             }
         }
     }
@@ -3979,6 +4410,11 @@ sub _preflight_queue {
     eval {_preflight_progress($result,undef,'Restoring original output and picture modes after queue checks');};
     my $restored=_restore_preflight_context();
     $result->{progress_done}++ if $restored;
+    # Restoration abandoned because the TV changed under the check: the queue
+    # was not checked against the TV it will run on (P16).
+    push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-tv-changed',
+        message=>'The TV input or compatibility profile changed during the queue check. Check the queue again.'}
+        if $restored && (_run()->{preflight_restore_abandoned_at}||0) >= ($result->{started_at}||0);
     push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-restore',message=>$::LAST_ERROR||'Preflight restoration failed'} if !$restored;
     push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-cancelled',message=>'Queue preflight stopped; unchecked jobs are not ready'} if $STOP_REQUESTED;
     my @errors=grep {!$_->{ok} && ($_->{level}||'error') eq 'error'} @{$result->{checks}};
@@ -4003,6 +4439,11 @@ sub _preflight_queue {
         $state->{active_item}=undef;$state->{active_stage}='queue-preflight';
         $state->{worker_status}={message=>$result->{message}};
     }));
+    if ($run->{preflight_only}) {
+        my $pointer=PGAutomation::base_dir().'/last-readiness.json';
+        if ($result->{ready}) { PGAutomation::write_json_atomic($pointer,{run_id=>$RUN_ID,completed_at=>$result->{completed_at},revision=>$revision}); }
+        else { unlink($pointer); }
+    }
     PGAutomation::write_json_atomic(PGAutomation::base_dir().'/preflight.json',{
         id=>$RUN_ID,run_id=>$RUN_ID,scope=>'queue',status=>$result->{ready}?'ready':'blocked',
         intent=>$run->{preflight_only}?'readiness':'start',%$result,updated_at=>time(),items=>$result->{jobs},
@@ -4288,7 +4729,7 @@ sub _main {
         _finish($parking ? 'paused' : 'stopped');
         return;
     }
-    my $preflight=_preflight_queue();
+    my $preflight=_reusable_preflight(_run()) || _preflight_queue();
     if (!$preflight->{ready} || $run->{preflight_only}) {
         _finish($STOP_REQUESTED?'stopped':$preflight->{ready}?'complete':'failed',
             $preflight->{ready}?undef:{stage=>'queue-preflight',message=>$preflight->{message},error_code=>'queue-preflight-blocked'});

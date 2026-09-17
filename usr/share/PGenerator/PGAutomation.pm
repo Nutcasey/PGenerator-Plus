@@ -10,6 +10,8 @@ BEGIN {
 
 use Fcntl qw(:DEFAULT :flock);
 use IO::Handle ();
+use Cwd ();
+use File::Find ();
 use File::Path qw(make_path remove_tree);
 use JSON::PP ();
 use POSIX qw(strftime);
@@ -42,9 +44,13 @@ sub sync_directory {
 
 sub private_store_path {
     my ($path) = @_;
-    my $base = base_dir();
-    $base =~ s{/+$}{};
-    return defined($path) && ($path eq $base || index($path, $base . '/') == 0);
+    return 0 if !defined($path);
+    # Compare normalised spellings: "a//b" and "a/./b" name the same file and
+    # must not escape the owner-only rule.
+    my $normal = sub { my ($p) = @_; $p =~ s{/+}{/}g; 1 while $p =~ s{/\./}{/}g; $p =~ s{/+$}{}; return $p; };
+    my $base = $normal->(base_dir());
+    $path = $normal->($path);
+    return ($path eq $base || index($path, $base . '/') == 0);
 }
 
 # Missing is not the same as unreadable/corrupt. Admission guards must fail
@@ -163,11 +169,37 @@ sub ensure_store {
         # contain capabilities, not merely public calibration measurements.
         return 0 if !chmod(0700, $dir);
     }
+    return 0 if !_privatise_existing_runs();
+    return 1;
+}
+
+# Runs recorded before the store became private still hold token-bearing
+# manifests at their original modes inside world-readable run directories.
+# Tighten them once, best effort: an entry this user cannot chmod must never
+# take the automation API down (the 0700 store root already shields it), so
+# the walk always completes and always leaves its marker, which keeps it off
+# the request path afterwards. The marker records how many entries it skipped.
+sub _privatise_existing_runs {
+    my $marker = base_dir() . '/.runs-private';
+    return 1 if -e $marker;
+    my $skipped = 0;
+    # File::Find does not follow a symlinked root, so resolve it first.
+    my $root = -l runs_dir() ? (Cwd::realpath(runs_dir()) // runs_dir()) : runs_dir();
+    if (-d $root) {
+        local $SIG{__WARN__} = sub {};
+        File::Find::find({ no_chdir => 1, wanted => sub {
+            return if -l $_;
+            $skipped++ if !chmod((-d $_ ? 0700 : 0600), $_);
+        } }, $root);
+    }
+    write_atomic($marker, "skipped $skipped\n", 0600);
     return 1;
 }
 
 sub json_encoder {
-    return JSON::PP->new->canonical(1)->utf8(1);
+    # allow_nonref: JSON::PP 2.27 on the appliance rejects plain scalars by
+    # default; 4.x (macOS, CI) accepts them, which hid this difference.
+    return JSON::PP->new->canonical(1)->utf8(1)->allow_nonref(1);
 }
 
 sub encode_json {
@@ -178,12 +210,16 @@ sub encode_json {
 sub decode_json {
     my ($text) = @_;
     return undef if !defined($text) || $text eq '';
-    return eval { JSON::PP::decode_json($text) };
+    # Same non-ref policy as the encoder, so a bare scalar written on the
+    # appliance reads back as itself rather than as undef.
+    return eval { JSON::PP->new->utf8(1)->allow_nonref(1)->decode($text) };
 }
 
 sub clone {
     my ($value) = @_;
     return undef if !defined($value);
+    # A plain scalar is already a copy; only references need the round trip.
+    return $value if !ref($value);
     return decode_json(encode_json($value));
 }
 
@@ -257,7 +293,12 @@ sub write_atomic {
         $ok = 0 if !close($fh);
     }
     if ($ok) {
-        $ok = rename($tmp, $path) && sync_directory($parent) ? 1 : 0;
+        # Prove the parent can be opened for fsync before publishing. An
+        # unreadable parent used to fail after the rename, reporting a write
+        # that was already visible as failed.
+        $ok = sysopen(my $dirfh, $parent, O_RDONLY) ? 1 : 0;
+        close($dirfh) if $dirfh;
+        $ok = rename($tmp, $path) && sync_directory($parent) ? 1 : 0 if $ok;
     }
     unlink($tmp) if -e $tmp;
     return $ok;

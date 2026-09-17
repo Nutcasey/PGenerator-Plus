@@ -32,7 +32,8 @@ const root=path.resolve(__dirname,'../..'),read=name=>fs.readFileSync(path.join(
   await page.click('button[onclick="pgAutomationNewRecipe(\'queue\')"]');
   assert.equal(await state(),'checking','pending check is explicit at the top of the editor');
   assert.ok(await page.$eval('#pgAutomationCompatibility',e=>{const r=e.getBoundingClientRect();return r.top>=0&&r.bottom<innerHeight;}),'status is in the first viewport');
-  assert.match(await page.$eval('#pgAutomationCompatibilityDetail',e=>e.textContent),/Required before saving/);
+  assert.match(await page.$eval('#pgAutomationCompatibilityDetail',e=>e.textContent),/save now, and Check Readiness flags/);
+  assert.ok(!(await page.$eval('#pgAutomationEditorSave',e=>e.disabled)),'a pending compatibility check does not block Save (P8)');
   assert.match(await page.$eval('#pgAutomationModeSaveHelp',e=>e.textContent),/Checking TV compatibility/,'Save explains the pending check');
   assert.ok(await page.$eval('#pgAutomationCompatibilityButton',e=>e.disabled),'duplicate checks cannot be launched by the button');
   assert.equal(await page.$eval('.auto-compatibility-copy',e=>e.getAttribute('role')),'status');
@@ -64,7 +65,8 @@ const root=path.resolve(__dirname,'../..'),read=name=>fs.readFileSync(path.join(
   await page.evaluate(recipe=>{pgAutomationCancelEditor();pgAutomationOpenEditor('queue',recipe,0);},saved);await page.waitForFunction(()=>!pgAutomation.planPending);
   assert.match(await page.$eval('#pgAutomationManualSettings',e=>e.textContent),/medium/,'reopening retains manual instructions');
   await page.evaluate(()=>{pgAutomationCancelEditor();testModel='g3';holdPlan=true;pgAutomationNewRecipe('queue');});
-  assert.ok(await page.$eval('#pgAutomationEditorSave',e=>e.disabled),'save waits for compatibility');
+  assert.ok(!(await page.$eval('#pgAutomationEditorSave',e=>e.disabled)),'a pending compatibility check does not hold Save (P8); readiness re-checks controls');
+  assert.ok(await page.evaluate(()=>{pgAutomation.editorSaving=true;pgAutomationModeEligibility();const disabled=pgAutomationEl('EditorSave').disabled;pgAutomation.editorSaving=false;pgAutomationModeEligibility();return disabled;}),'an in-flight save keeps Save disabled even when the check re-evaluates');
   await page.evaluate(()=>{const e=document.querySelector('[data-pg-automation-key="contrast"]');e.value='61';pendingPlans.shift()();});
   await page.waitForFunction(()=>!pgAutomation.planPending);
   assert.equal(await page.evaluate(()=>pgAutomationRecipeFromForm().settings.contrast),61,'typing during matrix read is preserved');

@@ -152,6 +152,7 @@ sub lg_browser_picture_settings_while_automation (@) {
  return '' if($token ne '' && $token eq ($execution->{token}||''));
  my $store=&lg_read_picture_settings_cache();
  my $cache=($store->{schema_version}||0)==2 ? $store->{contexts}{$store->{current}||''} : undef;
+ my $cache_present=ref($cache) eq 'HASH' ? 1 : 0;
  my $context=ref($cache) eq 'HASH' ? $cache->{context}||{} : {};
  my %request_fields=(picture_mode=>'mode',tv_input=>'input',signal_mode=>'signal',category=>'category');
  my $matches=ref($cache) eq 'HASH';
@@ -164,7 +165,7 @@ sub lg_browser_picture_settings_while_automation (@) {
  my $keys=$payload->{keys};$keys=[sort keys %$known] if(ref($keys) ne 'ARRAY' || !@$keys);
  my %settings=map {exists($known->{$_}) ? ($_=>$known->{$_}) : ()} @$keys;
  return &lg_encode_json({status=>'ok',cached=>&lg_json_true(),automation_active=>&lg_json_true(),
-  run_id=>$execution->{run_id}||'',picture_settings=>\%settings,cache_context_available=>&lg_json_bool($matches),
+  run_id=>$execution->{run_id}||'',picture_settings=>\%settings,cache_context_available=>&lg_json_bool($matches),cache_present=>&lg_json_bool($cache_present),
   (map {exists($cache->{$_}) ? ($_=>$cache->{$_}) : ()} qw(current_input generation_profile lg_generation virtual_picture_settings supported_picture_keys unsupported_picture_keys setting_contracts logical_controls)),
   cached_at=>$cache->{updated_at}||0,read_at=>$cache->{read_at}||{},
   message=>$matches ? 'Values from the last read in this TV/input/signal/picture-mode context; automation owns the TV.'
@@ -1973,12 +1974,12 @@ sub webui_lg_calibration_mode (@) {
 	 if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
 	  return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing before changing calibration mode." });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before changing calibration mode." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before changing calibration mode." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before changing calibration mode." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before changing calibration mode." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before changing calibration mode." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before changing calibration mode." }) if($client_key eq "");
  my $result=&lg_helper_run({
   action => "calibration_mode",
   expected_tv_input => $payload->{"expected_tv_input"}||"",
@@ -2025,12 +2026,12 @@ sub webui_lg_picture_settings (@) {
 	 if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
 	  return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing first by entering the PIN shown on the TV.", needs_repair => &lg_json_true() });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before reading picture settings." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before reading picture settings." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before reading picture settings." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before reading picture settings." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before reading picture settings." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before reading picture settings." }) if($client_key eq "");
  my $keys=$payload->{"keys"};
  $keys=&lg_picture_default_keys() if(ref($keys) ne "ARRAY" || !@{$keys});
  my $ignore_calibration_picture_mode=$payload->{"ignore_calibration_picture_mode"} ? 1 : 0;
@@ -2131,12 +2132,12 @@ sub webui_lg_picture_settings_set (@) {
 	   repair_hint => "Use Display and click Submit PIN after typing the code shown on the TV.",
 	  });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before changing picture settings." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before changing picture settings." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before changing picture settings." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before changing picture settings." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before changing picture settings." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before changing picture settings." }) if($client_key eq "");
  my $settings=$payload->{"settings"};
  return &lg_encode_json({ status => "error", message => "No LG picture settings were provided." }) if(ref($settings) ne "HASH" || !%{$settings});
  my $readback_keys=$payload->{"readback_keys"};
@@ -2274,12 +2275,12 @@ sub webui_lg_picture_reset (@) {
 	   needs_repair => &lg_json_true(),
 	  });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting picture settings." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting picture settings." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting picture settings." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting picture settings." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting picture settings." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting picture settings." }) if($client_key eq "");
  my $picture_mode=$payload->{"picture_mode"}||$clients->{"calibration_picture_mode"}||"";
  my $stale_cleanup=&lg_clear_stale_calibration_mode_for_reset($clients,$ip,$client_key,$picture_mode,$payload->{"signal_mode"}||"");
  return &lg_encode_json($stale_cleanup) if(ref($stale_cleanup) eq "HASH" && ($stale_cleanup->{"status"}||"") ne "ok");
@@ -2336,12 +2337,12 @@ sub webui_lg_picture_apply_all_inputs (@) {
    error_code => "lg-calibration-session-held",
   });
  }
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before applying picture settings to all inputs." }) if(&lg_clients_disconnected($clients));
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before applying picture settings to all inputs." }) if(&lg_clients_disconnected($clients));
  my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before applying picture settings to all inputs." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before applying picture settings to all inputs." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before applying picture settings to all inputs." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before applying picture settings to all inputs." }) if($client_key eq "");
  my $result=&lg_helper_run({
   action => "picture_apply_all_inputs",
   expected_tv_input => $payload->{"expected_tv_input"}||"",
@@ -2384,12 +2385,12 @@ sub webui_lg_panel_protection (@) {
   });
  }
  my $connect_message="Connect the LG TV before changing panel protection.";
- return &lg_encode_json({ status => "error", message => $connect_message }) if(&lg_clients_disconnected($clients));
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => $connect_message }) if(&lg_clients_disconnected($clients));
  my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => $connect_message }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => $connect_message }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => $connect_message }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => $connect_message }) if($client_key eq "");
  my $result=&lg_helper_run({
   action => "panel_protection",
   enable => $enable,
@@ -2451,12 +2452,12 @@ sub webui_lg_3d_lut_probe (@) {
 	 if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
 	  return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing before probing 3D LUT support.", needs_repair => &lg_json_true() });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before probing 3D LUT support." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before probing 3D LUT support." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before probing 3D LUT support." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before probing 3D LUT support." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before probing 3D LUT support." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before probing 3D LUT support." }) if($client_key eq "");
  my $result=&lg_helper_run({
   action => "3d_lut_probe",
   expected_tv_input => $payload->{"expected_tv_input"}||"",
@@ -2488,12 +2489,12 @@ sub webui_lg_3d_lut_upload (@) {
 	 if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
 	  return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing before uploading a 3D LUT.", needs_repair => &lg_json_true() });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before uploading a 3D LUT." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before uploading a 3D LUT." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before uploading a 3D LUT." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before uploading a 3D LUT." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before uploading a 3D LUT." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before uploading a 3D LUT." }) if($client_key eq "");
  my $held_prepare=&lg_prepare_held_calibration_mode(
   $clients,$payload->{"keep_calibration_mode"},$payload->{"calibration_mode_active"},
   $payload->{"picture_mode"}||$clients->{"calibration_picture_mode"}||""
@@ -2536,12 +2537,12 @@ sub webui_lg_3d_lut_reset (@) {
 	 if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
 	  return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing before resetting the 3D LUT.", needs_repair => &lg_json_true() });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting the 3D LUT." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting the 3D LUT." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting the 3D LUT." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting the 3D LUT." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting the 3D LUT." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting the 3D LUT." }) if($client_key eq "");
  my $held_prepare=&lg_prepare_held_calibration_mode(
   $clients,$payload->{"keep_calibration_mode"},$payload->{"calibration_mode_active"},
   $payload->{"picture_mode"}||$clients->{"calibration_picture_mode"}||""
@@ -2581,12 +2582,12 @@ sub webui_lg_hdr_tone_map_upload (@) {
 	 if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
 	  return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing before uploading HDR tone-map data.", needs_repair => &lg_json_true() });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before uploading HDR tone-map data." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before uploading HDR tone-map data." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before uploading HDR tone-map data." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before uploading HDR tone-map data." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before uploading HDR tone-map data." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before uploading HDR tone-map data." }) if($client_key eq "");
  # If dpg_data is supplied, upload the 1D DPG first inside the same
  # CAL_START/CAL_END session as the tone map. The reference binds the DPG and
  # the tone map inside a single session; PGen previously uploaded them
@@ -2632,12 +2633,12 @@ sub webui_lg_1d_dpg_read (@) {
 	 if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
 	  return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing before reading the HDR20 1D DPG.", needs_repair => &lg_json_true() });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before reading the HDR20 1D DPG." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before reading the HDR20 1D DPG." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before reading the HDR20 1D DPG." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before reading the HDR20 1D DPG." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before reading the HDR20 1D DPG." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before reading the HDR20 1D DPG." }) if($client_key eq "");
  my $result=&lg_helper_run({
   action => "1d_dpg_read",
   expected_tv_input => $payload->{"expected_tv_input"}||"",
@@ -2665,12 +2666,12 @@ sub webui_lg_1d_dpg_upload (@) {
 	 if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
 	  return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing before uploading the HDR20 1D DPG.", needs_repair => &lg_json_true() });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before uploading the HDR20 1D DPG." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before uploading the HDR20 1D DPG." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before uploading the HDR20 1D DPG." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before uploading the HDR20 1D DPG." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before uploading the HDR20 1D DPG." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before uploading the HDR20 1D DPG." }) if($client_key eq "");
  my $held_prepare=&lg_prepare_held_calibration_mode(
   $clients,$payload->{"keep_calibration_mode"},$payload->{"calibration_mode_active"},
   $payload->{"picture_mode"}||$clients->{"calibration_picture_mode"}||""
@@ -2737,12 +2738,12 @@ sub webui_lg_dv_profile_upload (@) {
  if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
   return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing before uploading a Dolby Vision profile.", needs_repair => &lg_json_true() });
  }
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before uploading a Dolby Vision profile." }) if(&lg_clients_disconnected($clients));
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before uploading a Dolby Vision profile." }) if(&lg_clients_disconnected($clients));
  my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before uploading a Dolby Vision profile." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before uploading a Dolby Vision profile." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before uploading a Dolby Vision profile." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before uploading a Dolby Vision profile." }) if($client_key eq "");
  my $result=&lg_helper_run({
   action => "dv_profile_upload",
   expected_tv_input => $payload->{"expected_tv_input"}||"",
@@ -3006,12 +3007,12 @@ sub webui_lg_hdr_calman_reset (@) {
 	 if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
 	  return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing before resetting HDR calibration state.", needs_repair => &lg_json_true() });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting HDR calibration state." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting HDR calibration state." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting HDR calibration state." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting HDR calibration state." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting HDR calibration state." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting HDR calibration state." }) if($client_key eq "");
  my $picture_mode=$payload->{"picture_mode"}||$clients->{"calibration_picture_mode"}||"";
  my $stale_cleanup=&lg_clear_stale_calibration_mode_for_reset($clients,$ip,$client_key,$picture_mode,"hdr10");
  return &lg_encode_json($stale_cleanup) if(ref($stale_cleanup) eq "HASH" && ($stale_cleanup->{"status"}||"") ne "ok");
@@ -3049,12 +3050,12 @@ sub webui_lg_dv_calman_reset (@) {
 	 if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
 	  return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing before resetting Dolby Vision calibration state.", needs_repair => &lg_json_true() });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting Dolby Vision calibration state." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting Dolby Vision calibration state." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting Dolby Vision calibration state." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting Dolby Vision calibration state." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting Dolby Vision calibration state." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting Dolby Vision calibration state." }) if($client_key eq "");
  my $picture_mode=$payload->{"picture_mode"}||$clients->{"calibration_picture_mode"}||"";
  my $stale_cleanup=&lg_clear_stale_calibration_mode_for_reset($clients,$ip,$client_key,$picture_mode,"dv");
  return &lg_encode_json($stale_cleanup) if(ref($stale_cleanup) eq "HASH" && ($stale_cleanup->{"status"}||"") ne "ok");
@@ -3098,12 +3099,12 @@ sub webui_lg_sdr_calman_reset (@) {
 	 if(ref($pin_state) eq "HASH" && ($pin_state->{"status"}||"") eq "pending") {
 	  return &lg_encode_json({ status => "error", message => "Complete LG PIN pairing before resetting SDR calibration state.", needs_repair => &lg_json_true() });
 	 }
-	 return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting SDR calibration state." }) if(&lg_clients_disconnected($clients));
+	 return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting SDR calibration state." }) if(&lg_clients_disconnected($clients));
 	 my $ip=&lg_target_ip($payload,$clients);
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting SDR calibration state." }) if($ip eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting SDR calibration state." }) if($ip eq "");
  my $client=&lg_primary_client($clients);
  my $client_key=$client->{"client_key"}||$client->{"client-key"}||"";
- return &lg_encode_json({ status => "error", message => "Connect the LG TV before resetting SDR calibration state." }) if($client_key eq "");
+ return &lg_encode_json({ status => "error", delivery_state => "not-sent", message => "Connect the LG TV before resetting SDR calibration state." }) if($client_key eq "");
  my $picture_mode=$payload->{"picture_mode"}||$clients->{"calibration_picture_mode"}||"";
  my $stale_cleanup=&lg_clear_stale_calibration_mode_for_reset($clients,$ip,$client_key,$picture_mode,"sdr");
  return &lg_encode_json($stale_cleanup) if(ref($stale_cleanup) eq "HASH" && ($stale_cleanup->{"status"}||"") ne "ok");
@@ -3301,13 +3302,107 @@ sub _lg_cal_hist_archive_dv {
  });
 }
 
+# The list is derived only from archive and run files. Decoding every archive
+# (each 1D entry carries a 3,072-value LUT) took 15-19 s on the appliance and
+# held the single TV lane. A stat-only fingerprint of every file the list
+# reads decides whether the last result is still valid.
+sub _lg_cal_hist_fingerprint {
+ require Digest::MD5;
+ eval { require Time::HiRes; 1 };
+ my $md5=Digest::MD5->new;
+ $md5->add("calibration-history-list:1\n");
+ my $add=sub {
+  my ($path)=@_;
+  my @st=eval { Time::HiRes::stat($path) };
+  @st=stat($path) if(!@st);
+  $md5->add($path,"\0",(@st ? join(':',$st[1],$st[7],$st[9]) : '-'),"\n");
+ };
+ foreach my $dir ("$_lg_cal_hist_dir/1d","$_lg_cal_hist_dir/dv",$_lg_cal_hist_luts) {
+  if(opendir(my $dh,$dir)) { $add->("$dir/$_") foreach(sort grep { $_ ne '.' && $_ ne '..' } readdir($dh)); closedir($dh); }
+  else { $md5->add("$dir:absent\n"); }
+ }
+ if(opendir(my $dh,$_lg_cal_hist_runs)) {
+  foreach my $run (sort grep { $_ ne '.' && $_ ne '..' } readdir($dh)) {
+   $add->("$_lg_cal_hist_runs/$run/$_") foreach(qw(grey-state.json manifest.json dv-profile-measurements.json 3d-state.json stages.ndjson));
+  }
+  closedir($dh);
+ } else { $md5->add("$_lg_cal_hist_runs:absent\n"); }
+ return $md5->hexdigest;
+}
+
 sub webui_lg_calibration_history_list (@) {
+ my $cache="$_lg_cal_hist_dir.list-cache";
+ my $fingerprint=eval { _lg_cal_hist_fingerprint() } || '';
+ if($fingerprint ne '' && open(my $fh,"<",$cache)) {
+  local $/; my $raw=<$fh>; close($fh);
+  # Only a complete, decodable body counts (a torn write must not be served).
+  if(defined($raw) && $raw=~/\A\Q$fingerprint\E\n(\{"status":"ok".*\})\n?\z/s) {
+   my $body=$1;
+   return $body if(eval { ref(JSON::PP::decode_json($body)) eq 'HASH' });
+  }
+ }
+ my $body=_lg_cal_hist_list_uncached();
+ if($fingerprint ne '') {
+  my $tmp="$cache.$$.".int(rand(1_000_000_000)).".tmp";
+  if(open(my $out,">",$tmp)) {
+   my $ok=print {$out} "$fingerprint\n$body\n";
+   $ok=close($out) && $ok;
+   if(!$ok || !rename($tmp,$cache)) { unlink($tmp); }
+  }
+ }
+ return $body;
+}
+
+# Per-file memo for the list: a calibration adds or changes a few files, and
+# only those are decoded again. Only what the list reads is kept: scalars,
+# nested hashes two levels down (config, measurements), and the lengths of the
+# 1D curve arrays (the list checks for 3,072 values). Readings, LUT tables and
+# every other array are dropped, so a multi-megabyte AutoCal state costs a few
+# kilobytes. Entries for files the latest list did not read are forgotten.
+my %_lg_cal_hist_lite_memo;
+my %_lg_cal_hist_lite_seen;
+my %_lg_cal_hist_length_keys=map {$_=>1} qw(dpg_data hdr20_1d_dpg_data sdr_1d_dpg_data);
+sub _lg_cal_hist_lite_value {
+ my ($value,$depth)=@_;
+ $depth||=0;
+ return $value if(ref($value) ne 'HASH');
+ my %lite;
+ foreach my $key (keys %$value) {
+  my $item=$value->{$key};
+  if(!ref($item) || ref($item) eq 'JSON::PP::Boolean') { $lite{$key}=$item; }
+  elsif(ref($item) eq 'ARRAY') {
+   my @shape;
+   $#shape=$#$item if($_lg_cal_hist_length_keys{$key});
+   $lite{$key}=\@shape;
+  }
+  elsif(ref($item) eq 'HASH' && $depth<2) { $lite{$key}=_lg_cal_hist_lite_value($item,$depth+1); }
+ }
+ return \%lite;
+}
+sub _lg_cal_hist_read_json_lite {
+ my ($path)=@_;
+ $_lg_cal_hist_lite_seen{$path}=1;
+ my @st=eval { require Time::HiRes; Time::HiRes::stat($path) };
+ @st=stat($path) if(!@st);
+ if(!@st) { delete $_lg_cal_hist_lite_memo{$path}; return undef; }
+ my $key=join(':',$st[1],$st[7],$st[9]);
+ my $hit=$_lg_cal_hist_lite_memo{$path};
+ return $hit->{value} if(ref($hit) eq 'HASH' && $hit->{key} eq $key);
+ my $value=_lg_cal_hist_read_json_file($path);
+ $value=_lg_cal_hist_lite_value($value) if(defined($value));
+ $_lg_cal_hist_lite_memo{$path}={key=>$key,value=>$value};
+ return $value;
+}
+sub _lg_cal_hist_lite_memo_paths { return sort keys %_lg_cal_hist_lite_memo; }
+
+sub _lg_cal_hist_list_uncached (@) {
+ %_lg_cal_hist_lite_seen=();
  my @items;
  # Durable archive (preferred — reuploadable snapshots written on successful upload)
  if(opendir(my $dh,"$_lg_cal_hist_dir/1d")) {
   foreach my $f (sort { $b cmp $a } readdir($dh)) {
    next unless($f =~ /^([A-Za-z0-9._-]+)\.json$/);
-   my $meta=_lg_cal_hist_read_json_file("$_lg_cal_hist_dir/1d/$f");
+   my $meta=_lg_cal_hist_read_json_lite("$_lg_cal_hist_dir/1d/$f");
    next unless(ref($meta) eq "HASH" && ref($meta->{"dpg_data"}) eq "ARRAY" && @{$meta->{"dpg_data"}}==3072);
    my $id=$meta->{"id"} || "1dfile:$1";
    my $mtime=(stat("$_lg_cal_hist_dir/1d/$f"))[9] || ($meta->{"archived_at"}||0);
@@ -3338,7 +3433,7 @@ sub webui_lg_calibration_history_list (@) {
  if(opendir(my $dh,"$_lg_cal_hist_dir/dv")) {
   foreach my $f (sort { $b cmp $a } readdir($dh)) {
    next unless($f =~ /^([A-Za-z0-9._-]+)\.json$/);
-   my $meta=_lg_cal_hist_read_json_file("$_lg_cal_hist_dir/dv/$f");
+   my $meta=_lg_cal_hist_read_json_lite("$_lg_cal_hist_dir/dv/$f");
    next unless(ref($meta) eq "HASH" && ref($meta->{"measurements"}) eq "HASH");
    my $id=$meta->{"id"} || "dvfile:$1";
    my $mtime=(stat("$_lg_cal_hist_dir/dv/$f"))[9] || ($meta->{"archived_at"}||0);
@@ -3365,12 +3460,12 @@ sub webui_lg_calibration_history_list (@) {
    next if($run !~ /^[A-Za-z0-9._-]+$/);
    my $dir="$_lg_cal_hist_runs/$run";
    next unless(-d $dir);
-   my $state=_lg_cal_hist_read_json_file("$dir/grey-state.json");
+   my $state=_lg_cal_hist_read_json_lite("$dir/grey-state.json");
    next unless(ref($state) eq "HASH");
    my $uploaded=($state->{"final_1d_lut_uploaded"} || $state->{"hdr20_1d_dpg_uploaded"} || $state->{"sdr_1d_dpg_uploaded"}) ? 1 : 0;
    my ($dpg,$sm_from_data,$de_from_data)=_lg_cal_hist_run_1d($state);
    next unless($uploaded && ref($dpg) eq "ARRAY" && scalar(@$dpg) == 3072);
-   my $manifest=_lg_cal_hist_read_json_file("$dir/manifest.json") || {};
+   my $manifest=_lg_cal_hist_read_json_lite("$dir/manifest.json") || {};
    my $cfg=(ref($manifest->{"config"}) eq "HASH") ? $manifest->{"config"} : {};
    # calibration_picture_mode is what the SDR26 worker stamps; the manifest
    # config is frequently absent on these runs.
@@ -3405,7 +3500,7 @@ sub webui_lg_calibration_history_list (@) {
    next unless($f =~ /^([A-Za-z0-9._-]+)\.bin$/);
    my $base=$1;
    next unless(-f "$_lg_cal_hist_luts/$base.bin");
-   my $meta=_lg_cal_hist_read_json_file("$_lg_cal_hist_luts/$base.json") || {};
+   my $meta=_lg_cal_hist_read_json_lite("$_lg_cal_hist_luts/$base.json") || {};
    my $mtime=(stat("$_lg_cal_hist_luts/$base.bin"))[9] || 0;
    my $pm=$meta->{"picture_mode"} || "";
    my $sm=$meta->{"signal_mode"} || "";
@@ -3439,17 +3534,17 @@ sub webui_lg_calibration_history_list (@) {
    my $meas_path="$dir/dv-profile-measurements.json";
    my $meas;
    if(-f $meas_path) {
-    my $wrap=_lg_cal_hist_read_json_file($meas_path) || {};
+    my $wrap=_lg_cal_hist_read_json_lite($meas_path) || {};
     $meas=$wrap->{"measurements"} if(ref($wrap->{"measurements"}) eq "HASH");
     $meas=$wrap if(!$meas && defined($wrap->{"white_luminance"}));
    }
    if(ref($meas) ne "HASH") {
-    my $state=_lg_cal_hist_read_json_file("$dir/grey-state.json") || {};
-    my $state3=_lg_cal_hist_read_json_file("$dir/3d-state.json") || {};
+    my $state=_lg_cal_hist_read_json_lite("$dir/grey-state.json") || {};
+    my $state3=_lg_cal_hist_read_json_lite("$dir/3d-state.json") || {};
     $meas=$state->{"dv_profile_measurements"} || $state3->{"dv_profile_measurements"} || $state3->{"measurements"};
    }
    next unless(ref($meas) eq "HASH" && defined($meas->{"white_luminance"}));
-   my $manifest=_lg_cal_hist_read_json_file("$dir/manifest.json") || {};
+   my $manifest=_lg_cal_hist_read_json_lite("$dir/manifest.json") || {};
    my $cfg=(ref($manifest->{"config"}) eq "HASH") ? $manifest->{"config"} : {};
    my $pm=$cfg->{"picture_mode"} || "";
    my $display_model=$cfg->{"display_model"} || "";
@@ -3458,7 +3553,11 @@ sub webui_lg_calibration_history_list (@) {
    if(-f $stages_path && open(my $fh,"<",$stages_path)) {
     while(my $line=<$fh>) {
      next unless($line =~ /"stage"\s*:\s*"dv_profile_upload"/ && $line =~ /"ok"\s*:\s*true/);
-     $pm=$1 if($line =~ /"picture_mode"\s*:\s*"([^"]*)"/);
+     if($line =~ /"picture_mode"\s*:\s*"([^"]*)"/) {
+      # The log line is raw bytes; decode so the body's UTF-8 encoding is not applied twice.
+      $pm=$1;
+      utf8::decode($pm);
+     }
     }
     close($fh);
    }
@@ -3495,7 +3594,13 @@ sub webui_lg_calibration_history_list (@) {
   }
   push @json,"{".join(",",@pairs)."}";
  }
- return "{\"status\":\"ok\",\"items\":[".join(",",@json)."]}";
+ # Forget files this list no longer reads (pruned runs, removed archives).
+ delete @_lg_cal_hist_lite_memo{grep {!$_lg_cal_hist_lite_seen{$_}} keys %_lg_cal_hist_lite_memo};
+ # Titles and models come from decoded JSON as characters: send UTF-8 bytes,
+ # as every other JSON body is, so the browser and the disk cache can decode it.
+ my $body="{\"status\":\"ok\",\"items\":[".join(",",@json)."]}";
+ utf8::encode($body);
+ return $body;
 }
 
 sub webui_lg_calibration_history_download (@) {
@@ -3547,25 +3652,17 @@ sub _lg_cal_hist_restore_1d {
   if(!$saved_mode || !$saved_signal || $mode ne $saved_mode || $signal ne $saved_signal || $signal !~ /^(?:sdr|hdr10|dv)$/);
  return &lg_encode_json({status=>'error',message=>"Select $signal output on the generator before restoring this 1D LUT."})
   if(defined(&webui_pattern_signal_mode) && &webui_pattern_signal_mode('{}') ne $signal);
- # History restoration always owns its bookends. Never claim that an upload
- # succeeded when CAL_START or CAL_END failed, even if the upload itself did.
+ # Same bookends as the 3D and DV archives: the restore owns CAL_START and
+ # CAL_END unless the caller says it manages the session, never reports an
+ # upload as successful when entry or exit failed, and never strands a
+ # session it tried to enter.
  my $context={picture_mode=>$mode,signal_mode=>$signal};
- my $result;
- eval {
-  my $on=&lg_decode_json(&webui_lg_calibration_mode(&lg_encode_json({%$context,enabled=>JSON::PP::true})));
-  die(($on->{message}||'TV did not acknowledge calibration entry')."\n")
-   if(($on->{status}||'') ne 'ok' || !$on->{calibration_mode});
-  $result=&lg_decode_json(&webui_lg_1d_dpg_upload(&lg_encode_json({%$context,dpg_data=>$data,keep_calibration_mode=>1,calibration_mode_active=>1,helper_timeout=>90})));
-  die "No 1D upload result returned\n" if(ref($result) ne 'HASH' || !exists($result->{status}));
-  1;
- } or $result={status=>'error',message=>"1D restore failed: ".($@||'Unknown upload failure')};
- my $off=eval { &lg_decode_json(&webui_lg_calibration_mode(&lg_encode_json({%$context,enabled=>JSON::PP::false}))) };
- my $exit_error=$@;
- if(ref($off) ne 'HASH' || ($off->{status}||'') ne 'ok' || !exists($off->{calibration_mode}) || $off->{calibration_mode}) {
-  $result={%{$result||{}},status=>'error',upload_status=>$result->{status}||'unknown',error_code=>'calibration-exit-unconfirmed',
-   message=>($result->{message}||'1D upload finished').'; calibration exit is unconfirmed. Use Exit Calibration before testing the TV.',cleanup_detail=>$exit_error||$off->{message}||'No exit acknowledgement'};
- }
- return &lg_encode_json($result);
+ my $enable=($payload->{enable_calibration} // 1) ? 1 : 0;
+ my $disable=($payload->{disable_calibration} // 1) ? 1 : 0;
+ return _lg_cal_hist_restore_with_bookends($context,$enable,$disable,
+  # Only claim an active session this restore entered; a caller-managed
+  # session is left for the helper to enter itself, as 3D and DV do.
+  sub { &webui_lg_1d_dpg_upload(&lg_encode_json({%$context,dpg_data=>$data,keep_calibration_mode=>1,($enable?(calibration_mode_active=>1):()),helper_timeout=>90})) });
 }
 
 # 3D LUT and DV profile archives use optional, caller-selected session
@@ -3596,10 +3693,16 @@ sub _lg_cal_hist_restore_with_bookends {
   my $off=eval { &lg_decode_json(&webui_lg_calibration_mode(&lg_encode_json({%$context,enabled=>JSON::PP::false}))) };
   my $exit_error=$@;
   if(ref($off) ne 'HASH' || ($off->{status}||'') ne 'ok' || !exists($off->{calibration_mode}) || $off->{calibration_mode}) {
+   my $entered=$ok || $stage ne 'calibration-entry';
+   my $detail=$exit_error||(ref($off) eq 'HASH'?$off->{message}:undef)||'No exit acknowledgement';
+   # An unacknowledged entry has no session to exit: keep the entry failure as
+   # the error and report the viewing state as unconfirmed, rather than sending
+   # the user to Exit Calibration for a session that never started.
    $result={%{$result||{}},status=>'error',upload_status=>$upload_attempted?($result->{status}||'unknown'):'not-attempted',
-    error_code=>'calibration-exit-unconfirmed',cleanup_required=>JSON::PP::true,
-    message=>($result->{message}||'Archive upload finished').'; calibration exit is unconfirmed. Use Exit Calibration before testing the TV.',
-    cleanup_detail=>$exit_error||(ref($off) eq 'HASH'?$off->{message}:undef)||'No exit acknowledgement'};
+    cleanup_required=>JSON::PP::true,cleanup_detail=>$detail,
+    ($entered
+     ? (error_code=>'calibration-exit-unconfirmed',exit_status=>'unconfirmed',message=>($result->{message}||'Archive upload finished').'; calibration exit is unconfirmed. Use Exit Calibration before testing the TV.')
+     : (error_code=>'calibration-entry-unconfirmed',exit_status=>'unconfirmed',message=>($result->{message}||'Archive restore failed').'; the TV also did not confirm normal viewing. Check the picture mode before testing the TV.'))};
   }
  }
  return &lg_encode_json($result);

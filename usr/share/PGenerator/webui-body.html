@@ -1373,7 +1373,7 @@ __PG_LOGO_DARK__
      <div id="meterEotfBlock">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;flex-wrap:wrap">
        <div style="font-size:.65rem;color:var(--text2);text-transform:uppercase" id="chartEotfLabel">EOTF</div>
-       <label style="font-size:.7rem;color:var(--text2);cursor:pointer;user-select:none;margin-left:auto" title="Absolute error view: plots inverse-EOTF so a perfectly tracking display is a straight diagonal and errors deviate from it. Unchecked shows the normal bowed EOTF luminance curve.">
+       <label style="font-size:.7rem;color:var(--text2);cursor:pointer;user-select:none;margin-left:auto" title="Absolute tracking view: plots each reading as the signal level the target EOTF needs for its luminance, so readings on target lie on the dashed target line and deviations show where the display tracks brighter or darker. Unchecked shows the normal bowed EOTF luminance curve.">
        <input type="checkbox" id="meterEotfAbsolute" onchange="meterRedrawEotfChart();meterSaveColorPrefs()" style="vertical-align:middle" checked> Absolute
        </label>
        <label style="font-size:.7rem;color:var(--text2);cursor:pointer;user-select:none" title="Overlay separate R, G, B EOTF curves (same as the Gamma chart per-channel option).">

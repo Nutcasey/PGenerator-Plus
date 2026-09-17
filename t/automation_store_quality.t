@@ -14,6 +14,13 @@ my $path = PGAutomation::run_dir($id) . '/run.json';
 ok(PGAutomation::write_json_atomic($path, {name => 'Écran – 夜', items => []}), 'Unicode manifest written');
 is(PGAutomation::read_json_file($path)->{name}, 'Écran – 夜', 'Unicode survives a disk round trip');
 is(PGAutomation::clone({name => 'Écran – 夜'})->{name}, 'Écran – 夜', 'Unicode survives snapshots');
+# JSON::PP 2.27 on the appliance rejects bare scalars unless allow_nonref is set;
+# the quality contract clones plain strings such as the signal format.
+is(PGAutomation::clone('sdr'), 'sdr', 'plain strings clone without a JSON round trip');
+is(PGAutomation::clone(0), 0, 'zero clones as itself');
+is(PGAutomation::clone(''), '', 'empty string clones as itself');
+is(PGAutomation::encode_json('x'), '"x"', 'encoder accepts a bare scalar');
+is(PGAutomation::decode_json('"x"'), 'x', 'decoder accepts a bare scalar');
 ok(PGAutomation::remove_run($id), 'named run can be deleted without File::Path exception');
 ok(!-d PGAutomation::run_dir($id), 'named run removed');
 is(PGAutomation::safe_component('../other'), '', 'parent traversal refused');
