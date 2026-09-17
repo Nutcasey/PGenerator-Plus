@@ -21,12 +21,22 @@ sub _normalize_scalars {
 sub intent_hash {
     my ($source) = @_;
     my $item = _normalize_scalars(PGAutomation::clone($source) || {});
-    delete @$item{qw(item_number status checkpoints checkpoint checkpoint_status active_stage stage_started_at
+    # The hash answers one question: is this the job the operator queued? So it
+    # drops per-run bookkeeping and everything read from the TV. "id" is minted
+    # fresh for every run, and lg_generation, apply_all_supported and
+    # panel_protection_supported are added by a readiness pass that talked to
+    # the TV, so a static start never has them. Leaving any of them in made two
+    # runs of the same queue hash differently by construction, which is why the
+    # readiness result a start is meant to reuse never matched (P13). A TV that
+    # changed is caught by identity_matches (input, capability profile, device
+    # identity), not by this hash.
+    delete @$item{qw(item_number id status checkpoints checkpoint checkpoint_status active_stage stage_started_at
         failure warnings readiness settings_recovery profile_baseline_needs_restore recheck fault_injected
         hazard_restore hazards hazard_capabilities drift_recovery_attempts drift_recovery_pending
         setting_contracts generation_profile capability_profile calibration_settings_recipe device_identity
         best_available_settings best_available_write_ack supported_picture_keys tv_input preflight_contract
-        worker_status started_at completed_at series calibration_results panel-light apply-all quality_result)};
+        worker_status started_at completed_at series calibration_results panel-light apply-all quality_result
+        lg_generation apply_all_supported panel_protection_supported)};
     return sha256_hex(PGAutomation::encode_json($item));
 }
 

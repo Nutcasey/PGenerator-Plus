@@ -43,4 +43,38 @@ ok(PGAutomationPlan::job_start_matches($planned_intent,$planned,$full),'an uncha
  ok($stored->{settings}{energySaving},'the stored job is the merged plan');
  ok(PGAutomationPlan::matches($stored,$stored->{preflight_contract}),'the stored job matches its contract, so a claim after Pause needs no re-check');
 }
+
+
+# Regression for PR 14 test report P13, found live on 18 September 2026: a start
+# is meant to reuse a Check Readiness that passed moments ago, and it never did.
+# The reuse compares the queue intent of the readiness run's items with the
+# start run's, and the hash covered fields that differ between any two runs by
+# construction: a freshly minted per-item id, plus the TV-derived fields a
+# readiness pass adds and a static start cannot have.
+my $queued={name=>'SDR Filmmaker',signal_format=>'sdr',picture_mode=>'filmMaker',settings=>{contrast=>85}};
+my $from_readiness={%{PGAutomation::clone($queued)},id=>'20260918-013137-f8297b',
+ apply_all_supported=>1,panel_protection_supported=>1,
+ lg_generation=>{generation_id=>'lg2022plus_oled',device_id=>'64:e4:a5:33:b6:01',platform_year=>2023}};
+my $from_start={%{PGAutomation::clone($queued)},id=>'20260918-013549-c44039'};
+is(PGAutomationPlan::intent_hash($from_readiness),PGAutomationPlan::intent_hash($from_start),
+ 'the same queued job hashes alike whether a readiness pass or a static start prepared it');
+is(PGAutomationPlan::intent_hash($from_start),PGAutomationPlan::intent_hash($queued),
+ 'and alike to the queue entry the operator saved');
+# The guard still does its job: anything the operator chose still changes it.
+for my $edit ([picture_mode=>'cinema'],[signal_format=>'hdr10'],[name=>'Renamed']) {
+ my ($key,$value)=@$edit;
+ isnt(PGAutomationPlan::intent_hash({%{PGAutomation::clone($from_start)},$key=>$value}),
+  PGAutomationPlan::intent_hash($from_start),"an edited $key is still a different queue intent");
+}
+isnt(PGAutomationPlan::intent_hash({%{PGAutomation::clone($from_start)},settings=>{contrast=>90}}),
+ PGAutomationPlan::intent_hash($from_start),'an edited pinned setting is still a different queue intent');
+# A TV that changed is caught by identity, which is where it belongs.
+my $planned_tv={%{PGAutomation::clone($queued)},tv_input=>'hdmi4',capability_profile=>{hash=>'d'x64},
+ device_identity=>{model_name=>'OLED55G36LA'}};
+my $tv_contract=PGAutomationPlan::contract($planned_tv);
+ok(PGAutomationPlan::identity_matches($planned_tv,$tv_contract),'the planned TV still matches its contract');
+ok(!PGAutomationPlan::identity_matches({%$planned_tv,capability_profile=>{hash=>'e'x64}},$tv_contract),
+ 'a changed compatibility profile is still refused');
+ok(!PGAutomationPlan::identity_matches({%$planned_tv,tv_input=>'hdmi2'},$tv_contract),
+ 'and so is a different TV input');
 done_testing();
