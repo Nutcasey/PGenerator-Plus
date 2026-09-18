@@ -68,6 +68,9 @@ sub _cleanup_window {
 # helper spawn; the daemon reaps by pid, not heartbeat age, and the UI warns
 # only after 60 s, so 10 s is well inside every consumer.
 my $HEARTBEAT_INTERVAL = 10;
+# How often a measuring worker's progress reaches the manifest (its timing
+# feeds the duration estimates there); every tick reaches the live status.
+our $WORKER_MANIFEST_INTERVAL = 60;
 # A healthy /api/lg/status answer is reused for this long before the next LG
 # action re-probes it; any LG connection failure drops it immediately.
 my $LG_STATUS_CACHE_SECONDS = 10;
@@ -180,6 +183,13 @@ sub _write_artifact {
     return 1;
 }
 
+# Declared ahead of _update_run, which overlays and publishes them.
+my $STATUS_FILE = $RUN_DIR . '/status.json';
+my @LIVE_KEYS = @PGAutomation::RUN_LIVE_KEYS;
+my %LIVE;
+my $STATUS_BASE;
+my $STATUS_BASE_MTIME;
+
 sub _update_run {
     my ($callback) = @_;
     my ($ok, $value, $error) = PGAutomation::with_lock($RUN_FILE, sub {
@@ -195,7 +205,78 @@ sub _update_run {
         return $run;
     });
     _log("run state update failed: $error") if !$ok && $error;
+    if ($ok && ref($value) eq 'HASH') {
+        # What the manifest now says about the live fields is the latest word,
+        # including a deletion; the next heartbeat or progress tick overlays
+        # it. Liveness is the exception: the manifest's heartbeat is the last
+        # forced one, so it must never roll a fresher tick back.
+        $LIVE{$_} = $value->{$_} for grep { !/^heartbeat/ } @LIVE_KEYS;
+        _publish_status($value, PGAutomation::file_mtime($RUN_FILE));
+    }
     return $ok ? $value : undef;
+}
+
+# The live status file. The manifest carries every job's plan, contracts and
+# evidence and grows with each checkpoint; on this appliance JSON::PP needs
+# seconds to decode it, and the daemon used to do exactly that for every
+# status poll while the runner rewrote it every few seconds. status.json is
+# the compact copy the daemon serves instead: the run's state, progress and
+# per-job outcomes, never evidence, capability catalogues or check lists. It
+# is republished after every manifest write, and heartbeats and progress
+# ticks update only it, so neither the daemon nor the runner pays for the
+# manifest's size on the fast path.
+sub _compact_run { return PGAutomation::compact_run($_[0]); }
+
+sub _publish_status {
+    my ($run, $manifest_mtime) = @_;
+    if (ref($run) eq 'HASH') {
+        $STATUS_BASE = _compact_run($run);
+        $STATUS_BASE_MTIME = defined($manifest_mtime) ? $manifest_mtime : PGAutomation::file_mtime($RUN_FILE);
+    }
+    return 0 if ref($STATUS_BASE) ne 'HASH';
+    # Only the live keys overlay the compact manifest: a progress callback
+    # may set other fields (worker_timing) that belong to the manifest alone.
+    my %status = (%$STATUS_BASE, map { exists($LIVE{$_}) ? ($_ => $LIVE{$_}) : () } @LIVE_KEYS);
+    $status{published_at} = time();
+    return PGAutomation::write_json_atomic($STATUS_FILE, \%status, 0600) ? 1 : 0;
+}
+
+# A fast-path update: heartbeat, worker progress and operation progress
+# change the live status only. The manifest keeps the last durable state the
+# runner wrote; anything a restart or resume must find still goes through
+# _update_run.
+sub _update_live {
+    my ($callback) = @_;
+    # The same ownership rule as _update_run, answered by the small launch
+    # journal instead of the manifest: a cancelled or superseded launch must
+    # not keep publishing its heartbeat and progress as the run's state.
+    return 0 if $LAUNCH_ACCEPTED && defined($LAUNCH_ATTEMPT)
+        && PGAutomationLaunch::read_launch_token($RUN_ID, $LAUNCH_ATTEMPT) ne $TOKEN;
+    $callback->(\%LIVE);
+    # The daemon writes the manifest too (a queue edit while running, a
+    # control action). A tick must republish from that, not from the copy
+    # taken before it, or the live view would hide the daemon's write until
+    # the runner's next manifest write.
+    # A daemon write also retires status.json, so a missing file is proof of
+    # one even when its mtime cannot be trusted or landed inside the moment
+    # between the runner's own write and its stat.
+    my $manifest_mtime = PGAutomation::file_mtime($RUN_FILE);
+    my $stale = ref($STATUS_BASE) ne 'HASH' || !-e $STATUS_FILE
+        || (defined($manifest_mtime) && (!defined($STATUS_BASE_MTIME) || $manifest_mtime > $STATUS_BASE_MTIME));
+    _publish_status($stale ? _run() : undef, $manifest_mtime);
+    return 1;
+}
+
+# The TV capability profile a job or restoration context keeps. The daemon's
+# reply also carries the whole settings capability table and picture-mode
+# catalogue (about 50 KB); nothing in the runner reads them, and every copy
+# on a job or in its evidence made the manifest that much slower to rewrite.
+sub _slim_profile {
+    my ($profile) = @_;
+    return $profile if ref($profile) ne 'HASH';
+    my %slim = %$profile;
+    delete @slim{qw(settings_capabilities picture_mode_catalogue)};
+    return \%slim;
 }
 
 sub _control {
@@ -252,6 +333,23 @@ sub _heartbeat {
     my $now = time();
     return if !$force && $now - $LAST_HEARTBEAT < $HEARTBEAT_INTERVAL;
     $LAST_HEARTBEAT = $now;
+    if (!$force) {
+        # Routine liveness goes to the live status only; the manifest keeps
+        # the pid and stage from the forced heartbeat at start and resume.
+        _update_live(sub {
+            my ($live) = @_;
+            $live->{heartbeat} = $now;
+            $live->{heartbeat_at} = strftime('%Y-%m-%dT%H:%M:%SZ', gmtime($now));
+            $live->{runner_pid} = $$;
+            my $active_item = _active_item_number();
+            $live->{active_item} = $active_item if defined($active_item);
+            $live->{active_stage} = $ACTIVE_STAGE if $ACTIVE_STAGE ne '';
+        });
+        # The small execution claim keeps its updated_at and status as before.
+        eval { _write_execution({status=>(ref($STATUS_BASE) eq 'HASH' ? $STATUS_BASE->{status} : undef)}); 1 }
+            or _log('execution heartbeat skipped: '.($@||'unknown'));
+        return;
+    }
     my $saved = _update_run(sub {
         my ($run) = @_;
         $run->{heartbeat} = $now;
@@ -1040,7 +1138,7 @@ sub _wait_worker {
     my ($timing_started,$timing_base,$timing_last)=($started,0,0);
     my $point_started=$started;
     my @point_seconds;
-    my ($last_progress_write, $last_progress_digest) = (0, '');
+    my ($last_progress_write, $last_progress_digest, $last_manifest_write) = (0, '', time());
     my ($owned_pid, $owned_ticks) = (0, '');
     # A worker has not stamped its pid yet right after launch. Tolerate an
     # unstamped idle for a bounded window then, never by global process match.
@@ -1104,14 +1202,23 @@ sub _wait_worker {
         my $digest = PGAutomation::encode_json(_worker_summary($status));
         if (_status_terminal($state) || $now-$last_progress_write >= 10
             || ($step != $timing_base && $digest ne $last_progress_digest && $now-$last_progress_write >= 5)) {
-        die 'Unable to persist worker progress' if !ref(_update_run(sub {
+        my $progress_update = sub {
             my ($run) = @_;
             $run->{worker_status} = _worker_summary($status);
             $run->{worker_timing}={started_at=>$timing_started,start_step=>$timing_base,kind=>$ACTIVE_WORKER,stage=>$ACTIVE_STAGE,series_key=>$ACTIVE_SERIES_KEY||'',recent_point_seconds=>[@point_seconds]};
             $run->{active_stage} = $ACTIVE_STAGE;
             my $active_item = _active_item_number();
             $run->{active_item} = $active_item if defined($active_item);
-        }));
+        };
+        # Every tick reaches the live status; the manifest (which the ETA
+        # reads its timing from) only at the end of the stage and once a
+        # minute, so a long sweep is not spent re-encoding job evidence.
+        if (_status_terminal($state) || $now-$last_manifest_write >= $WORKER_MANIFEST_INTERVAL) {
+            die 'Unable to persist worker progress' if !ref(_update_run($progress_update));
+            $last_manifest_write = $now;
+        } else {
+            _update_live($progress_update);
+        }
         ($last_progress_write,$last_progress_digest)=($now,$digest);
         }
         if ($state eq 'idle') {
@@ -1970,7 +2077,7 @@ sub _apply_settings_batched {
     for my $category (sort keys %by_category) {
         my @group=@{$by_category{$category}};
         next if @group<2;
-        _update_run(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>scalar(keys %done),total=>scalar(@$keys)+1,unit=>'settings and verification',message=>'Applying '.scalar(@group).' '.$category.' controls together'};});
+        _update_live(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>scalar(keys %done),total=>scalar(@$keys)+1,unit=>'settings and verification',message=>'Applying '.scalar(@group).' '.$category.' controls together'};});
         delete $item->{best_available_write_ack}{$_} for @group;
         my $result=_api('POST','/api/lg/picture-settings/set',{
             settings=>{map { $_=>($_ eq 'gamma' ? _tv_gamma_value($settings->{$_}) : $settings->{$_}) } @group},
@@ -2063,7 +2170,7 @@ sub _apply_and_verify {
         $applied+=scalar(keys %batched);
         foreach my $key (@write_keys) {
             next if $batched{$key};
-            _update_run(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>$applied,total=>scalar(@write_keys)+1,unit=>'settings and verification',message=>'Applying '.$key.' ('.($applied+1).'/'.scalar(@write_keys).')'};});
+            _update_live(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>$applied,total=>scalar(@write_keys)+1,unit=>'settings and verification',message=>'Applying '.$key.' ('.($applied+1).'/'.scalar(@write_keys).')'};});
             delete $item->{best_available_write_ack}{$key};
             my $category = _setting_category($item, $key);
             my $result = _apply_one_setting($item, $key, $settings->{$key}, $category, $calibration_active);
@@ -2099,7 +2206,7 @@ sub _apply_and_verify {
                 $next_setting_log=time()+15;
             }
         }
-        _update_run(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>$applied,total=>scalar(@write_keys)+1,unit=>'settings and verification',message=>'Verifying all TV settings after writes'};});
+        _update_live(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>$applied,total=>scalar(@write_keys)+1,unit=>'settings and verification',message=>'Verifying all TV settings after writes'};});
         $last = _read_and_verify_settings($item_number, $item, $point);
         if ($last->{verified}) {
             return $last->{verified};
@@ -2417,7 +2524,7 @@ sub _reset_for_calibration {
             }
             $item->{lg_generation} = $response->{lg_generation}
                 if ref($response->{lg_generation}) eq 'HASH';
-            $item->{generation_profile} = $response->{generation_profile}
+            $item->{generation_profile} = _slim_profile($response->{generation_profile})
                 if ref($response->{generation_profile}) eq 'HASH';
         }
     }
@@ -3871,7 +3978,7 @@ sub _freeze_job_lg_context {
     my $live=eval { _api('POST','/api/lg/picture-settings',{keys=>['pictureMode'],include_current_input=>JSON::PP::true,
         ignore_calibration_picture_mode=>JSON::PP::true,signal_mode=>_signal($item)}) };
     my $read_error=$@;$ACTIVE_ITEM=$saved_item;die $read_error if $read_error;
-    my $profile=ref($live->{generation_profile}) eq 'HASH' ? $live->{generation_profile} : {};
+    my $profile=_slim_profile(ref($live->{generation_profile}) eq 'HASH' ? $live->{generation_profile} : {});
     my $input=$live->{current_input}||'';
     die 'Unable to confirm LG input and compatibility profile before selecting picture mode'
         if (($live->{status}||'') ne 'ok' || $input!~/^hdmi[1-4](?:_pc)?$/ || ($profile->{capability_profile_hash}||'')!~/^[0-9a-f]{64}$/);
@@ -3949,7 +4056,7 @@ sub _preflight_progress {
     die 'Unable to persist queue preflight progress' if !ref(_update_run(sub {
         $_[0]{active_stage}='queue-preflight';$_[0]{active_item}=$number;
         $_[0]{worker_status}={message=>$message};
-        $_[0]{preflight_result}=PGAutomation::clone($result);
+        $_[0]{preflight_result}=_preflight_result_summary($result);
     }));
     _log_action($message);
     my $state={id=>$RUN_ID,run_id=>$RUN_ID,intent=>_run()->{preflight_only}?'readiness':'start',
@@ -3959,6 +4066,18 @@ sub _preflight_progress {
         progress_done=>$result->{progress_done},progress_total=>$result->{progress_total}};
     die 'Unable to persist visible queue preflight progress'
         if !PGAutomation::write_json_atomic(PGAutomation::base_dir().'/preflight.json',$state,0664);
+}
+
+# What the manifest keeps of a whole-queue check: the verdict, counts and
+# per-job outcomes. The check list itself is in preflight-plan.json and the
+# saved preflight status; copying its tens of kilobytes into the manifest on
+# every progress step made each later manifest write slower.
+sub _preflight_result_summary {
+    my ($result) = @_;
+    return $result if ref($result) ne 'HASH';
+    my %summary = %$result;
+    delete $summary{checks};
+    return PGAutomation::clone(\%summary);
 }
 
 sub _preflight_read_mode {
@@ -3975,7 +4094,7 @@ sub _preflight_read_mode {
     die $read_error if $read_error;
     die 'No independent current-mode response' if ref($live) ne 'HASH';
     my $mode=_observed_settings($live)->{pictureMode}||'';
-    my $profile=$live->{generation_profile}||{};
+    my $profile=_slim_profile($live->{generation_profile}||{});
     my $generation=ref($live->{lg_generation}) eq 'HASH' ? $live->{lg_generation} : {};
     my $limited=$allow_limited && _response_ok($live)
         && $profile->{capability_library_valid} && $profile->{capability_platform_profile_applied}
@@ -4043,7 +4162,10 @@ sub _reusable_preflight {
         return undef if ref($previous) ne 'HASH' || !$previous->{ready}
             || !defined($run->{preflight_revision}) || $run->{preflight_revision}!=$revision;
         return undef if !_preflight_identity_matches(PGAutomation::read_json_file($RUN_DIR.'/preflight-context.json'),0);
-        $result={%{PGAutomation::clone($previous)},reused=>JSON::PP::true,reused_at=>time(),
+        # The manifest keeps the verdict; the check list lives in the plan.
+        my $plan=PGAutomation::read_json_file($RUN_DIR.'/preflight-plan.json');
+        my @checks=ref($plan) eq 'HASH' && ref($plan->{result}) eq 'HASH' && ref($plan->{result}{checks}) eq 'ARRAY' ? @{$plan->{result}{checks}} : ();
+        $result={%{PGAutomation::clone($previous)},(@checks ? (checks=>\@checks) : ()),reused=>JSON::PP::true,reused_at=>time(),
             message=>'Resumed on the same TV with an unchanged queue, so the earlier whole-queue check still applies.'};
         $source='resume';
     } else {
@@ -4075,6 +4197,8 @@ sub _reusable_preflight {
             message=>'Check Readiness passed moments ago for this exact queue on the same TV, so its whole-queue check is reused.'};
         my $checked_items=PGAutomation::clone($plan->{items});
         # Adoption is an optimisation: if it cannot be recorded, run the full check.
+        # This run's own plan file keeps the check list a later Resume reads.
+        return undef if !_write_artifact($RUN_DIR.'/preflight-plan.json',{revision=>$revision,items=>$checked_items,result=>$plan->{result}});
         my $adopted=eval { _update_run(sub {
             die 'Queue changed while adopting the readiness check' if ($_[0]{queue_revision}||0)!=$revision;
             $_[0]{items}=$checked_items;$_[0]{preflight_revision}=$revision;
@@ -4083,7 +4207,7 @@ sub _reusable_preflight {
         $source='readiness';
     }
     die 'Unable to publish the reused queue check' if !ref(_update_run(sub {
-        $_[0]{preflight_in_progress}=JSON::PP::false;$_[0]{preflight_result}=$result;
+        $_[0]{preflight_in_progress}=JSON::PP::false;$_[0]{preflight_result}=_preflight_result_summary($result);
         $_[0]{worker_status}={message=>$result->{message}};
     }));
     # Keep the startup status the web UI shows in step with the reuse.
@@ -4532,6 +4656,9 @@ sub _preflight_queue {
                 # Run queue after Check Readiness compares against this.
                 my $queue_intent=PGAutomationPlan::intent_hash($item);
                 %$item=(%$item,%{$ready->{items}[0]});
+                # The readiness reply carries the full TV capability profile
+                # again; the job keeps only what identifies the TV.
+                $item->{generation_profile}=_slim_profile($item->{generation_profile}) if ref($item->{generation_profile}) eq 'HASH';
                 die 'Job preflight did not return a confirmed input and compatibility signature'
                     if ($item->{tv_input}||'') ne $context->{original}{tv_input}
                         || ($item->{capability_profile}{hash}||'') !~ /^[a-f0-9]{64}$/;
@@ -4540,8 +4667,11 @@ sub _preflight_queue {
                 $item->{preflight_contract}{limited}=JSON::PP::true if $context->{mode_readback_unavailable};
                 # This is the job's readiness evidence; job start does not
                 # ask again, so the item-started checkpoint records this pass.
+                # Only the checks that need a look are kept on the job; the
+                # full list is in the saved preflight plan.
+                my @job_checks=grep {ref($_) eq 'HASH'} @{$ready->{checks}||[]};
                 $item->{readiness}={ready=>1,checked_at=>time(),scope=>'queue-preflight',
-                    checks=>[grep {ref($_) eq 'HASH'} @{$ready->{checks}||[]}],message=>$ready->{message}||''};
+                    checks=>[grep {!$_->{ok}} @job_checks],passed=>scalar(grep {$_->{ok}} @job_checks),message=>$ready->{message}||''};
                 $result->{jobs}[$number]{status}=$context->{mode_readback_unavailable}?'checked-limited':'checked';$result->{checked_items}++;
                 $result->{progress_done}++;
                 _preflight_progress($result,$number,'Job '.($number+1).' readiness checks passed');
@@ -4597,7 +4727,7 @@ sub _preflight_queue {
         my ($state)=@_;
         die 'Queue changed during preflight' if ($state->{queue_revision}||0)!=$revision;
         $state->{preflight_in_progress}=JSON::PP::false;
-        $state->{preflight_result}=$result;
+        $state->{preflight_result}=_preflight_result_summary($result);
         if($result->{ready}) {$state->{items}=$items;$state->{preflight_revision}=$revision;}
         else {delete $state->{preflight_revision};}
         $state->{active_item}=undef;$state->{active_stage}='queue-preflight';

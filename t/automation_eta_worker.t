@@ -6,6 +6,9 @@ use Test::More;
 use lib "$Bin/../usr/share/PGenerator";
 use PGAutomation ();
 {local @ARGV=('eta-worker-test','test-token');do "$Bin/../usr/bin/pgen_automation_runner.pl";die $@ if $@;}
+# Every tick must reach the manifest here; in production only one a minute
+# does (the rest go to the live status), which is what this test measures.
+$main::WORKER_MANIFEST_INTERVAL=0;
 my ($now,@statuses,@clocks);
 local *main::time=sub {$now};
 local *main::_refresh_control=sub {};

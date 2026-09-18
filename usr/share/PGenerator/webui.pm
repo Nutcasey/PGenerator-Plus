@@ -13105,8 +13105,13 @@ sub webui_automation_item_summary (@) {
   status=>$item->{status}||"queued",
  };
  $summary->{failure}=PGAutomation::clone($item->{failure}) if(ref($item->{failure}) eq "HASH");
- $summary->{readiness}={checks=>&webui_automation_scrub_credentials($item->{readiness}{checks})}
-  if(ref($item->{readiness}) eq 'HASH' && ref($item->{readiness}{checks}) eq 'ARRAY');
+ # Only the checks that need a look travel with every poll; a job's passing
+ # checks are in its own record for the job detail.
+ if(ref($item->{readiness}) eq 'HASH' && ref($item->{readiness}{checks}) eq 'ARRAY') {
+  my @checks=grep { ref($_) eq 'HASH' } @{$item->{readiness}{checks}};
+  $summary->{readiness}={checks=>&webui_automation_scrub_credentials([grep { !$_->{ok} } @checks]),
+   passed=>0+(($item->{readiness}{passed}||0)+scalar(grep { $_->{ok} } @checks))};
+ }
  $summary->{warnings}=PGAutomation::clone($item->{warnings}) if(ref($item->{warnings}) eq "ARRAY" && @{$item->{warnings}});
  $summary->{active_stage}=$item->{active_stage} if($item->{active_stage});
  return $summary;
@@ -13139,7 +13144,9 @@ sub webui_automation_public_run (@) {
   status=>$run->{status}||"idle",
   cleanup_required=>&webui_automation_cleanup_required($run)?JSON::PP::true:JSON::PP::false,
   preflight_only=>$run->{preflight_only}?JSON::PP::true:JSON::PP::false,
-  preflight_result=>ref($run->{preflight_result}) eq 'HASH' ? &webui_automation_scrub_credentials(PGAutomation::clone($run->{preflight_result})) : undef,
+  # The check list lives in the saved preflight status the same poll carries;
+  # here only the verdict, counts and per-job outcomes are needed.
+  preflight_result=>ref($run->{preflight_result}) eq 'HASH' ? &webui_automation_scrub_credentials({map { $_ eq 'checks' ? () : ($_=>PGAutomation::clone($run->{preflight_result}{$_})) } keys %{$run->{preflight_result}}}) : undef,
   queue_name=>$run->{queue_name}||$queue_snapshot->{name}||"Automation queue",
   active_item=>$active_item,
   items=>\@items,
@@ -13302,6 +13309,85 @@ sub webui_automation_read_run (@) {
  $run->{id}=$run_id if(ref($run) eq "HASH" && (!defined($run->{id}) || $run->{id} eq ""));
  return $run if(ref($run) eq "HASH");
  return undef;
+}
+
+# The live view of a run, for status polls and liveness checks only. The
+# runner publishes status.json, a compact copy of the manifest without job
+# evidence, TV capability catalogues or check lists, on every manifest write
+# and on every heartbeat and progress tick. While it is at least as new as
+# run.json it is the truth and costs a few kilobytes to decode; when the
+# daemon itself wrote run.json last (a control action, a reaped runner) the
+# manifest wins until the runner republishes. Both reads are cached by file
+# identity, so an unchanged file is never decoded twice. Everything that
+# needs the full manifest (job detail, editing, history) still reads run.json.
+sub webui_automation_read_live (@) {
+ my ($run_id)=@_;
+ $run_id=PGAutomation::safe_component($run_id);
+ return undef if($run_id eq "");
+ my $dir=PGAutomation::run_dir($run_id);
+ my $manifest_at=PGAutomation::file_mtime("$dir/run.json");
+ my $status_at=PGAutomation::file_mtime("$dir/status.json");
+ my $run;
+ $run=PGAutomation::read_json_cached("$dir/status.json") if(defined($status_at) && (!defined($manifest_at) || $status_at>=$manifest_at));
+ if(ref($run) ne "HASH") {
+  $run=PGAutomation::read_json_cached("$dir/run.json");
+  return undef if(ref($run) ne "HASH");
+  # No runner is alive to publish for a finished, paused or interrupted run,
+  # and its manifest can be hundreds of kilobytes that the poll would decode
+  # every time. Materialise the live view once; the next daemon-side
+  # manifest write retires it again.
+  # Unlocked, so only while the manifest is still the one decoded and the
+  # run still exists: a Resume or a delete landing meanwhile must win.
+  if(($run->{status}||"") !~ /^(?:starting|running|completing|stopping)$/
+     && -d $dir && defined($manifest_at) && (PGAutomation::file_mtime("$dir/run.json")||-1)==$manifest_at) {
+   my $compact=PGAutomation::compact_run($run);
+   $compact->{id}=$run_id if(!defined($compact->{id}) || $compact->{id} eq "");
+   $compact->{materialised_at}=PGAutomation::now();
+   PGAutomation::write_json_atomic("$dir/status.json",$compact,0600);
+  }
+ }
+ $run->{active_item}=$run->{active_item}{item_number} if(ref($run->{active_item}) eq "HASH");
+ $run->{id}=$run_id if(!defined($run->{id}) || $run->{id} eq "");
+ return $run;
+}
+
+# The daemon writes run.json itself for a control action, a queue edit or a
+# dead-runner recovery. Its write must be the newest word without depending
+# on the clock (the appliance has no real-time clock; after a power cut
+# fake-hwclock can restore a time behind status.json's mtime), so a daemon
+# write first absorbs the live fields the runner published since the last
+# manifest write and then retires status.json. The runner republishes from
+# the manifest on its next tick. A control reply built from the written
+# manifest therefore carries the current heartbeat and progress, not the
+# ones from the last forced heartbeat.
+my @WEBUI_AUTOMATION_LIVE_KEYS=qw(heartbeat heartbeat_at runner_pid worker_status operation_progress active_item active_stage time_estimate);
+sub webui_automation_absorb_live (@) {
+ my ($run_id,$run)=@_;
+ return $run if(ref($run) ne "HASH");
+ $run_id=PGAutomation::safe_component($run_id);
+ return $run if($run_id eq "");
+ my $dir=PGAutomation::run_dir($run_id);
+ return $run if(!defined(PGAutomation::file_mtime("$dir/status.json")));
+ my $live=PGAutomation::read_json_cached("$dir/status.json");
+ return $run if(ref($live) ne "HASH" || ($live->{id}||"") ne $run_id || ($live->{token}||"") ne ($run->{token}||""));
+ return $run if(($live->{heartbeat}||0) <= ($run->{heartbeat}||0));
+ foreach my $key (@WEBUI_AUTOMATION_LIVE_KEYS) { $run->{$key}=$live->{$key} if(exists($live->{$key})); }
+ return $run;
+}
+sub webui_automation_retire_live (@) {
+ my ($run_id)=@_;
+ $run_id=PGAutomation::safe_component($run_id);
+ return 0 if($run_id eq "");
+ my $path=PGAutomation::run_dir($run_id)."/status.json";
+ return 1 if(!-e $path);
+ return unlink($path) ? 1 : 0;
+}
+sub webui_automation_with_manifest (@) {
+ my ($run_id,$callback)=@_;
+ my $path=PGAutomation::run_dir($run_id)."/run.json";
+ my @result=PGAutomation::with_lock($path,sub { my ($current)=@_; return $callback->(&webui_automation_absorb_live($run_id,$current)); });
+ &webui_automation_retire_live($run_id) if($result[0] && defined($result[1]));
+ return @result;
 }
 
 sub webui_automation_run (@) {
@@ -13500,6 +13586,10 @@ sub webui_automation_lock (@) {
 
 sub webui_automation_write_locked (@) {
  my ($path,$value)=@_;
+ if($path=~m{/([A-Za-z0-9][A-Za-z0-9_.-]*)/run\.json\z} && ref($value) eq "HASH") {
+  my ($ok,$written,$error)=&webui_automation_with_manifest($1,sub { return &webui_automation_absorb_live($1,$value); });
+  return ($ok,$error);
+ }
  my ($ok,$written,$error)=PGAutomation::with_lock($path,sub { return $value; });
  return ($ok,$error);
 }
@@ -13923,7 +14013,7 @@ sub webui_automation_probe_item_hazards (@) {
 }
 
 sub webui_automation_preflight_status (@) {
- my $state=PGAutomation::read_json_file(PGAutomation::base_dir()."/preflight.json");
+ my $state=PGAutomation::read_json_cached(PGAutomation::base_dir()."/preflight.json");
  return undef if(ref($state) ne "HASH");
  $state->{update_age}=int(PGAutomation::now()-($state->{updated_at}||0));
  $state->{elapsed_seconds}=int(($state->{completed_at}||PGAutomation::now())-($state->{started_at}||PGAutomation::now()));
@@ -14686,7 +14776,7 @@ sub webui_automation_control_body (@) {
     return &webui_automation_stop_launch_failed($run,"Unable to launch automation runner for stop cleanup");
    }
   }
-  PGAutomation::with_lock(PGAutomation::run_dir($run_id)."/run.json",sub {
+  &webui_automation_with_manifest($run_id,sub {
    my ($state)=@_;return undef if(ref($state) ne "HASH" || !&webui_automation_active_status($state->{status}));
    $state->{status}="stopping";
    $state->{worker_status}={message=>"Stopping all workers, releasing the meter and closing TV calibration mode."};
@@ -14717,7 +14807,7 @@ sub webui_automation_edit_run (@) {
  return &webui_automation_error("A pending item list is required","invalid-items") if(ref($payload->{items}) ne "ARRAY");
  my $failure="";
  my $first_pending=0;
- my ($updated,$updated_run,$update_error)=PGAutomation::with_lock(PGAutomation::run_dir($run_id)."/run.json",sub {
+ my ($updated,$updated_run,$update_error)=&webui_automation_with_manifest($run_id,sub {
   my ($current)=@_;
   if(ref($current) ne "HASH") { $failure="Automation run not found"; return undef; }
   if(($current->{status}||"") !~ /^(?:starting|running|paused|interrupted)$/) { $failure="Run is already finished"; return undef; }
@@ -14797,9 +14887,12 @@ sub webui_automation_recover_run (@) {
  my ($run_id,$code,$message)=@_;
  $run_id=PGAutomation::safe_component($run_id||"");
  return 0 if($run_id eq "");
- my $run_path=PGAutomation::run_dir($run_id)."/run.json";
  my $recovered=0;
- PGAutomation::with_lock($run_path,sub {
+ # Through with_manifest: the dead runner's last live status is absorbed
+ # (its pid is what the liveness check below must see) and then retired, so
+ # a reboot with a clock that went backwards cannot leave the poll serving
+ # the orphaned status as a running run.
+ &webui_automation_with_manifest($run_id,sub {
   my ($run)=@_;
   return undef if(ref($run) ne "HASH" || ($run->{status}||"") !~ /^(?:running|starting|completing|stopping)$/);
   my $pid=$run->{runner_pid}||0;
@@ -14870,7 +14963,7 @@ sub webui_automation_reconcile_execution (@) {
 sub webui_automation_boot_recover (@) {
  return 0 if(!PGAutomation::ensure_store());
  foreach my $run_id (PGAutomation::list_run_ids()) {
-  PGAutomation::with_lock(PGAutomation::run_dir($run_id).'/run.json',sub {
+  &webui_automation_with_manifest($run_id,sub {
    my ($state)=@_;return undef if(ref($state) ne 'HASH' || ($state->{status}||'') ne 'paused');
    # Manifests written before hazard_restore_pending existed record the
    # protective values to restore but not the obligation itself.
@@ -14965,7 +15058,7 @@ sub webui_automation_schedule_restart_cleanup (@) {
   return 0;
  }
  my $now=PGAutomation::now();
- my ($saved)=PGAutomation::with_lock(PGAutomation::run_dir($run_id)."/run.json",sub {
+ my ($saved)=&webui_automation_with_manifest($run_id,sub {
   my ($current)=@_;
   return undef if(ref($current) ne "HASH");
   $current->{restart_cleanup_attempts}=($current->{restart_cleanup_attempts}||0)+1;
@@ -14996,10 +15089,10 @@ sub webui_automation_reap_dead_runner (@) {
  return 0 if($status !~ /^(?:starting|running|completing|stopping)$/);
  my $run_id=PGAutomation::safe_component($execution->{run_id}||"");
  return 0 if($run_id eq "");
- # The manifest alone is enough here; webui_automation_run would also load
- # every item artifact on each status poll. run.json's runner_pid is refreshed
- # by every heartbeat, execution.pid only at the claim, so prefer the former.
- my $run=&webui_automation_read_run($run_id);
+ # The live view is enough here; webui_automation_run would also load every
+ # item artifact on each status poll. runner_pid is refreshed by every
+ # heartbeat, execution.pid only at the claim, so prefer the former.
+ my $run=&webui_automation_read_live($run_id);
  my $pid=(ref($run) eq "HASH" ? ($run->{runner_pid}||0) : 0)||$execution->{pid}||0;
  return 0 if(PGAutomation::pid_is_live($pid,"pgen_automation_runner.pl"));
  if(!$pid) {
@@ -15053,9 +15146,9 @@ sub webui_automation_api (@) {
  if($path eq "/api/automation/runs/current" && $method eq "GET") {
   &webui_automation_reap_dead_runner();
   my $execution=&webui_automation_read_execution();
-  my $run=ref($execution) eq "HASH" ? &webui_automation_read_run($execution->{run_id}) : undef;
+  my $run=ref($execution) eq "HASH" ? &webui_automation_read_live($execution->{run_id}) : undef;
   my $preflight=&webui_automation_preflight_status();
-  $run=&webui_automation_read_run($preflight->{run_id}) if(!ref($run) && ref($preflight) eq "HASH" && $preflight->{run_id});
+  $run=&webui_automation_read_live($preflight->{run_id}) if(!ref($run) && ref($preflight) eq "HASH" && $preflight->{run_id});
   if(ref($run) eq "HASH" && $run->{live_view_cleared_at} && ($run->{status}||"") =~ /^(?:complete(?:-with-warnings)?|stopped|failed)$/) {
    $preflight=undef if(ref($preflight) eq "HASH" && ($preflight->{run_id}||"") eq $run->{id});
    $run=undef;

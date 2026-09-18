@@ -1117,7 +1117,7 @@ function pgAutomationReadouts(run,pre,now){
  const slot=(value,label)=>({value,label});
  const pending={paused:', paused',updating:', updating',unavailable:', waiting for the runner'}[model.state]||', estimating';
  const jobLabel=!run&&pre?'checks left':model.jobLabel;
- const liveState=!active?'':pgAutomation.statusError?'lost':pgAutomationHeartbeatAge(run)>60?'delayed':'live';
+ const liveState=!active?'':pgAutomation.statusError?'lost':(pgAutomation.pollDelayed||pgAutomationHeartbeatAge(run)>60)?'delayed':'live';
  return {
   elapsed:slot(start?pgAutomationClock(end-start):'—','elapsed'),
   stage:slot(active&&run.stage_started_at?pgAutomationClock(now-run.stage_started_at):'—','this stage'),
@@ -1244,7 +1244,7 @@ function pgAutomationRenderProgress(){
 }
 function pgAutomationBeginChecks(intent){
  const id='ui-'+Date.now()+'-'+Math.random().toString(36).slice(2,10);
- pgAutomation.lastProblem='';pgAutomation.statusError='';
+ pgAutomation.lastProblem='';pgAutomation.statusError='';pgAutomation.pollMisses=0;pgAutomation.pollDelayed=false;
  pgAutomation.pendingChecks={id,status:'checking',intent,started_at:Date.now()/1000,queue_name:pgAutomation.queue.name,total_items:pgAutomation.queue.items.length,message:'Waiting for the generator to begin startup checks. No calibration has started.',items:[]};
  pgAutomationRenderProgress();pgAutomationRenderActivity();pgAutomationPollLive();return id;
 }
@@ -1369,7 +1369,9 @@ function pgAutomationRenderLiveRun(run,execution){
  pgAutomationEl('StopButton').disabled=!run?.cleanup_required&&!['starting','running','paused','interrupted','stopping','completing'].includes(status);
  pgAutomationEl('StopButton').textContent=run?.cleanup_required?'Retry cleanup':'Stop';
  const live=pgAutomationEl('Live');
- if(run?.preflight_result)pgAutomationRenderReadiness(run.preflight_result,run);
+ // The run carries the verdict; the check list is in the saved preflight
+ // status the same poll delivers for this run.
+ if(run?.preflight_result){const pre=pgAutomation.current?.preflight;pgAutomationRenderReadiness({...run.preflight_result,checks:run.preflight_result.checks||(pre&&pre.run_id===run.id?pre.checks:null)||[]},run);}
  if(!run){live.innerHTML='<div class="auto-empty">'+(checking?'Checking the whole queue against the connected TV before calibration. Signal and picture modes are temporarily switched and restored.':pre&&['blocked','failed','interrupted'].includes(pre.status)?'Calibration has not started. Resolve the startup problems shown above, then retry.':'No active batch. Completed and stopped runs are in History.')+'</div>';pgAutomationEl('LiveDetail').innerHTML='';delete pgAutomation.jobViews.live;return;}
  const terminal=pgAutomationTerminal(run),active=run.active_item!=null?Number(run.active_item):-1,items=run.items||[],worker=terminal?{}:{...(run.worker_status||{}),message:(run.status==='running'?run.operation_progress?.message:null)||run.worker_status?.message};
  if(terminal){
@@ -1387,17 +1389,28 @@ function pgAutomationRenderLiveRun(run,execution){
   +items.map((item,i)=>pgAutomationJobButton(item,i,'live',run.id,i===active)).join('');
  if(pgAutomation.tab==='live')pgAutomationSyncLiveDetail(run);
 }
+// One slow or failed poll is a delay, not a lost connection: the appliance
+// answers slowly while a calibration worker has its CPU. "Connection lost"
+// waits for three misses in a row, about a minute at the live cadence.
+const PG_AUTOMATION_POLL_TIMEOUT_MS=20000,PG_AUTOMATION_POLL_LOST_AFTER=3;
+function pgAutomationPollMissed(message){
+ pgAutomation.pollMisses=(pgAutomation.pollMisses||0)+1;
+ pgAutomation.pollDelayed=true;
+ if(pgAutomation.pollMisses>=PG_AUTOMATION_POLL_LOST_AFTER)pgAutomation.statusError=message;
+ pgAutomationRenderProgress();
+}
 async function pgAutomationPollLive(){
  if(pgAutomation.polling)return;pgAutomation.polling=true;
  try{
-  const result=await fetchJSON('/api/automation/runs/current',{_quiet:true,_timeoutMs:8000});
+  const result=await fetchJSON('/api/automation/runs/current',{_quiet:true,_timeoutMs:PG_AUTOMATION_POLL_TIMEOUT_MS});
   if(result&&result.status!=='error'){
    if(pgAutomation.dismissedCheck&&result.preflight?.id===pgAutomation.dismissedCheck.id&&result.preflight?.started_at===pgAutomation.dismissedCheck.started_at&&result.preflight?.status!=='checking')result.preflight=null;
    if(pgAutomation.current?.preflight?.id&&!result.preflight&&!pgAutomation.pendingChecks)pgAutomationEl('Readiness').innerHTML='';
+   pgAutomation.pollMisses=0;pgAutomation.pollDelayed=false;
    pgAutomation.statusError='';pgAutomation.receivedAt=Date.now()/1000;pgAutomation.current=result;pgAutomationRenderLiveRun(result.run,result.execution);
   }
-  else{pgAutomation.statusError='Cannot refresh run status. Showing the last known state; progress is unconfirmed. Do not start another run.';pgAutomationRenderProgress();}
- }catch(e){pgAutomation.statusError='Run status connection failed: '+e.message+'. Showing the last known state.';pgAutomationRenderProgress();
+  else pgAutomationPollMissed('Cannot refresh run status. Showing the last known state; progress is unconfirmed. Do not start another run.');
+ }catch(e){pgAutomationPollMissed('Run status connection failed: '+e.message+'. Showing the last known state.');
  }finally{
   // Release the guard before rendering: an unexpected presentation error
   // must not permanently stop polling. Always schedule the next attempt.
@@ -1410,7 +1423,7 @@ async function pgAutomationPollLive(){
   // from another browser (and gives the daemon its dead-runner check).
   const status=pgAutomation.current?.run?.status||'';
   const fast=pgAutomation.pendingChecks||pgAutomation.current?.preflight?.status==='checking'||pgAutomation.tab==='live'||['starting','running','completing','stopping'].includes(status);
-  pgAutomation.liveTimer=setTimeout(()=>{pgAutomation.liveTimer=null;pgAutomationPollLive();},fast?3000:30000);
+  pgAutomation.liveTimer=setTimeout(()=>{pgAutomation.liveTimer=null;pgAutomationPollLive();},fast?2000:30000);
  }
 }
 function pgAutomationHistorySummary(run,index){

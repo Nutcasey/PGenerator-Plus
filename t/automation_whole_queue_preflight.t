@@ -33,7 +33,9 @@ sub tv_response {
     return {status=>'ok',current_input=>$input,picture_settings=>{pictureMode=>$modes{$config{signal_mode}}},
         supported_picture_keys=>['pictureMode'],virtual_picture_settings=>$virtual||$legacy,
         lg_generation=>{picture_mode_read_forbidden=>$legacy,ddc_only_white_balance=>$legacy},
-        generation_profile=>{capability_profile_hash=>$profile,capability_profile_id=>'fixture',capability_library_valid=>1,capability_platform_profile_applied=>1}};
+        generation_profile=>{capability_profile_hash=>$profile,capability_profile_id=>'fixture',capability_library_valid=>1,capability_platform_profile_applied=>1,
+            # The daemon's reply carries the whole capability table; a job must never keep it.
+            settings_capabilities=>{contrast=>{min=>0,max=>100}},picture_mode_catalogue=>[{id=>'filmMaker'}]}};
 }
 sub fake_api {
     my ($method,$path,$payload)=@_;
@@ -121,6 +123,10 @@ is($saved->{preflight_revision},0,'successful plan is tied to the exact queue re
 ok(!main::webui_automation_cleanup_required($saved),'successful preflight leaves no recovery obligation');
 for my $item (@{$saved->{items}}) {ok(PGAutomationPlan::matches($item,$item->{preflight_contract}),'frozen execution matches the verified plan');}
 for my $item (@{$saved->{items}}) {is($item->{readiness}{scope},'queue-preflight','each job carries the check as its readiness record');}
+ok(!grep({exists($_->{generation_profile}{settings_capabilities}) || exists($_->{generation_profile}{picture_mode_catalogue})} @{$saved->{items}}),'no job keeps the TV capability catalogues the readiness reply carries');
+ok(!exists($saved->{preflight_result}{checks}),'the manifest keeps the verdict, not the check list');
+is(scalar(@{PGAutomation::read_json_file(PGAutomation::run_dir($run_id).'/preflight-plan.json')->{result}{checks}}),scalar(@{$r->{checks}}),'the plan keeps every check');
+ok(-f PGAutomation::run_dir($run_id).'/status.json','the check publishes the live status');
 is(scalar(grep {$_->[1]=~/reset|lut|autocal|meter\/read/} @calls),0,'preflight sends no reset, LUT upload or meter measurement');
 {
  local *main::_api=\&fake_api;local *main::_sleep_controlled=sub{1};local *main::_log=sub{};
@@ -402,6 +408,8 @@ sub reuse_for {
     is($prepares,$walks,'no job is walked through its mode again');
     is($mode_writes,$writes,'and no picture mode is written');
     like(PGAutomation::read_json_file($run_file)->{preflight_result}{message},qr/earlier whole-queue check still applies/,'the reuse is visible in the run');
+    ok(!exists(PGAutomation::read_json_file($run_file)->{preflight_result}{checks}),'and puts no check list back into the manifest');
+    ok(scalar(@{PGAutomation::read_json_file("$store/preflight.json")->{checks}||[]})>0,'while the visible status keeps the checks');
     unlike(PGAutomation::read_json_file($run_file)->{preflight_result}{message},qr/rechecked/,'and no longer promises a per-job recheck');
     PGAutomation::with_lock($run_file,sub {$_[0]{preflight_result}{completed_at}-=3*24*3600;return $_[0];});
     ok(reuse_for($run_file),'a resume days later still reuses it: the queue and the TV identity decide, not the clock');
@@ -442,6 +450,13 @@ for my $case ('same','mode-changed','queue-changed','stale','output-changed') {
     my $saved=PGAutomation::read_json_file($second_file);
     ok(ref($saved->{items}[0]{preflight_contract}) eq 'HASH','the batch adopts the checked plan contracts');
     is($saved->{preflight_revision},0,'the adopted plan is tied to the queue revision');
+    my $adopted_plan=PGAutomation::read_json_file(PGAutomation::run_dir($second).'/preflight-plan.json');
+    ok(ref($adopted_plan) eq 'HASH' && @{$adopted_plan->{result}{checks}||[]}>0,'the batch keeps its own copy of the plan and its checks');
+    # A Resume of that batch reads the check list from there.
+    PGAutomation::with_lock($second_file,sub {$_[0]{resumed_at}=time();return $_[0];});
+    my $resumed=reuse_for($second_file);
+    ok($resumed && $resumed->{reused} && @{$resumed->{checks}||[]}>0,'a resume of an adopted batch still lists the checks');
+    ok(scalar(@{PGAutomation::read_json_file("$store/preflight.json")->{checks}||[]})>0,'and keeps them in the visible status');
     ok(-f PGAutomation::run_dir($second).'/viewing-context.json','the original viewing context is kept for restoration');
     is(PGAutomation::read_json_file("$store/preflight.json")->{run_id},$second,'the startup status names the batch that reused the check');
 }

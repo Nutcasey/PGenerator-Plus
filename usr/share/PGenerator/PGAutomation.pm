@@ -15,6 +15,7 @@ use File::Find ();
 use File::Path qw(make_path remove_tree);
 use JSON::PP ();
 use POSIX qw(strftime);
+use Storable ();
 use Time::HiRes qw(time);
 use PGMath ();
 
@@ -274,6 +275,89 @@ sub read_json_file {
     my $raw = read_raw($path);
     return undef if !defined($raw);
     return decode_json($raw);
+}
+
+# Fractional mtime where the platform gives one (Time::HiRes on Linux), so two
+# files written within the same second still order correctly.
+sub file_mtime {
+    my ($path) = @_;
+    my @st = Time::HiRes::stat($path);
+    return @st ? $st[9] : undef;
+}
+
+# JSON::PP on the appliance decodes at roughly 100 KB/s. A status poll that
+# decodes the same unchanged file every few seconds is pure waste, so keep the
+# last decoded value per path and reuse it while the file's identity (inode,
+# size, mtime; every writer here renames a fresh file into place) is the same.
+# Callers get their own deep copy: the cached value is never handed out.
+my %JSON_CACHE;
+my $JSON_CACHE_LIMIT = 24;
+# Only small files are kept: the live status and the preflight status are a
+# few tens of kilobytes; a full manifest is not, and every daemon worker
+# thread holds its own cache for as long as the daemon runs.
+our $JSON_CACHE_MAX_BYTES = 262144;
+sub read_json_cached {
+    my ($path) = @_;
+    return undef if !defined($path) || $path eq '';
+    my @st = Time::HiRes::stat($path);
+    return undef if !@st;
+    if ($st[7] > $JSON_CACHE_MAX_BYTES) {
+        delete $JSON_CACHE{$path};
+        return eval { read_json_file($path) };
+    }
+    my $key = join(':', $st[1], $st[7], $st[9]);
+    my $entry = $JSON_CACHE{$path};
+    if (!$entry || $entry->{key} ne $key) {
+        my $value = eval { read_json_file($path) };
+        return undef if !defined($value);
+        if (keys(%JSON_CACHE) >= $JSON_CACHE_LIMIT) {
+            my ($oldest) = sort { $JSON_CACHE{$a}{used} <=> $JSON_CACHE{$b}{used} } keys %JSON_CACHE;
+            delete $JSON_CACHE{$oldest};
+        }
+        $entry = $JSON_CACHE{$path} = { key => $key, value => $value };
+    }
+    $entry->{used} = time();
+    return ref($entry->{value}) ? Storable::dclone($entry->{value}) : $entry->{value};
+}
+
+# The live view of a run: what a status poll needs and nothing that grows.
+# The runner publishes it as status.json after every manifest write; the
+# daemon materialises it once for a run no runner is alive to publish for.
+# RUN_LIVE_KEYS are the fields a heartbeat or progress tick may overlay.
+our @RUN_LIVE_KEYS = qw(heartbeat heartbeat_at runner_pid active_item active_stage worker_status operation_progress time_estimate);
+our @RUN_STATUS_KEYS = qw(id token launch_attempt status queue_name queue_id finish_policy preflight_only
+    created_at created_at_iso started_at resumed_at paused_at interrupted_at completed_at
+    stage_started_at checkpoint checkpoint_status last_checkpoint
+    failure warnings cleanup_required stop_cleanup cleanup_failure original_failure pending_terminal_status
+    preflight_restore_required viewing_restore_required viewing_restore_outcome preflight_restore_outcome
+    hazard_restore_pending hazard_restore_failures hazard_restore_unverified panel_protection
+    preflight_in_progress preflight_revision queue_revision live_view_cleared_at startup_events readiness);
+sub compact_item {
+    my ($item) = @_;
+    return {} if ref($item) ne 'HASH';
+    my %compact = map { exists($item->{$_}) ? ($_ => $item->{$_}) : () }
+        qw(id name picture_mode signal_format status failure warnings checkpoint checkpoint_status active_stage stage_started_at stages);
+    $compact{checkpoints} = [map { my $c = $_; ref($c) eq 'HASH'
+        ? {map { exists($c->{$_}) ? ($_ => $c->{$_}) : () } qw(name status verified completed_at duration_seconds)} : () } @{$item->{checkpoints} || []}]
+        if ref($item->{checkpoints}) eq 'ARRAY';
+    if (ref($item->{readiness}) eq 'HASH') {
+        my %readiness = %{$item->{readiness}};
+        $readiness{checks} = [grep { ref($_) eq 'HASH' && !$_->{ok} } @{$readiness{checks} || []}];
+        $compact{readiness} = \%readiness;
+    }
+    return \%compact;
+}
+sub compact_run {
+    my ($run) = @_;
+    return {} if ref($run) ne 'HASH';
+    my %compact = map { exists($run->{$_}) ? ($_ => $run->{$_}) : () } (@RUN_STATUS_KEYS, @RUN_LIVE_KEYS);
+    if (ref($run->{preflight_result}) eq 'HASH') {
+        my %result = %{$run->{preflight_result}};
+        delete $result{checks};
+        $compact{preflight_result} = \%result;
+    }
+    $compact{items} = [map { compact_item($_) } @{ref($run->{items}) eq 'ARRAY' ? $run->{items} : []}];
+    return \%compact;
 }
 
 sub write_atomic {
