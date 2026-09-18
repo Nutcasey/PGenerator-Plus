@@ -34,13 +34,12 @@ ok(PGAutomationPlan::job_start_matches($planned_intent,$planned,$full),'an uncha
  my $job={%{PGAutomation::clone($planned)},preflight_contract=>$limited};
  PGAutomation::write_json_atomic(PGAutomation::run_dir('limited-run').'/run.json',{id=>'limited-run',token=>'limited-token',status=>'running',items=>[$job]});
  local *main::_log=sub {};local *main::_log_action=sub {};
- local *main::_require_job_ready=sub {{status=>'ok',ready=>1,items=>[$merged]}};
  local *main::_apply_signal=sub {1};local *main::_freeze_job_lg_context=sub {{}};local *main::_select_item_picture_mode=sub {1};
  my $ok=eval {main::_prepare_job_context(0,$job);1};
  ok($ok,'job preparation completes') or diag $@;
- unlike($@||'',qr/Queue preflight is stale/,'a limited job whose readiness adds a mode-dependent setting is not refused as stale');
+ unlike($@||'',qr/Queue preflight is stale/,'a limited job is not refused as stale at job start');
  my $stored=PGAutomation::read_json_file(PGAutomation::run_dir('limited-run').'/run.json')->{items}[0];
- ok($stored->{settings}{energySaving},'the stored job is the merged plan');
+ is($stored->{preflight_contract}{intent_hash},PGAutomationPlan::intent_hash($stored),'job start pins the limited contract to the job it verified');
  ok(PGAutomationPlan::matches($stored,$stored->{preflight_contract}),'the stored job matches its contract, so a claim after Pause needs no re-check');
 }
 

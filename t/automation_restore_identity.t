@@ -112,8 +112,10 @@ for my $case (
  ['input, first identity read fails'=>sub {$input='hdmi2';$fail_read_at=1},qr/TV input changed/],
  # The signal switch itself is refused because the TV changed: confirmed, not retried.
  ['SDR source, first identity read fails'=>sub {$input='hdmi2';$mode_override='expert1';$fail_read_at=1},qr/TV input changed/],
- # The switch succeeds, then the TV moves to an app before the mode read.
- ['app after the switch'=>sub {$after_scoped_read=sub {$input='';$app_id='com.webos.app.netflix';$mode_override='standard'}},qr/TV input changed \(hdmi1 to app:com\.webos\.app\.netflix\)/],
+ # The generator is already on HDR10, so no switch happens; the first scoped
+ # read is the readback of the restoring mode write, and the TV moves to an
+ # app right after it, before the independent verification read.
+ ['app after the mode write'=>sub {$after_scoped_read=sub {$input='';$app_id='com.webos.app.netflix';$mode_override='standard'}},qr/TV input changed \(hdmi1 to app:com\.webos\.app\.netflix\)/],
  # Every signal restored, then the profile changes as the final pattern shows.
  ['profile change at the final check'=>sub {$on_final_pattern=sub {$hash='d'x64}},qr/compatibility profile changed/],
 ) {
@@ -123,7 +125,11 @@ for my $case (
  is($run->{viewing_restore_outcome},'abandoned-tv-changed',"$name: restoration is abandoned because the TV changed");
  ok(!$run->{viewing_restore_required},"$name: nothing is left owed");
  ok(!-f "$store/execution.json","$name: the TV is released");
- is_deeply(\@writes,[],"$name: no picture mode is written to the changed TV") if $name !~ /final check/;
+ if($name eq 'app after the mode write') {
+  is_deeply(\@writes,['hdr10=hdrCinema'],"$name: the mode written before the TV changed stands; nothing more is written");
+ } elsif($name !~ /final check/) {
+  is_deeply(\@writes,[],"$name: no picture mode is written to the changed TV");
+ }
  like(join(' ',@{$run->{warnings}||[]}),$why,"$name: the warning names the change");
  cmp_ok(scalar(@refused),'<=',20,"$name: no long loop of refused TV requests");
 }

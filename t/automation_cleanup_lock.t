@@ -181,7 +181,6 @@ for my $change (qw(firmware input)) {
  fresh('p29-outcome');
  PGAutomation::write_json_atomic(PGAutomation::run_dir($run_id).'/viewing-context.json',{original=>{},config=>{},modes=>{},order=>[]});
  PGAutomation::with_lock($run_file,sub {$_[0]{viewing_restore_outcome}='verified';$_[0]{viewing_context_restored_at}=1;return $_[0];});
- local *main::_require_job_ready=sub {{status=>'ok',ready=>1,items=>[]}};
  local *main::_apply_signal=sub {0};
  eval { main::_prepare_job_context(0,run_json()->{items}[0]) };
  my $run=run_json();
@@ -240,8 +239,10 @@ for my $journal (1,0) {
   if($journal){$_[0]{mode_written_signals}={};}else{delete $_[0]{mode_written_signals};}
   return $_[0];
  });
- my @signals;my $real=\&main::_api;
- local *main::_api=sub {my ($m,$p,$pl)=@_;push @signals,$pl->{signal_mode} if $m eq 'POST' && $p eq '/api/config' && ref($pl) eq 'HASH' && $pl->{signal_mode};return $real->(@_);};
+ # A walk selects the signal even when the generator is already on it (no
+ # config write then), so count the walks, not the config writes.
+ my @signals;my $real_apply=\&main::_apply_signal;
+ local *main::_apply_signal=sub {push @signals,main::_signal($_[0]);return $real_apply->(@_);};
  main::_finish('complete');
  my %seen=map {$_=>1} @signals;
  if ($journal) {

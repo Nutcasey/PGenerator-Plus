@@ -157,9 +157,13 @@ $r=run_check();
 ok($r->{ready},'S9 modern path ready') or diag explain $r->{checks};
 is_deeply([map {$_->{status}} @{$r->{jobs}}],[qw(checked checked)],'S9 modern jobs are checked (not limited)');
 ok($mode_writes>=2,'S9 modern path probes modes');
-is_deeply(\%modes,\%orig_modes,'S9 modern original modes restored');
-is_deeply({map {$_=>$config{$_}} keys %orig_config},\%orig_config,'S9 modern generator config restored');
-ok($r->{restored},'S9 modern restoration verified');
+# A real run keeps the TV on the first job's signal and mode; the batch's
+# end-of-run restoration owes the originals.
+ok($r->{restore_deferred},'S9 modern restoration is handed to the batch');
+is($config{signal_mode},'sdr','S9 modern check ends on the first job\'s signal');
+is($modes{sdr},'filmMaker','S9 modern check ends on the first job\'s mode');
+ok(PGAutomation::read_json_file($run_file)->{viewing_restore_required},'S9 modern batch owes the original viewing context');
+ok($r->{restored},'S9 modern restoration obligation is accounted for');
 # ---- S9b: modern read that echoes virtual on restoration read must fail
 {
  fixture(shape=>'modern',specs=>[['sdr','filmMaker']]);$r=run_check();

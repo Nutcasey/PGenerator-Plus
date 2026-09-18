@@ -928,7 +928,7 @@ function pgAutomationStageLabel(stage,signal){
  if(stage==='greyscale-settings-verified')return 'Checking TV settings after 1D calibration';
  if(stage==='volume-settings-verified')return dolbyVision?'Checking TV settings after the Dolby Vision profile upload':'Checking TV settings after the 3D LUT upload';
  if(stage==='volume-done')return dolbyVision?'Dolby Vision profiling':'3D LUT profiling';
- return {'queue-preflight':'Initial checks','readiness':'Checking TV and meter','job-readiness':'Checking this job’s devices and picture mode','item-started':'Checking this job before measurements','tv-setup-verified':'Applying TV settings','pre-readings-done':'Before readings','reset-and-reapply-verified':'Resetting calibration and reapplying settings','panel-light-settled':'Setting 100% white luminance','greyscale-done':'Calibrating the 1D LUT','session-closed':'Closing calibration','apply-all-done':'Applying calibration to all inputs','post-readings-done':'After readings','item-complete':'Saving job results'}[stage]||String(stage||'').replace(/-/g,' ');
+ return {'queue-preflight':'Initial checks','readiness':'Checking TV and meter','job-readiness':'Selecting this job’s signal and picture mode','item-started':'Checking this job before measurements','tv-setup-verified':'Applying TV settings','pre-readings-done':'Before readings','reset-and-reapply-verified':'Resetting calibration and reapplying settings','panel-light-settled':'Setting 100% white luminance','greyscale-done':'Calibrating the 1D LUT','session-closed':'Closing calibration','apply-all-done':'Applying calibration to all inputs','post-readings-done':'After readings','item-complete':'Saving job results'}[stage]||String(stage||'').replace(/-/g,' ');
 }
 function pgAutomationIssueText(issue){
  const raw=typeof issue==='string'?issue:issue?.message||'';
@@ -1458,9 +1458,21 @@ function pgAutomationJobFailureHtml(item){
  const cancelled=item.status==='stopped'&&item.failure.status==='interrupted'&&!item.failure.message&&!item.failure.error_code;
  return '<p style="color:var('+(cancelled?'--text2':'--red')+')">'+(cancelled?'Stopped during ':'')+pgAutomationEscape(pgAutomationIssueText(item.failure))+'</p>';
 }
+// While the whole queue is being checked no job has started: active_item is
+// null as the runner saves context, restores modes or hands over to job 1.
+// Coercing that null to job 0 named the first job as if it were running.
+function pgAutomationQueueCheckOnly(run){return !!run&&run.active_stage==='queue-preflight'&&run.active_item==null;}
+function pgAutomationShowQueueCheck(view,run){
+ const target=pgAutomationJobTarget(view);if(!target)return;
+ delete pgAutomation.jobViews[view];
+ const html='<div class="auto-toolbar"><span class="auto-muted">Queue check</span></div><div data-job-meta><p>Checking the whole queue before any calibration begins.'+(run.worker_status?.message?' '+pgAutomationEscape(run.worker_status.message)+'.':'')+'</p></div>';
+ if(target.innerHTML!==html)target.innerHTML=html;
+ if(view!=='calibration')pgAutomationEl(view==='live'?'Live':'HistoryJobs')?.querySelectorAll('[data-job-index]').forEach(button=>button.setAttribute('aria-pressed','false'));
+}
 function pgAutomationSyncLiveDetail(run){
  if(!run?.items?.length)return;
  if(pgAutomation.liveSelection?.runId!==run.id){pgAutomation.followLive=true;pgAutomation.liveSelection=null;}
+ if(pgAutomation.followLive&&pgAutomationQueueCheckOnly(run)){pgAutomationShowQueueCheck('live',run);return;}
  const index=pgAutomation.followLive?Math.max(0,Math.min(Number(run.active_item??0),run.items.length-1)):pgAutomation.liveSelection.index;
  pgAutomationShowJob('live',run.id,index);
 }
@@ -1492,12 +1504,13 @@ function pgAutomationSyncCalibrationView(run){
  const badge=pgAutomationEl('CalibrationBadge');
  badge.dataset.state=run.status;
  badge.textContent='Automation '+({running:'active',starting:'starting',paused:'paused',interrupted:'interrupted',stopping:'stopping',completing:'finishing',complete:'complete','complete-with-warnings':'complete with warnings',stopped:'stopped',failed:'failed'}[run.status]||run.status)+' · Read-only';
- const index=Math.max(0,Math.min(Number(run.active_item??0),(run.items?.length||1)-1)),item=run.items?.[index],worker=pgAutomationTerminal(run)?{}:{...(run.worker_status||{}),message:(run.status==='running'?run.operation_progress?.message:null)||run.worker_status?.message};
+ const queueCheck=pgAutomationQueueCheckOnly(run);
+ const index=Math.max(0,Math.min(Number(run.active_item??0),(run.items?.length||1)-1)),item=queueCheck?null:run.items?.[index],worker=pgAutomationTerminal(run)?{}:{...(run.worker_status||{}),message:(run.status==='running'?run.operation_progress?.message:null)||run.worker_status?.message};
  const terminal=pgAutomationTerminal(run),esc=pgAutomationEscape;
  const stage=terminal?({stopped:'Run stopped',failed:'Run failed',complete:'Run complete','complete-with-warnings':'Run complete with warnings'}[run.status]||'Saved results'):pgAutomationStageLabel(run.active_stage||'Preparing job');
  const held=['paused','interrupted'].includes(run.status);
  const detail=[held?(run.status==='paused'?'Paused':'Interrupted'):null,stage,!terminal&&worker.current_name,!terminal&&worker.total_steps?(held?'Last patch ':'Patch ')+Number(worker.current_step||0)+' / '+worker.total_steps:null].filter(Boolean).join(' · ');
- const progress='<div class="auto-observer-eyebrow">Job '+(index+1)+' of '+(run.items?.length||0)+(terminal?' · Saved results':'')+'</div><h3 class="auto-observer-title">'+esc(item?.name||'Preparing job')+'</h3><p class="auto-observer-stage">'+esc(detail)+'</p>'+(!terminal&&worker.message?'<p class="auto-observer-activity">'+(held?'Last activity: ':'')+esc(worker.message)+'</p>':'');
+ const progress='<div class="auto-observer-eyebrow">'+(queueCheck?'Queue check':'Job '+(index+1)+' of '+(run.items?.length||0)+(terminal?' · Saved results':''))+'</div><h3 class="auto-observer-title">'+esc(queueCheck?'Checking the whole queue':(item?.name||'Preparing job'))+'</h3><p class="auto-observer-stage">'+esc(detail)+'</p>'+(!terminal&&worker.message?'<p class="auto-observer-activity">'+(held?'Last activity: ':'')+esc(worker.message)+'</p>':'');
  const progressEl=pgAutomationEl('CalibrationProgress');if(progressEl.innerHTML!==progress)progressEl.innerHTML=progress;
  pgAutomationEl('CalibrationHelp').textContent=pgAutomation.statusError|| ({complete:'Saved results for this completed run.','complete-with-warnings':'Measurements saved. Review the warnings in Automation.',stopped:'Run stopped. Saved measurements may be partial.',failed:'Run failed. Any saved measurements may be partial.',paused:'Batch paused. Resume or stop the run in Automation.',interrupted:'Batch interrupted. Review the run in Automation before continuing.'}[run.status]||'Read-only view of the active batch. Manage the run in Automation.');
  pgAutomationEl('CalibrationRelease').style.display=occupied?'none':'';
@@ -1507,6 +1520,7 @@ function pgAutomationSyncCalibrationView(run){
   state.data=null;state.graphSignature=null;state.lastFetch=0;state.stage=run.active_stage;
   pgAutomationJobTarget('calibration').querySelector('[data-job-graphs]').textContent='Waiting for measurements from '+pgAutomationStageLabel(run.active_stage||'the next stage')+'.';
  }
+ if(queueCheck&&card.getClientRects().length){pgAutomationShowQueueCheck('calibration',run);}
  if(item&&card.getClientRects().length){
   pgAutomationShowJob('calibration',run.id,index);
   if(pgAutomation.jobViews.calibration){pgAutomation.jobViews.calibration.stage=run.active_stage;pgAutomation.jobViews.calibration.runStatus=run.status;}

@@ -65,11 +65,11 @@ sub run_item {
 # H-hazard-pending-set: a job that changes a protective setting journals the obligation.
 {
  reset_run();
- local *main::_require_job_ready=sub {{status=>'ok',ready=>1,items=>[{signal_format=>'sdr',picture_mode=>'filmMaker'}],hazard_restore=>{autoPowerOff=>{value=>'on',category=>'power'}}}};
  local *main::_apply_signal=sub {1};
  local *main::_freeze_job_lg_context=sub {{}};
  local *main::_select_item_picture_mode=sub {1};
- eval { main::_prepare_job_context(0,{signal_format=>'sdr',picture_mode=>'filmMaker'}) };
+ # The hazard values come from the whole-queue check's readiness pass, kept on the item.
+ eval { main::_prepare_job_context(0,{signal_format=>'sdr',picture_mode=>'filmMaker',hazards=>[{key=>'autoPowerOff',value=>'on',category=>'power',controllable=>1}]}) };
  ok(PGAutomation::read_json_file("$dir/run.json")->{hazard_restore_pending},'hazard_restore_pending is journalled at job start');
 }
 # H-quality-missing / H-quality-nolimits

@@ -94,6 +94,25 @@ const root=path.resolve(__dirname,'../..');
    count:rendered[0].snapshot.readings.length,key:rendered[0].snapshot.cache_key,
    gamma:rendered[0].snapshot.target_gamma,map:rendered[0].snapshot.dv_map_mode
   })),{count:3,key:'lg-dv-profile',gamma:'2.2',map:'2'},'real partial DV profile reaches its native chart, not the no-data placeholder');
+  // 18 Sep 2026: while the whole queue is checked no job has started, yet both
+  // panes named job 1 as if it were running while the runner restored modes.
+  await page.evaluate(()=>{
+   pgAutomation.current.run.active_item=null;pgAutomation.current.run.active_stage='queue-preflight';
+   pgAutomation.current.run.worker_status={message:'Restoring original output and picture modes after queue checks'};
+   pgAutomation.followLive=true;pgAutomation.liveSelection=null;
+   pgAutomationSyncCalibrationView(pgAutomation.current.run);pgAutomationSyncLiveDetail(pgAutomation.current.run);
+  });
+  assert.match(await page.$eval('#pgAutomationCalibrationProgress',el=>el.textContent),/Queue check.*Checking the whole queue.*Initial checks.*Restoring original output/s,'the observer names the queue check while no job has started');
+  assert.doesNotMatch(await page.$eval('#pgAutomationCalibrationProgress',el=>el.textContent),/Job \d+ of|Filmmaker/,'and borrows no job name');
+  assert.match(await page.$eval('#pgAutomationCalibrationDetail',el=>el.textContent),/Queue check.*Checking the whole queue before any calibration begins/s,'the observer detail says the same');
+  assert.match(await page.$eval('#pgAutomationLiveDetail',el=>el.textContent),/Queue check.*Checking the whole queue before any calibration begins/s,'and so does the live pane');
+  assert.equal(await page.evaluate(()=>pgAutomation.jobViews.calibration||pgAutomation.jobViews.live||null),null,'no job detail is fetched for a job that has not started');
+  await page.evaluate(()=>{
+   pgAutomation.current.run.active_item=1;pgAutomation.current.run.active_stage='volume-done';pgAutomation.current.run.worker_status={current_name:'Reading 2.3%',current_step:33,total_steps:34};
+   pgAutomationSyncCalibrationView(pgAutomation.current.run);
+  });
+  await ready();
+  assert.match(await page.$eval('#pgAutomationCalibrationProgress',el=>el.textContent),/Job 2 of 2/,'the job view returns once a job starts');
   await page.evaluate(()=>{
    pgAutomation.current.run.status='complete';pgAutomation.current.run.active_item=2;pgAutomation.current.run.active_stage='item-complete';data.run_status='complete';data.active_stage='item-complete';data.live=null;data.snapshots=[{key:'greyscale-21',phase:'post',snapshot:{readings:[{Y:500}]}}];
    pgAutomationSyncCalibrationView(pgAutomation.current.run);

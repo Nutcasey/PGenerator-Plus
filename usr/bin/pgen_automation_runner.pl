@@ -2123,10 +2123,24 @@ sub _settings_failure_message {
         . (@mismatches ? ': ' . join('; ', @mismatches) : ' (TV readback unavailable)');
 }
 
+# Is the generator already outputting exactly what $wanted would configure?
+# Then a config write only restarts the renderer and costs the 35 s signal
+# detection wait for nothing: the TV never saw a format change.
+sub _signal_already_applied {
+    my ($signal, $wanted) = @_;
+    my $current = _api('GET', '/api/config', undef);
+    return 0 if ref($current) ne 'HASH' || ($current->{status} || '') eq 'error';
+    my $reported = lc($current->{signal_mode} || '');
+    return 0 if !($reported eq $signal || $signal eq 'hdr10' && $reported eq 'hdr');
+    foreach my $key (grep { $_ ne 'signal_mode' && $_ ne 'requested_signal_mode' } keys %$wanted) {
+        return 0 if !defined($current->{$key}) || "$current->{$key}" ne "$wanted->{$key}";
+    }
+    return 1;
+}
+
 sub _apply_signal {
     my ($item) = @_;
     my $signal = _signal($item);
-    _log_action('Switching generator output to '.uc($signal));
     my $config = {
         signal_mode => $signal,
         requested_signal_mode => $signal,
@@ -2138,6 +2152,18 @@ sub _apply_signal {
     foreach my $key (qw(color_format rgb_quant_range max_bpc eotf primaries colorimetry)) {
         $config->{$key} = $item->{$key} if exists($item->{$key}) && defined($item->{$key});
     }
+    if (_signal_already_applied($signal, $config)) {
+        _log_action('Generator output is already '.uc($signal).'; no output change needed');
+        my $pattern = _api('POST', '/api/pattern', {
+            name => 'gray50',
+            signal_mode => $signal,
+            max_luma => $item->{max_luma} || 1000,
+        });
+        return 1 if ($pattern->{status} || '') eq 'ok';
+        # The pattern could not be shown: fall through to a full switch, whose
+        # detection loop keeps retrying the pattern.
+    }
+    _log_action('Switching generator output to '.uc($signal));
     my $result = _api('POST', '/api/config', $config);
     if (!$result || ($result->{status} || '') ne 'ok') {
         $::LAST_ERROR = $result->{message} || 'Unable to apply signal format';
@@ -3803,29 +3829,37 @@ sub _save_job_readiness {
     _update_run(sub {$_[0]{items}[$number]=$item;});
 }
 
-sub _require_job_ready {
-    my ($number,$item,$scope)=@_;
-    my $result=_api('POST','/api/automation/readiness',{items=>[$item],scope=>$scope});
-    my $errors=sub { [map {$_->{message}||$_->{name}} grep {!$_->{ok} && ($_->{level}||'error') eq 'error'} @{$_[0]{checks}||[]}] };
-    # Readiness runs its own TV conversations inside the daemon, so the
-    # runner's LG reconnect logic never sees a refusal that happens there.
-    # A readiness verdict is idempotent: reconnect and ask once more.
-    # Readiness verdicts are idempotent, so a daemon-internal helper timeout
-    # ("LG TV did not answer ... within Ns") also earns one more check here,
-    # although elsewhere a timeout is no longer treated as a refusal.
+# Readiness runs its own TV conversations inside the daemon, so the runner's
+# LG reconnect logic never sees a refusal that happens there. A readiness
+# verdict is idempotent: reconnect and ask once more. A daemon-internal helper
+# timeout ("LG TV did not answer ... within Ns") also earns one more check
+# here, although elsewhere a timeout is no longer treated as a refusal.
+sub _readiness_with_reconnect {
+    my ($payload)=@_;
+    my $result=_api('POST','/api/automation/readiness',$payload,0,0);
+    my $errors=sub { [map {$_->{message}||$_->{name}} grep {ref($_) eq 'HASH' && !$_->{ok} && ($_->{level}||'error') eq 'error'} @{$_[0]{checks}||[]}] };
     my $retryable=sub { my ($m)=@_; return 1 if _lg_connection_failure({status=>'error',message=>$m}); return $m=~/LG TV did not (?:answer|finish)/i ? 1 : 0; };
-    if (!$result->{ready} && grep { $retryable->($_) } @{$errors->($result)}) {
+    if (ref($result) eq 'HASH' && !$result->{ready} && grep { $retryable->($_) } @{$errors->($result)}) {
         _log_action('TV connection was refused during readiness checks; reconnecting and checking again');
-        if (_ensure_lg_connection(1)) {
-            $result=_api('POST','/api/automation/readiness',{items=>[$item],scope=>$scope});
-        }
-    }
-    _save_job_readiness($number,$item,$result);
-    if (!$result->{ready}) {
-        my @errors=@{$errors->($result)};
-        die(@errors ? join('; ',@errors) : $result->{message}||'TV/meter readiness failed');
+        $result=_api('POST','/api/automation/readiness',$payload,0,0) if _ensure_lg_connection(1);
     }
     return $result;
+}
+
+# The power/screen-saver values a job must put back, derived from the hazards
+# its queue-preflight readiness pass observed on the TV. Same rule as the
+# readiness endpoint's own hazard_restore: controllable, with a value, and
+# never the two picture-side hazards the recipe itself sets.
+sub _item_hazard_restore {
+    my ($item)=@_;
+    my %restore;
+    foreach my $hazard (@{ref($item->{hazards}) eq 'ARRAY' ? $item->{hazards} : []}) {
+        next if ref($hazard) ne 'HASH' || !$hazard->{controllable} || !defined($hazard->{key}) || !defined($hazard->{value});
+        next if $hazard->{key} eq 'energySaving' || $hazard->{key} eq 'aiPicture';
+        $restore{$hazard->{key}}={value=>$hazard->{value},category=>$hazard->{category}||'picture'}
+            if !exists($restore{$hazard->{key}});
+    }
+    return \%restore;
 }
 
 sub _freeze_job_lg_context {
@@ -3853,16 +3887,24 @@ sub _freeze_job_lg_context {
     return _mode_read_from_response($live);
 }
 
+# Job start trusts the whole-queue check: every pending job's TV controls,
+# meter, storage and calibration-mode state were verified before any
+# calibration began, and the TV controls it found are on the item. What a job
+# start must still do is put the generator and TV on this job's signal and
+# mode; the one no-echo read that precedes the mode write is where a changed
+# input or TV is caught (the frozen preflight contract).
 sub _prepare_job_context {
     my ($number,$item)=@_;
     $ACTIVE_STAGE='job-readiness';
     _update_run(sub {
         $_[0]{active_item}=$number;$_[0]{active_stage}=$ACTIVE_STAGE;$_[0]{stage_started_at}=time();
-        $_[0]{worker_status}={message=>'Rechecking TV connection, meter, storage and calibration mode for this job'};
+        $_[0]{worker_status}={message=>'Selecting this job\'s signal and picture mode'};
     });
-    _log_action('Checking TV, meter and calibration mode for '.($item->{name}||'this job'));
-    _require_job_ready($number,$item,'batch');
-    if (-f $RUN_DIR.'/viewing-context.json' && (_run()->{finish_policy}||'restore-original') ne 'keep-last') {
+    _log_action('Preparing '.($item->{name}||'this job').'; its TV controls and meter were checked with the whole queue');
+    # The batch owes the operator their original viewing context under either
+    # finish policy: restore-original returns every signal, keep-last returns
+    # only the signals the queue check changed and no job ever selected.
+    if (-f $RUN_DIR.'/viewing-context.json') {
         die 'Unable to journal original viewing context restoration' if !ref(_update_run(sub {
             $_[0]{viewing_restore_required}=JSON::PP::true;
             # An outcome from an earlier Pause must not contradict the new obligation.
@@ -3872,37 +3914,28 @@ sub _prepare_job_context {
     die($::LAST_ERROR||'Unable to activate job signal') if !_apply_signal($item);
     my $frozen=_freeze_job_lg_context($item);
     die($::LAST_ERROR||'Unable to select job picture mode') if !_select_item_picture_mode($number,$item,'job-start',$frozen);
-    _log_action('Signal and picture mode selected; checking this job\'s TV controls');
-    my $contract=PGAutomation::clone($item->{preflight_contract});
-    # The queue intent exactly as preflight froze it, before this job's own
-    # readiness output (now in its selected mode) is merged in.
-    my $planned_intent=PGAutomationPlan::intent_hash($item);
-    my $ready=_require_job_ready($number,$item,'job');
-    if(ref($ready->{items}) eq 'ARRAY' && ref($ready->{items}[0]) eq 'HASH') {
-        %$item=(%$item,%{$ready->{items}[0]});
-    }
-    $item->{preflight_contract}=$contract if ref($contract) eq 'HASH';
     die 'Queue preflight is stale: the resolved job settings or device identity changed; no calibration was started'
         if ref($item->{preflight_contract}) eq 'HASH'
-            && !PGAutomationPlan::job_start_matches($planned_intent,$item,$item->{preflight_contract});
+            && !PGAutomationPlan::job_start_matches(PGAutomationPlan::intent_hash($item),$item,$item->{preflight_contract});
     # A limited contract was frozen before the job's mode existed. Once job start
-    # has verified the merged plan, pin it so a claim after Pause or Resume
-    # matches without a whole-queue re-check.
+    # has verified the plan, pin it so a claim after Pause or Resume matches
+    # without a whole-queue re-check.
     $item->{preflight_contract}{intent_hash}=PGAutomationPlan::intent_hash($item)
         if ref($item->{preflight_contract}) eq 'HASH' && $item->{preflight_contract}{limited};
-    # Capture global power/screen-saver restoration values only on first use,
-    # before this job applies them; later jobs may observe our disabled values.
+    # Global power/screen-saver restoration values come from the queue check,
+    # which read every job before any job disabled them; keep the first seen.
+    my $hazard_restore=_item_hazard_restore($item);
     die 'Unable to journal protective settings restoration' if !ref(_update_run(sub {
         my ($run)=@_;$run->{hazard_restore}||={};
-        foreach my $key (keys %{$ready->{hazard_restore}||{}}) {
-            $run->{hazard_restore}{$key}=$ready->{hazard_restore}{$key} if !exists($run->{hazard_restore}{$key});
+        foreach my $key (keys %$hazard_restore) {
+            $run->{hazard_restore}{$key}=$hazard_restore->{$key} if !exists($run->{hazard_restore}{$key});
         }
         $run->{hazard_restore_pending} = JSON::PP::true
             if grep {$_ ne 'energySaving' && $_ ne 'aiPicture'} keys %{$run->{hazard_restore}};
         $run->{items}[$number]=$item;
     }));
     _update_item_snapshot($number,$item);
-    _log_action('Job readiness passed; applying and verifying queued settings next');
+    _log_action('Signal and picture mode confirmed; applying and verifying queued settings next');
     return 1;
 }
 
@@ -3980,11 +4013,12 @@ sub _preflight_save_context {
 
 # P13: walking every pending job through its signal and picture mode takes
 # minutes. When nothing it proved can have changed, a Resume (or a Run queue
-# straight after Check Readiness) reuses that proof. Each job still re-checks
-# its devices, mode and frozen plan contract when it starts, which is where
-# the per-job safety lives; anything that does not match falls back to the
-# full check.
-our $PREFLIGHT_REUSE_RESUME_SECONDS=24*3600;
+# straight after Check Readiness) reuses that proof. A Resume reuses it for
+# as long as the queue and the TV identity still match; each job's start
+# freezes the live input and compatibility profile against its plan
+# contract, so a TV that changed while the run was parked is still refused.
+# A Check Readiness pointer is only trusted for a few minutes, because that
+# run returned the TV to the operator and anyone may have used it since.
 our $PREFLIGHT_REUSE_READINESS_SECONDS=15*60;
 
 sub _preflight_identity_matches {
@@ -4007,11 +4041,10 @@ sub _reusable_preflight {
     if ($run->{resumed_at}) {
         my $previous=$run->{preflight_result};
         return undef if ref($previous) ne 'HASH' || !$previous->{ready}
-            || !defined($run->{preflight_revision}) || $run->{preflight_revision}!=$revision
-            || time()-($previous->{completed_at}||0) > $PREFLIGHT_REUSE_RESUME_SECONDS;
+            || !defined($run->{preflight_revision}) || $run->{preflight_revision}!=$revision;
         return undef if !_preflight_identity_matches(PGAutomation::read_json_file($RUN_DIR.'/preflight-context.json'),0);
         $result={%{PGAutomation::clone($previous)},reused=>JSON::PP::true,reused_at=>time(),
-            message=>'Resumed on the same TV with an unchanged queue, so the earlier whole-queue check still applies. Each job is rechecked before it starts.'};
+            message=>'Resumed on the same TV with an unchanged queue, so the earlier whole-queue check still applies.'};
         $source='resume';
     } else {
         my $pointer_path=PGAutomation::base_dir().'/last-readiness.json';
@@ -4039,7 +4072,7 @@ sub _reusable_preflight {
         return undef if ref($config) ne 'HASH' || grep {!defined($config->{$_}) || "$config->{$_}" ne "$context->{config}{$_}"} keys %{$context->{config}};
         return undef if !eval { _preflight_save_context($context); 1 };
         $result={%{PGAutomation::clone($plan->{result})},reused=>JSON::PP::true,reused_at=>time(),reused_from=>$pointer->{run_id},
-            message=>'Check Readiness passed moments ago for this exact queue on the same TV, so its whole-queue check is reused. Each job is rechecked before it starts.'};
+            message=>'Check Readiness passed moments ago for this exact queue on the same TV, so its whole-queue check is reused.'};
         my $checked_items=PGAutomation::clone($plan->{items});
         # Adoption is an optimisation: if it cannot be recorded, run the full check.
         my $adopted=eval { _update_run(sub {
@@ -4067,9 +4100,7 @@ sub _preflight_snapshot {
     die 'Generator configuration is unavailable for preflight restoration'
         if ref($config) ne 'HASH' || ($config->{status}||'') eq 'error'
             || ($config->{signal_mode}||'') !~ /^(?:sdr|hdr10|hlg|dv)$/;
-    my @keys=qw(signal_mode eotf primaries colorimetry color_format rgb_quant_range max_bpc
-        dv_map_mode dv_transport dv_interface dv_profile dv_metadata dv_color_space dv_status is_ll_dovi is_std_dovi);
-    my $saved={map {exists($config->{$_}) && !ref($config->{$_}) ? ($_=>$config->{$_}) : ()} @keys};
+    my $saved=_preflight_config_subset($config);
     my $mode=_preflight_read_mode($config->{signal_mode},1);
     my $limited=$mode->{mode_readback_unavailable};
     my $context={config=>$saved,original=>$mode,mode_readback_unavailable=>$limited?1:0,
@@ -4097,6 +4128,41 @@ sub _preflight_wait_config {
     die 'Generator output restoration did not verify';
 }
 
+# A batch that passed its whole-queue check keeps the TV where the check left
+# it: on the first job's signal and picture mode. Returning every signal to its
+# original mode now, only for job 1 to switch away again a minute later, cost
+# this appliance about five minutes per batch. The viewing context the check
+# saved holds each signal's original mode and the mode journal keeps the
+# check's marks, so the batch's own end-of-run restoration walks both: the
+# obligation moves to the batch rather than disappearing.
+sub _defer_preflight_restore {
+    return 1 if !_run()->{preflight_restore_required};
+    if (!-f $RUN_DIR.'/viewing-context.json') {
+        $::LAST_ERROR='Original viewing context was not saved; ownership retained';
+        return 0;
+    }
+    my $saved=_update_run(sub {
+        $_[0]{preflight_restore_required}=JSON::PP::false;
+        $_[0]{preflight_restore_outcome}='deferred-to-batch';
+        $_[0]{viewing_restore_required}=JSON::PP::true;
+        delete @{$_[0]}{qw(viewing_restore_outcome viewing_context_restored_at viewing_restore_abandoned_at)};
+    });
+    if (!ref($saved)) {
+        $::LAST_ERROR='Unable to hand restoration over to the batch; ownership retained';
+        return 0;
+    }
+    _log_action('Queue checks passed; the TV stays on the first job\'s mode and the original modes are restored when the batch finishes');
+    return 1;
+}
+
+# The generator settings a restoration returns, as read from /api/config.
+my @PREFLIGHT_CONFIG_KEYS=qw(signal_mode eotf primaries colorimetry color_format rgb_quant_range max_bpc
+    dv_map_mode dv_transport dv_interface dv_profile dv_metadata dv_color_space dv_status is_ll_dovi is_std_dovi);
+sub _preflight_config_subset {
+    my ($config)=@_;
+    return {map {exists($config->{$_}) && !ref($config->{$_}) ? ($_=>$config->{$_}) : ()} @PREFLIGHT_CONFIG_KEYS};
+}
+
 sub _restore_preflight_context {
     my ($kind)=@_; $kind='preflight' if !defined($kind);
     die 'Invalid restoration context' if $kind ne 'preflight' && $kind ne 'viewing';
@@ -4106,6 +4172,23 @@ sub _restore_preflight_context {
     if (ref($context) ne 'HASH' || ref($context->{original}) ne 'HASH' || ref($context->{config}) ne 'HASH') {
         $::LAST_ERROR='Saved preflight restoration context is missing; ownership retained';
         return 0;
+    }
+    # keep-last leaves the generator and TV as the last job left them. What it
+    # still owes are the signals the queue check switched to a job's mode and
+    # no job ever selected: a batch that stopped early would otherwise leave a
+    # mode the operator never chose on a signal nothing calibrated.
+    my $keep_last=$kind eq 'viewing' && (_run()->{finish_policy}||'restore-original') eq 'keep-last';
+    my $marks_kind=$keep_last ? 'keep-last' : $kind;
+    if ($keep_last && !grep {_journal_marks(_run()->{mode_written_signals},$_,'keep-last')} @{$context->{order}||[]}) {
+        my $saved=_update_run(sub {
+            $_[0]{$flag}=JSON::PP::false;
+            $_[0]{mode_written_signals}=_journal_after_restore($_[0]{mode_written_signals},$kind);
+            $_[0]{$kind.'_context_restored_at'}=time();
+            $_[0]{$kind.'_restore_outcome'}='kept-last';
+        });
+        if (!ref($saved)) { $::LAST_ERROR='Unable to persist completed context restoration'; return 0; }
+        _log_action('Keeping the last job\'s output and picture mode; the queue check changed no other signal');
+        return 1;
     }
     my ($old_item,$old_stopping,$old_restoring)=($ACTIVE_ITEM,$STOPPING,$RESTORING_PREFLIGHT);
     $STOPPING=1;$RESTORING_PREFLIGHT=1;
@@ -4137,11 +4220,16 @@ sub _restore_preflight_context {
             die $error if defined($error);
         };
         my $written=_run()->{mode_written_signals};
+        my $switched=0;
         for my $signal (reverse @{$context->{order}||[]}) {
-            if (ref($written) eq 'HASH' && !_journal_marks($written,$signal,$kind) && $signal ne ($context->{config}{signal_mode}||'')) {
-                _log_action('No picture mode was changed on '.uc($signal).'; leaving that signal alone during restoration');
+            if ($keep_last ? !_journal_marks($written,$signal,'keep-last')
+                    : ref($written) eq 'HASH' && !_journal_marks($written,$signal,$kind) && $signal ne ($context->{config}{signal_mode}||'')) {
+                _log_action($keep_last && ref($written) eq 'HASH' && _journal_marks($written,$signal,'viewing')
+                    ? 'Keeping the picture mode a job selected on '.uc($signal)
+                    : 'No picture mode was changed on '.uc($signal).'; leaving that signal alone during restoration');
                 next;
             }
+            $switched++;
             my $item=$context->{modes}{$signal};
             $ACTIVE_ITEM=$item;
             $confirm_identity->($item,$signal,undef,($::LAST_ERROR||'Unable to restore preflight signal')."\n") if !_apply_signal($item);
@@ -4155,12 +4243,32 @@ sub _restore_preflight_context {
                     if $live->{tv_input} ne $item->{tv_input} || $live->{capability_profile}{hash} ne $item->{capability_profile}{hash};
             }
             if (!_mode_agrees($item->{picture_mode},$live->{picture_mode})) {
-                die($::LAST_ERROR||'Unable to restore picture mode')
+                # A refused write or an unreadable verification read may also
+                # be the TV having changed under the restore (P16).
+                $confirm_identity->($item,$signal,undef,($::LAST_ERROR||'Unable to restore picture mode')."\n")
                     if !_select_item_picture_mode(0,$item,'preflight-restore',$live);
-                $live=_preflight_read_mode($signal);
+                $live=eval { _preflight_read_mode($signal) };
+                $confirm_identity->($item,$signal,undef,$@||"No independent current-mode response\n") if ref($live) ne 'HASH';
                 die 'Original picture mode restoration was not independently verified'
                     if !_mode_agrees($item->{picture_mode},$live->{picture_mode});
             }
+        }
+        if ($keep_last) {
+            # Back to the output the last job left, not the original one.
+            my $last=_preflight_config_subset($now);
+            if ($switched && $now_signal ne '') {
+                $ACTIVE_ITEM=$context->{modes}{$now_signal}||$context->{original};
+                _preflight_wait_config($last,_api('POST','/api/config',$last,1,0));
+                my $pattern=_api('POST','/api/pattern',{name=>'gray50',signal_mode=>$now_signal},1,0);
+                die 'Unable to display neutral pattern after preflight restoration' if !_response_ok($pattern);
+            }
+            die 'Unable to persist completed context restoration' if !ref(_update_run(sub {
+                $_[0]{$flag}=JSON::PP::false;
+                $_[0]{mode_written_signals}=_journal_after_restore($_[0]{mode_written_signals},$kind);
+                $_[0]{$kind.'_context_restored_at'}=time();
+                $_[0]{$kind.'_restore_outcome'}='kept-last';
+            }));
+            return 1;
         }
         $ACTIVE_ITEM=$context->{original};
         _preflight_wait_config($context->{config},_api('POST','/api/config',$context->{config},1,0));
@@ -4223,12 +4331,15 @@ sub _restore_preflight_context {
 
 # Does the mode-write journal say this restoration kind must return $signal?
 # Entries from before phase marks (a plain true) count for both kinds.
+# 'keep-last' asks the opposite of the others: only a signal the queue check
+# changed and no job then selected is owed; without a journal nothing is.
 sub _journal_marks {
     my ($written,$signal,$kind)=@_;
-    return 1 if ref($written) ne 'HASH';
+    return $kind eq 'keep-last' ? 0 : 1 if ref($written) ne 'HASH';
     my $entry=$written->{$signal};
     return 0 if !$entry;
-    return 1 if ref($entry) ne 'HASH';
+    return $kind eq 'keep-last' ? 0 : 1 if ref($entry) ne 'HASH';
+    return ($entry->{preflight} && !$entry->{job}) ? 1 : 0 if $kind eq 'keep-last';
     return $kind eq 'preflight' ? ($entry->{preflight}?1:0) : (($entry->{preflight}||$entry->{job})?1:0);
 }
 
@@ -4368,7 +4479,10 @@ sub _preflight_queue {
         push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-context',message=>$error,
             ($raw ne $error ? (raw_exception=>$raw) : ())};
     } else {
-        for my $number (@pending) {
+        # Last job first: a real run keeps the TV where the check leaves it,
+        # so ending on the first job's signal and mode lets that job start
+        # without switching the output or writing the mode again.
+        for my $number (reverse @pending) {
             _refresh_control();last if $STOP_REQUESTED;
             my $item=$items->[$number];$ACTIVE_ITEM=$item;$item->{item_number}=$number;
             $result->{jobs}[$number]{status}='checking';
@@ -4407,7 +4521,7 @@ sub _preflight_queue {
                         message=>'This reviewed TV cannot independently read its picture mode. Checking scoped controls without changing modes; the actual job will select its signal and mode with accepted-write evidence. No guessed mode will be restored.'};
                     _preflight_progress($result,$number,'Limited mode readback: checking scoped controls without changing the viewing mode');
                 }
-                my $ready=_api('POST','/api/automation/readiness',{scope=>'job',items=>[$item]},0,0);
+                my $ready=_readiness_with_reconnect({scope=>'job',items=>[$item]});
                 # Only job-scoped checks belong to this job; equipment checks
                 # repeated by every job pass stay global and are listed once.
                 for my $check (@{$ready->{checks}||[]}) {$check->{item_number}=$number if ref($check) eq 'HASH' && defined($check->{item_number});_push_preflight_check($result,$check,\%preflight_seen);}
@@ -4424,6 +4538,10 @@ sub _preflight_queue {
                 $item->{preflight_contract}=PGAutomationPlan::contract($item);
                 $item->{preflight_contract}{queue_intent_hash}=$queue_intent;
                 $item->{preflight_contract}{limited}=JSON::PP::true if $context->{mode_readback_unavailable};
+                # This is the job's readiness evidence; job start does not
+                # ask again, so the item-started checkpoint records this pass.
+                $item->{readiness}={ready=>1,checked_at=>time(),scope=>'queue-preflight',
+                    checks=>[grep {ref($_) eq 'HASH'} @{$ready->{checks}||[]}],message=>$ready->{message}||''};
                 $result->{jobs}[$number]{status}=$context->{mode_readback_unavailable}?'checked-limited':'checked';$result->{checked_items}++;
                 $result->{progress_done}++;
                 _preflight_progress($result,$number,'Job '.($number+1).' readiness checks passed');
@@ -4438,16 +4556,28 @@ sub _preflight_queue {
             }
         }
     }
-    # A display-state write failure must not prevent restoration.
-    eval {_preflight_progress($result,undef,'Restoring original output and picture modes after queue checks');};
-    my $restored=_restore_preflight_context();
+    # A batch that passed keeps the TV where the check left it (on the first
+    # job's signal and mode) and restores the original modes when it finishes.
+    # A check-only run, a blocked queue and a Stop restore them now.
+    my $passed=!$STOP_REQUESTED && @pending && $result->{checked_items}==@pending
+        && !grep {!$_->{ok} && ($_->{level}||'error') eq 'error'} @{$result->{checks}};
+    my $restored;
+    if ($passed && !$run->{preflight_only}) {
+        $restored=_defer_preflight_restore();
+        $result->{restore_deferred}=1 if $restored;
+        push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-restore',message=>$::LAST_ERROR||'Unable to hand restoration over to the batch'} if !$restored;
+    } else {
+        # A display-state write failure must not prevent restoration.
+        eval {_preflight_progress($result,undef,'Restoring original output and picture modes after queue checks');};
+        $restored=_restore_preflight_context();
+        # Restoration abandoned because the TV changed under the check: the queue
+        # was not checked against the TV it will run on (P16).
+        push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-tv-changed',
+            message=>'The TV input or compatibility profile changed during the queue check. Check the queue again.'}
+            if $restored && (_run()->{preflight_restore_abandoned_at}||0) >= ($result->{started_at}||0);
+        push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-restore',message=>$::LAST_ERROR||'Preflight restoration failed'} if !$restored;
+    }
     $result->{progress_done}++ if $restored;
-    # Restoration abandoned because the TV changed under the check: the queue
-    # was not checked against the TV it will run on (P16).
-    push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-tv-changed',
-        message=>'The TV input or compatibility profile changed during the queue check. Check the queue again.'}
-        if $restored && (_run()->{preflight_restore_abandoned_at}||0) >= ($result->{started_at}||0);
-    push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-restore',message=>$::LAST_ERROR||'Preflight restoration failed'} if !$restored;
     push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-cancelled',message=>'Queue preflight stopped; unchecked jobs are not ready'} if $STOP_REQUESTED;
     my @errors=grep {!$_->{ok} && ($_->{level}||'error') eq 'error'} @{$result->{checks}};
     my @warnings=grep {!$_->{ok} && ($_->{level}||'') eq 'warning'} @{$result->{checks}};
@@ -4456,6 +4586,8 @@ sub _preflight_queue {
     $result->{message}=$result->{ready}
         ? (($result->{verification_state}||'') eq 'limited'
             ? 'All '.scalar(@pending).' pending jobs passed limited scoped checks. Signal and picture modes were not changed or independently verified.'
+            : $result->{restore_deferred}
+            ? 'All '.scalar(@pending).' pending jobs passed live preflight. The TV stays on the first job\'s signal and picture mode; the original modes are restored when the batch finishes.'
             : 'All '.scalar(@pending).' pending jobs passed live preflight. Original output and picture modes restored.')
             .(@warnings?' Review '.scalar(@warnings).' manual or limited-verification warnings.':'')
         : 'Queue blocked before calibration: '.$result->{checked_items}.'/'.scalar(@pending).' pending jobs checked successfully.';

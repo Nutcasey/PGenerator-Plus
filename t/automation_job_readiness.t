@@ -13,9 +13,15 @@ PGAutomation::ensure_store();
  do "$Bin/../usr/bin/pgen_automation_runner.pl";
  die $@ if $@;
 }
-my @calls;my $healthy=1;my $supported=1;
+# Job start trusts the whole-queue check (18 Sep 2026: on the G3 every job
+# start repeated the batch and job readiness passes the queue check had just
+# run, about 3.5 min per job). It selects the job's signal and picture mode,
+# freezes the live TV identity against the plan, carries the check's readiness
+# record and the hazard values the check observed, then resumes or applies.
+my @calls;
 my $state={items=>[{}, {}, {}],hazard_restore=>{autoPowerOff=>{value=>'original',category=>'power'}}};
 local *main::_log=sub {};
+local *main::_log_action=sub {};
 local *main::_update_item_snapshot=sub {1};
 local *main::_update_run=sub {$_[0]->($state);$state};
 local *main::_apply_signal=sub {push @calls,'signal:'.$_[0]{signal_format};1};
@@ -29,12 +35,9 @@ local *main::_api=sub {
   ok($payload->{include_current_input},'initial context uses a live input probe');
   return {status=>'ok',current_input=>'hdmi1',generation_profile=>{capability_profile_hash=>'a'x64,capability_profile_id=>'test',capability_library_valid=>1,capability_platform_profile_applied=>1}};
  }
- is($path,'/api/automation/readiness','job setup only calls the scoped readiness endpoint');
- push @calls,$payload->{scope};
- is(scalar @{$payload->{items}},1,'job checks cannot query later queue entries');
- return {ready=>0,message=>'Meter unavailable',checks=>[{ok=>0,level=>'error',message=>'Physical meter disconnected'}]} if !$healthy;
- return {ready=>0,message=>'Unsupported setting',checks=>[{ok=>0,level=>'error',message=>'contrast unsupported in this mode'}]} if $payload->{scope} eq 'job' && !$supported;
- return {ready=>1,checks=>[{ok=>0,level=>'warning',message=>'Manual control check',item_number=>0}],items=>[{name=>$payload->{items}[0]{name},settings=>{contrast=>85}}],hazard_restore=>{autoPowerOff=>{value=>'off',category=>'power'},screenSaver=>{value=>'original-saver',category=>'screenSaver'}}};
+ fail("job start must not call $path: its readiness came from the whole-queue check");
+ push @calls,$path;
+ return {status=>'error'};
 };
 local *main::_stage=sub {
  my ($number,$item,$stage,$callback)=@_;
@@ -44,25 +47,38 @@ local *main::_stage=sub {
 };
 local *main::_apply_and_verify=sub {push @calls,'apply';ok($_[3],'settings application does not switch signal/mode again');1};
 local *main::_sleep_controlled=sub {1};
+my @hazards=(
+ {key=>'autoPowerOff',value=>'off',category=>'power',controllable=>1},
+ {key=>'screenSaver',value=>'original-saver',category=>'screenSaver',controllable=>1},
+ {key=>'energySaving',value=>'auto',category=>'picture',controllable=>1},
+ {key=>'noSignalPowerOff',value=>'on',category=>'power',controllable=>0},
+);
 for my $signal (qw(sdr hdr10 dv)) {
  @calls=();
- my $item={name=>'Job',signal_format=>$signal,picture_mode=>'mode-'.$signal,settings=>{},checkpoints=>[{name=>'item-started',status=>'done',verified=>1}],hazard_restore=>{autoPowerOff=>{value=>'preserved'}}};
+ my $item={name=>'Job',signal_format=>$signal,picture_mode=>'mode-'.$signal,settings=>{},
+  checkpoints=>[{name=>'item-started',status=>'done',verified=>1}],
+  readiness=>{ready=>1,scope=>'queue-preflight',checks=>[{ok=>0,level=>'warning',message=>'Manual control check',item_number=>2}]},
+  hazards=>PGAutomation::clone(\@hazards),hazard_restore=>{autoPowerOff=>{value=>'preserved'}}};
  main::_run_item(2,$item);
- is_deeply(\@calls,['batch','signal:'.$signal,'freeze','mode:mode-'.$signal,'job','resume','apply'],'fresh health -> signal -> frozen context -> mode -> current-job controls -> resume -> apply');
- is($item->{checkpoints}[0]{name},'item-started','existing checkpoints preserved without skipping fresh readiness');
- is($item->{readiness}{checks}[0]{item_number},2,'job readiness uses global queue index in saved results');
+ is_deeply(\@calls,['signal:'.$signal,'freeze','mode:mode-'.$signal,'resume','apply'],'signal -> frozen context -> mode -> resume -> apply, with no readiness call');
+ is($item->{checkpoints}[0]{name},'item-started','existing checkpoints preserved');
+ is($item->{readiness}{scope},'queue-preflight','the whole-queue check is the job\'s readiness record');
+ is($item->{readiness}{checks}[0]{item_number},2,'and it keeps the global queue index');
  is($item->{hazard_restore}{autoPowerOff}{value},'preserved','item hazard restoration survives preparation');
 }
 is($state->{hazard_restore}{autoPowerOff}{value},'original','later job observations cannot replace original global hazard value');
-is($state->{hazard_restore}{screenSaver}{value},'original-saver','newly discovered hazards are saved before settings application');
-@calls=();$healthy=0;
-my $missing={name=>'Missing meter',signal_format=>'sdr',picture_mode=>'filmMaker',checkpoints=>[{name=>'item-started',status=>'done'}]};
-ok(!main::_run_item(2,$missing),'missing meter stops a resumed job');
-is_deeply(\@calls,['batch'],'no signal changes, TV settings queries or writes when meter missing');
-like($missing->{failure}{message},qr/Physical meter disconnected/,'job failure includes the actual readiness cause');
-@calls=();$healthy=1;$supported=0;
-my $bad={name=>'Unsupported control',signal_format=>'dv',picture_mode=>'dolbyVisionCinema'};
-ok(!main::_run_item(2,$bad),'unsupported current-mode control stops this job');
-is_deeply(\@calls,['batch','signal:dv','freeze','mode:dolbyVisionCinema','job'],'unsupported setting prevents application and baseline measurements');
-like($bad->{failure}{message},qr/contrast unsupported/,'mode-specific error is retained on the job');
+is($state->{hazard_restore}{screenSaver}{value},'original-saver','hazards the check observed are journalled before settings application');
+is($state->{hazard_restore}{screenSaver}{category},'screenSaver','with their category');
+ok(!exists($state->{hazard_restore}{energySaving}),'a picture-side hazard the recipe itself sets is not a restoration value');
+ok(!exists($state->{hazard_restore}{noSignalPowerOff}),'nor is a control the TV cannot set');
+ok($state->{hazard_restore_pending},'the run owes their restoration');
+
+# The identity read before the mode write is where a changed TV is caught.
+@calls=();
+my $moved={name=>'Moved',signal_format=>'sdr',picture_mode=>'filmMaker',settings=>{},
+ preflight_contract=>{tv_input=>'hdmi2',profile_hash=>'a'x64,intent_hash=>'x'}};
+ok(!main::_run_item(2,$moved),'a TV on a different input than the check saw stops the job');
+is_deeply(\@calls,['signal:sdr','freeze'],'before any mode write, resume or settings');
+like($moved->{failure}{message},qr/Queue preflight is stale/,'and the failure names the stale plan');
+is($moved->{failure}{stage},'job-readiness','at job readiness');
 done_testing();

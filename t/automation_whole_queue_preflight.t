@@ -11,7 +11,7 @@ require "$Bin/../usr/share/PGenerator/webui.pm";
 
 # Real runner, file store, signal switching, mode selection, plan and restoration
 # code. Only the external TV/renderer/readiness responses are simulated.
-my ($run_id,$run_file,$store,@calls,%config,%modes,$profile,$input,$bad_job,$virtual,$restore_fail,$cancel,$prepares,$mode_writes,$use_real_transport,$legacy,$read_error);
+my ($run_id,$run_file,$store,@calls,%config,%modes,$profile,$input,$bad_job,$virtual,$restore_fail,$cancel,$prepares,$mode_writes,$use_real_transport,$legacy,$read_error,@checked_ids);
 sub fixture {
     $store=tempdir(CLEANUP=>1);$ENV{PGEN_AUTOMATION_DIR}=$store;
     PGAutomation::ensure_store();
@@ -21,7 +21,7 @@ sub fixture {
      do "$Bin/../usr/bin/pgen_automation_runner.pl";die $@ if $@;}
     @calls=();%config=(signal_mode=>'sdr',eotf=>'0',primaries=>'0',colorimetry=>'2',color_format=>'0',rgb_quant_range=>'2',max_bpc=>'10',dv_map_mode=>'2');
     %modes=(sdr=>'expert1',hdr10=>'hdrCinema',dv=>'dolbyVisionCinemaBright');
-    $profile='a'x64;$input='hdmi1';$bad_job=0;$virtual=0;$restore_fail=0;$cancel=0;$prepares=0;$mode_writes=0;$use_real_transport=0;$legacy=0;$read_error=0;
+    $profile='a'x64;$input='hdmi1';$bad_job=0;$virtual=0;$restore_fail=0;$cancel=0;$prepares=0;$mode_writes=0;$use_real_transport=0;$legacy=0;$read_error=0;@checked_ids=();
     my @specs=(['sdr','filmMaker'],['hdr10','hdrFilmMaker'],['dv','dolbyVisionFilmMaker'],['sdr','cinema']);
     my @items=map {main::webui_automation_normalize_item({id=>'job-'.($_+1),name=>'Job '.($_+1),signal_format=>$specs[$_][0],picture_mode=>$specs[$_][1],settings=>{},settle_seconds=>0,stages=>{calibration=>1,apply_all=>0}})} 0..$#specs;
     PGAutomation::write_json_atomic($run_file,{id=>$run_id,token=>'test-token',status=>'running',items=>\@items,queue_revision=>0});
@@ -61,6 +61,7 @@ sub fake_api {
         die 'Only one mode may be queried in its actual signal context' if @{$payload->{items}}!=1;
         $prepares++;
         my $raw=$payload->{items}[0];
+        push @checked_ids,$raw->{id};
         die 'Readiness queried wrong signal context' if !$legacy && $raw->{signal_format} ne $config{signal_mode};
         die 'Readiness queried wrong picture context' if !$legacy && $raw->{picture_mode} ne $modes{$config{signal_mode}};
         if($cancel && $prepares==2) {PGAutomation::write_json_atomic(PGAutomation::run_dir($run_id).'/control.json',{request=>'stop'});select undef,undef,undef,.55;}
@@ -101,19 +102,35 @@ is_deeply([sort map {$_->{item_number}} grep {$_->{message} eq 'TruMotion: verif
 is(scalar(grep {$_->{message} eq 'Mode-specific controls checked'} @{$r->{checks}}),1,'an equipment check repeated by every job pass is listed once');
 ok(!grep({$_->{message} eq 'Mode-specific controls checked' && defined $_->{item_number}} @{$r->{checks}}),'and is not attributed to a job');
 is(scalar(grep {($_->{name}||'') eq 'disk-space'} @{$r->{checks}}),1,'an equipment check whose text varies between passes is still listed once');
-# requested_signal_mode is input-only; compare all saved generator fields.
-is_deeply({map {$_=>$config{$_}} keys %original},\%original,'original generator output is restored');
-is_deeply(\%modes,\%original_modes,'each signal family original picture mode is restored');
-ok($r->{restored},'restoration is independently verified');
+# A real run keeps the TV where the check left it and owes the originals to
+# its own end-of-run restoration (18 Sep 2026: restoring every signal only
+# for job 1 to switch away again cost ~5 min per batch on the G3).
+is_deeply(\@checked_ids,[qw(job-4 job-3 job-2 job-1)],'the last job is checked first so the check ends on job 1');
+is($config{signal_mode},'sdr','the check ends on the first job\'s signal');
+is($modes{sdr},'filmMaker','and on the first job\'s picture mode');
+is($modes{hdr10},'hdrFilmMaker','other signals stay as the check left them');
+ok($r->{restore_deferred},'restoration is handed to the batch');
+like($r->{message},qr/restored when the batch finishes/,'and the result says so');
+ok($r->{restored},'the restoration obligation is accounted for');
 my $saved=PGAutomation::read_json_file($run_file);
+ok(!$saved->{preflight_restore_required},'the check itself owes nothing');
+is($saved->{preflight_restore_outcome},'deferred-to-batch','and records why');
+ok($saved->{viewing_restore_required},'the batch owes the original viewing context from now on');
+is_deeply([sort keys %{$saved->{mode_written_signals}}],[qw(dv hdr10 sdr)],'the mode journal keeps the check\'s marks for that restoration');
 is($saved->{preflight_revision},0,'successful plan is tied to the exact queue revision');
 ok(!main::webui_automation_cleanup_required($saved),'successful preflight leaves no recovery obligation');
 for my $item (@{$saved->{items}}) {ok(PGAutomationPlan::matches($item,$item->{preflight_contract}),'frozen execution matches the verified plan');}
+for my $item (@{$saved->{items}}) {is($item->{readiness}{scope},'queue-preflight','each job carries the check as its readiness record');}
 is(scalar(grep {$_->[1]=~/reset|lut|autocal|meter\/read/} @calls),0,'preflight sends no reset, LUT upload or meter measurement');
 {
  local *main::_api=\&fake_api;local *main::_sleep_controlled=sub{1};local *main::_log=sub{};
  my $item=PGAutomation::clone($saved->{items}[0]);
+ @calls=();
  ok(eval {main::_prepare_job_context(0,$item);1},'fresh job checks accept the unchanged frozen plan') or diag $@;
+ is(scalar(grep {$_->[1] eq '/api/automation/readiness'} @calls),0,'job start asks for no readiness; the whole-queue check is trusted');
+ is(scalar(grep {$_->[0] eq 'POST' && $_->[1] eq '/api/config'} @calls),0,'job 1 needs no output switch after the check');
+ is(scalar(grep {$_->[1] eq '/api/lg/picture-settings/set'} @calls),0,'nor a picture-mode write');
+ is(scalar(grep {$_->[1] eq '/api/lg/picture-settings'} @calls),1,'one identity read guards the frozen plan');
  $input='hdmi2';
  ok(!eval {main::_prepare_job_context(0,$item);1},'changed input blocks the job before settings or calibration');
  like($@,qr/stale|input|compatibility/,'input change has an actionable error');
@@ -157,7 +174,9 @@ ok(!$r->{ready},'cancelled preflight cannot become ready');
 is($prepares,2,'Stop prevents checking the remaining jobs');
 ok($r->{restored},'Stop still runs reversible restoration');
 is_deeply(\%modes,\%original_modes,'cancel restores signal family modes');
+# A check-only run restores now; a failed restoration must block it.
 fixture();$restore_fail=1;
+PGAutomation::with_lock($run_file,sub {$_[0]{preflight_only}=JSON::PP::true;return $_[0];});
 $r=run_check();
 ok(!$r->{ready} && !$r->{restored},'failed restoration blocks an otherwise compatible queue');
 ok(PGAutomation::read_json_file($run_file)->{preflight_restore_required},'restoration journal obligation persists');
@@ -290,8 +309,9 @@ for my $limited (0,1) {
  is(PGAutomation::read_json_file($run_file)->{items}[0]{preflight_contract}{limited}?1:0,$limited,'P24: a limited preflight marks its plan contracts as limited');
  # Simulate the calibration workflow selecting its final signal/mode.
  $config{signal_mode}='dv';$config{max_bpc}='8';$modes{dv}='dolbyVisionFilmMaker';$modes{sdr}='filmMaker';
- # The workflow's mode writes are journalled against their signals (P14).
- PGAutomation::with_lock($run_file,sub {$_[0]{viewing_restore_required}=1;$_[0]{mode_written_signals}={dv=>JSON::PP::true,sdr=>JSON::PP::true};return $_[0];});
+ # The workflow's mode writes are journalled against their signals (P14),
+ # alongside the marks the queue check left there.
+ PGAutomation::with_lock($run_file,sub {$_[0]{viewing_restore_required}=1;$_[0]{mode_written_signals}{$_}{job}=JSON::PP::true for qw(dv sdr);return $_[0];});
  @calls=();
  local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
  ok(main::_restore_preflight_context('viewing'),'run-level original output restoration succeeds');
@@ -305,6 +325,53 @@ for my $limited (0,1) {
   is_deeply(\%modes,\%saved_modes,'readable per-signal original picture modes are restored');
  }
  is(scalar(grep {$_->[1]=~/reset|lut|autocal/} @calls),0,'viewing restoration never overwrites newly calibrated LUTs');
+}
+# A Stop in the window between the check and job 1 still returns the TV:
+# the deferred restoration is owed by the batch, not by the check.
+{
+ fixture();my %saved_config=%config;my %saved_modes=%modes;
+ ok(run_check()->{ready},'stop window: the queue was checked');
+ local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
+ main::_finish('stopped',{stage=>'queue-preflight',message=>'Automation stopped'});
+ my $stopped=PGAutomation::read_json_file($run_file);
+ is($stopped->{status},'stopped','stop window: the run stops cleanly');
+ is_deeply(\%modes,\%saved_modes,'stop window: every picture mode the check changed is put back');
+ is_deeply({map {$_=>$config{$_}} keys %saved_config},\%saved_config,'stop window: the generator output is put back');
+ ok(!$stopped->{viewing_restore_required},'stop window: nothing is left owed');
+}
+# keep-last: the last job's output and mode stay; what the batch still owes
+# are the signals the check switched and no job then selected.
+{
+ fixture();my %saved_modes=%modes;
+ PGAutomation::with_lock($run_file,sub {$_[0]{finish_policy}='keep-last';return $_[0];});
+ ok(run_check()->{ready},'keep-last: the queue was checked');
+ # Job 1 (SDR) ran and selected its mode; HDR10 and DV were only checked.
+ PGAutomation::with_lock($run_file,sub {$_[0]{mode_written_signals}{sdr}{job}=JSON::PP::true;return $_[0];});
+ local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
+ @calls=();
+ main::_finish('stopped',{stage=>'item',message=>'Automation stopped'});
+ my $kept=PGAutomation::read_json_file($run_file);
+ is($modes{sdr},'filmMaker','keep-last: the mode a job selected is kept');
+ is($modes{hdr10},$saved_modes{hdr10},'keep-last: a signal only the check changed goes back to its original mode');
+ is($modes{dv},$saved_modes{dv},'keep-last: and so does the other one');
+ is($config{signal_mode},'sdr','keep-last: the generator returns to the output the last job left');
+ is($kept->{viewing_restore_outcome},'kept-last','keep-last: the outcome says the last job\'s context was kept');
+ ok(!$kept->{viewing_restore_required},'keep-last: nothing is left owed');
+}
+{
+ # When every checked signal was later selected by a job there is nothing to
+ # return, and the TV is not touched at all.
+ fixture();
+ PGAutomation::with_lock($run_file,sub {$_[0]{finish_policy}='keep-last';return $_[0];});
+ ok(run_check()->{ready},'keep-last, all selected: the queue was checked');
+ PGAutomation::with_lock($run_file,sub {$_[0]{mode_written_signals}{$_}{job}=JSON::PP::true for qw(sdr hdr10 dv);return $_[0];});
+ local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
+ @calls=();
+ main::_finish('complete');
+ my $kept=PGAutomation::read_json_file($run_file);
+ is($kept->{status},'complete','keep-last, all selected: the batch completes');
+ is($kept->{viewing_restore_outcome},'kept-last','keep-last, all selected: the outcome is recorded');
+ is(scalar(grep {$_->[1]=~m{^/api/(?:config|lg/|pattern)} && !($_->[0] eq 'GET' && $_->[1] eq '/api/config')} @calls),0,'keep-last, all selected: no output switch, TV read or mode write at the end');
 }
 {
     # With job 1 already complete the batch pass numbers pending jobs from 0;
@@ -335,6 +402,9 @@ sub reuse_for {
     is($prepares,$walks,'no job is walked through its mode again');
     is($mode_writes,$writes,'and no picture mode is written');
     like(PGAutomation::read_json_file($run_file)->{preflight_result}{message},qr/earlier whole-queue check still applies/,'the reuse is visible in the run');
+    unlike(PGAutomation::read_json_file($run_file)->{preflight_result}{message},qr/rechecked/,'and no longer promises a per-job recheck');
+    PGAutomation::with_lock($run_file,sub {$_[0]{preflight_result}{completed_at}-=3*24*3600;return $_[0];});
+    ok(reuse_for($run_file),'a resume days later still reuses it: the queue and the TV identity decide, not the clock');
     $profile='b'x64;
     ok(!reuse_for($run_file),'a changed compatibility profile forces the full check');
     $profile='a'x64;$input='hdmi2';
