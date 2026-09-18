@@ -17,7 +17,8 @@ const PG_AUTOMATION_REFERENCE_MODES=[
  {id:'sdr-filmmaker',signal:'sdr',mode:'filmMaker',name:'SDR Filmmaker'},
  {id:'sdr-cinema',signal:'sdr',mode:'cinema',name:'SDR Cinema'}
 ];
-// Adapt the reference's P1 TV and P6 PGenerator+ columns, not its Calman/G1 columns.
+// Adapt the reference table's P1 (TV) and P6 (PGenerator+) columns, not its G1
+// columns, which describe external calibration software.
 // Build fresh objects for each insertion: editing a queued copy never edits the template.
 function pgAutomationReferenceItems(ids,context){
  const selected=new Set(ids),meter=context||{};
@@ -89,6 +90,10 @@ function pgAutomationStateBadge(status){
 function pgAutomationEscape(value){return String(value==null?'':value).replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
 function pgAutomationClone(value){return value==null?value:JSON.parse(JSON.stringify(value));}
 function pgAutomationEl(id){return document.getElementById('pgAutomation'+id);}
+// <dialog> is missing on older engines (Safari before 15.4). Fall back to the
+// open attribute so the editor still renders as a block instead of throwing.
+function pgAutomationOpenDialog(el){if(!el)return;if(typeof el.showModal==='function'){if(!el.open)el.showModal();}else{el.setAttribute('open','');el.open=true;}}
+function pgAutomationCloseDialog(el){if(!el)return;if(typeof el.close==='function'&&el.open)el.close();else{el.removeAttribute('open');el.open=false;}}
 // In-app confirmation. window.confirm() blocks the page and every browser
 // automation driving it; this dialog does not. Tests set
 // window.pgAutomationConfirmOverride to answer without a dialog.
@@ -153,7 +158,7 @@ function pgAutomationUpgradeReference(item){
  if(!/^(reference-settings-v[123]|colourstrue-six-modes-v1)$/.test(item.template_id||''))return;
  item.settings=item.settings||{};
  if(item.settings.truMotionMode==='off')delete item.settings.truMotionMode;
- if(item.signal_format==='hdr10'&&!Object.hasOwn(item.settings,'hdrDynamicToneMapping'))item.settings.hdrDynamicToneMapping='off';
+ if(item.signal_format==='hdr10'&&!Object.prototype.hasOwnProperty.call(item.settings,'hdrDynamicToneMapping'))item.settings.hdrDynamicToneMapping='off';
  item.manual_checks=['TruMotion: verify Off in the TV menu; this control is not available through the API.'];item.template_id='reference-settings-v3';
 }
 function pgAutomationSaveDraft(){
@@ -322,10 +327,10 @@ function pgAutomationModeEligibility(){
    const option=new Option(row.label,value);option.dataset.modeLabel=row.label;return option;
   });
   if(selected&&!options.some(option=>option.value===selected))options.unshift(new Option(selected,selected));
-  select.replaceChildren(...options);select.value=selected;
+  while(select.firstChild)select.removeChild(select.firstChild);options.forEach(option=>select.appendChild(option));select.value=selected;
  }
  Array.from(select.options).forEach(option=>{
-  option.dataset.modeLabel||=option.textContent;
+  option.dataset.modeLabel=option.dataset.modeLabel||option.textContent;
   const readingsOnly=!!contract&&!allowed.has(token(option.value));
   option.disabled=readingsOnly&&pgAutomationChecked('Cal');
   option.textContent=option.dataset.modeLabel+(readingsOnly?' — readings only':'');
@@ -452,7 +457,7 @@ async function pgAutomationResolveSettingsPlan(){
   pgAutomation.settingsPlan=result;
   const intended=Array.from(new Set([...pgAutomation.pinnedKeys,...Object.keys(pgAutomation.manualSettings||{})]));
   pgAutomation.manualSettings=Object.fromEntries(intended.filter(key=>result.manual?.[key]).map(key=>[key,{...result.manual[key],value:pgAutomation.supportedValues[key]}]));
-  pgAutomation.pinnedKeys=intended.filter(key=>Object.hasOwn(result.automatic||{},key));
+  pgAutomation.pinnedKeys=intended.filter(key=>Object.prototype.hasOwnProperty.call(result.automatic||{},key));
   const panel=result.panel_light||{};
   pgAutomationEl('PanelKey').value=panel.writable?panel.wire_key||'':'';
   pgAutomationRenderManualSettings();
@@ -507,7 +512,7 @@ async function pgAutomationLoadSupportedKeys(){
   pgAutomation.supportedKeys=Array.from(new Set([...(result.supported_picture_keys||[]),...Object.keys(values)])).filter(key=>candidates.includes(key));
   // Keep unread values available for deliberate manual selection, not as
   // automatic writes. A read limitation alone does not prove a write is unsafe.
-  const removed=Object.keys(prior).filter(key=>!Object.hasOwn(values,key));
+  const removed=Object.keys(prior).filter(key=>!Object.prototype.hasOwnProperty.call(values,key));
   const writable=Object.keys(values).filter(key=>!['blocked','not_applicable'].includes(result.setting_contracts?.[key]?.write_decision));
   pgAutomation.supportedKeys=Array.from(new Set([...candidates,...Object.keys(values)]));
   pgAutomation.supportedValues=Object.assign({},pgAutomation.supportedValues,prior,values);
@@ -641,7 +646,7 @@ function pgAutomationFillRecipe(recipe){
  if(!Array.from(pgAutomationEl('PictureMode').options).some(x=>x.value===mode))pgAutomationEl('PictureMode').add(new Option(mode,mode));
  set('PictureMode',mode);pgAutomationModeChanged();
  pgAutomation.supportedValues=pgAutomationClone(recipe.settings||{});pgAutomation.pinnedKeys=Object.keys(recipe.settings||{});
- Object.entries(pgAutomation.manualSettings).forEach(([key,entry])=>{if(!Object.hasOwn(pgAutomation.supportedValues,key))pgAutomation.supportedValues[key]=entry.value;});
+ Object.entries(pgAutomation.manualSettings).forEach(([key,entry])=>{if(!Object.prototype.hasOwnProperty.call(pgAutomation.supportedValues,key))pgAutomation.supportedValues[key]=entry.value;});
  if(Array.isArray(recipe.supported_picture_keys)&&recipe.supported_picture_keys.length){pgAutomation.supportedKeys=recipe.supported_picture_keys.filter(key=>pgAutomationSettingCandidates().includes(key));pgAutomation.supportedSignal=recipe.signal_format;pgAutomation.supportedPictureMode=mode;}
  pgAutomationRenderSettingsEditor();
  ['Pre','Cal','Post','ApplyAll'].forEach((id,index)=>{const key=['pre_readings','calibration','post_readings','apply_all'][index];check(id,pgAutomationStageEnabled(stages,key));});
@@ -677,11 +682,11 @@ function pgAutomationOpenEditor(target,recipe,index){
  pgAutomationEl('EditorSave').textContent=target==='recipe'?'Save Recipe':index==null?'Add to Queue':'Save Item';
  pgAutomationEl('SaveAsRecipeLabel').style.display=target==='recipe'?'none':'';
  pgAutomationEl('EditorError').textContent='';
- pgAutomationEl('Editor').showModal();
+ pgAutomationOpenDialog(pgAutomationEl('Editor'));
  pgAutomationEl('Editor').scrollTop=0;
  pgAutomationResolveSettingsPlan();
 }
-function pgAutomationCancelEditor(){pgAutomation.editorEpoch++;pgAutomationEl('Editor').close();pgAutomation.editingQueueIndex=null;}
+function pgAutomationCancelEditor(){pgAutomation.editorEpoch++;pgAutomationCloseDialog(pgAutomationEl('Editor'));pgAutomation.editingQueueIndex=null;}
 function pgAutomationNewRecipe(target){
  let measurement={};
  try{
@@ -844,7 +849,7 @@ function pgAutomationNameQueue(action){
  pgAutomationEl('QueueDialogTitle').textContent=action==='new'?'New queue':action==='copy'?'Copy queue':'Rename queue';
  pgAutomationEl('QueueName').value=action==='new'?'':(pgAutomation.queue.name||'TV calibration queue')+(action==='copy'?' (copy)':'');
  pgAutomationEl('QueueDialogHelp').textContent=action==='new'?'Create a saved queue, then add its jobs.':action==='copy'?'Save an independent copy of all '+pgAutomation.queue.items.length+' jobs. The original queue stays unchanged.':'Change the name of this queue. Its jobs stay together.';
- pgAutomationEl('QueueDialogError').textContent='';pgAutomationEl('QueueDialog').showModal();pgAutomationEl('QueueName').focus();
+ pgAutomationEl('QueueDialogError').textContent='';pgAutomationOpenDialog(pgAutomationEl('QueueDialog'));pgAutomationEl('QueueName').focus();
 }
 async function pgAutomationSubmitQueueName(){
  const button=pgAutomationEl('QueueDialogSave'),name=pgAutomationValue('QueueName','').trim();if(!name||button.disabled)return;
@@ -858,7 +863,7 @@ async function pgAutomationSubmitQueueName(){
   const result=await pgAutomationRequest('queues',{queue});
   pgAutomation.queue={...queue,id:result.queue.id};pgAutomation.selectedQueue='saved:'+result.queue.id;pgAutomation.loadedQueueSnapshot=JSON.stringify(pgAutomation.queue);pgAutomation.editingRunId='';pgAutomation.firstPending=0;
   pgAutomation.queues=pgAutomation.queues.filter(q=>q.id!==result.queue.id).concat([pgAutomationClone(pgAutomation.queue)]);
-  pgAutomationEl('QueueDialog').close();pgAutomationSaveDraft();pgAutomationRenderQueue();pgAutomationNotice('Queue saved');await pgAutomationRefresh();
+  pgAutomationCloseDialog(pgAutomationEl('QueueDialog'));pgAutomationSaveDraft();pgAutomationRenderQueue();pgAutomationNotice('Queue saved');await pgAutomationRefresh();
  }catch(e){pgAutomationEl('QueueDialogError').textContent=e.message;}
  finally{button.disabled=false;}
 }
@@ -980,7 +985,7 @@ function pgAutomationRenderActivity(){
   // browser connection failures here; repeating sampled worker status hides
   // the useful events and creates a second, misleading event timestamp.
   const message=pgAutomation.statusError||'';
-  const last=pgAutomation.logObserved.at(-1);
+  const last=pgAutomation.logObserved[pgAutomation.logObserved.length-1];
   if(message&&last?.message!==message)pgAutomation.logObserved.push({time:Date.now()/1000,level:pgAutomation.statusError?'error':'info',message,source:'Observed in browser'});
   pgAutomation.logObserved=pgAutomation.logObserved.slice(-100);
   entries.push(...pgAutomation.logObserved,...pgAutomation.logNotices);
@@ -1197,7 +1202,7 @@ function pgAutomationRenderProgress(){
   const items=run.items||[],index=run.active_item==null?-1:Number(run.active_item);total=items.length;
   completed=items.filter(item=>/^complete(?:-with-warnings)?$/.test(item.status)).length;
   title=(index>=0?'Job '+(index+1)+' of '+total+': '+(items[index]?.name||''):(run.queue_name||'Queue'))+' · '+run.status;
-  const latest=(pgAutomation.current?.activity?.entries||[]).filter(entry=>entry.source==='Runner').at(-1);
+  const runnerEntries=(pgAutomation.current?.activity?.entries||[]).filter(entry=>entry.source==='Runner');const latest=runnerEntries[runnerEntries.length-1];
   message=(run.status==='running'?run.operation_progress?.message:null)||(run.active_stage==='queue-preflight'?latest?.message:null)||run.worker_status?.message||latest?.message||run.worker_status?.current_name||pgAutomationStageLabel(run.active_stage);
   message=String(message).replace(/^Job \d+ \| /,'');
   if(run.active_stage==='queue-preflight'){
@@ -1621,20 +1626,20 @@ function pgAutomationGraphSnapshot(entry,item){
  for(const key of ['color_format','max_bpc','signal_range','pattern_signal_range','transport_signal_range','max_luma']){
   if(snap[key]==null)snap[key]=item[key]??cal[key];
  }
- snap.signal_range??=item.rgb_quant_range;
+ snap.signal_range=snap.signal_range??item.rgb_quant_range;
  // Sparse legacy recipes use the runner's documented defaults. Flag the
  // assumption rather than silently using today's unrelated output settings.
  snap.transport_context_inferred=!!saved.transport_context_inferred||
   signal!=='dv'&&(snap.color_format==null||snap.max_bpc==null||snap.signal_range==null);
- snap.color_format??='0';
- snap.max_bpc??=signal==='dv'?8:10;
- snap.signal_range??='2';
- snap.pattern_signal_range??=snap.signal_range;
- snap.transport_signal_range??=snap.signal_range;
+ snap.color_format=snap.color_format??'0';
+ snap.max_bpc=snap.max_bpc??(signal==='dv'?8:10);
+ snap.signal_range=snap.signal_range??'2';
+ snap.pattern_signal_range=snap.pattern_signal_range??snap.signal_range;
+ snap.transport_signal_range=snap.transport_signal_range??snap.signal_range;
  if(signal==='dv'){
   snap.dv_map_mode=saved.dv_map_mode||(calibration?'2':'1');
-  snap.color_format??='0';snap.max_bpc??=8;snap.signal_range??='2';
-  snap.transport_signal_range??='2';
+  snap.color_format=snap.color_format??'0';snap.max_bpc=snap.max_bpc??8;snap.signal_range=snap.signal_range??'2';
+  snap.transport_signal_range=snap.transport_signal_range??'2';
  }
  if(entry.key==='dv-profile'){
   // The actual profile worker saves measured xyY in steps, not readings.
@@ -1666,7 +1671,7 @@ function pgAutomationCalibrationSnapshots(data){
 }
 async function pgAutomationRenderJobGraphs(view,state){
  if(!state.data)return;
- if(pgAutomation.reportBusy){pgAutomation.pendingJobGraphs||={};pgAutomation.pendingJobGraphs[view]=state;return;}
+ if(pgAutomation.reportBusy){pgAutomation.pendingJobGraphs=pgAutomation.pendingJobGraphs||{};pgAutomation.pendingJobGraphs[view]=state;return;}
  const target=pgAutomationJobTarget(view)?.querySelector('[data-job-graphs]');if(!target)return;
  const data=state.data,item=data.item,entries=[];
  const observer=view==='calibration';

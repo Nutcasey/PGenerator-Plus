@@ -79,6 +79,8 @@
  #automationCard .auto-job-details>summary{font-size:.78rem;padding:3px 0;color:var(--text2)}
  #pgAutomationQueueDialog,#pgAutomationConfirmDialog{position:fixed;inset:0;margin:auto;color:var(--text);background:var(--surface-modal);border:1px solid var(--border);border-radius:12px;padding:22px;width:min(440px,calc(100vw - 32px));max-height:90vh;overflow:auto;box-sizing:border-box}
  #pgAutomationQueueDialog::backdrop,#pgAutomationConfirmDialog::backdrop{background:rgba(0,0,0,.7)}
+ /* Engines without <dialog> render it as an always-visible block; keep a closed dialog hidden. */
+ #pgAutomationEditor:not([open]),#pgAutomationQueueDialog:not([open]),#pgAutomationConfirmDialog:not([open]){display:none}
  #pgAutomationConfirmDialog p{margin:0 0 18px;line-height:1.45}
  #pgAutomationQueueDialog .field{margin:18px 0}
  #automationCard .auto-editor-section{padding:16px 0;border-bottom:1px solid var(--border)}
@@ -218,7 +220,7 @@
    <div class="field"><label for="pgAutomationQueueName">Queue name</label><input id="pgAutomationQueueName" maxlength="120" required></div>
    <p class="auto-muted" id="pgAutomationQueueDialogHelp"></p>
    <div id="pgAutomationQueueDialogError" role="alert" style="color:var(--red)"></div>
-   <div class="auto-actions"><button class="btn btn-sm btn-secondary" type="button" onclick="if(!pgAutomationEl('QueueDialogSave').disabled)pgAutomationEl('QueueDialog').close()">Cancel</button><button class="btn btn-sm btn-primary" id="pgAutomationQueueDialogSave" type="submit">Save queue</button></div>
+   <div class="auto-actions"><button class="btn btn-sm btn-secondary" type="button" onclick="if(!pgAutomationEl('QueueDialogSave').disabled)pgAutomationCloseDialog(pgAutomationEl('QueueDialog'))">Cancel</button><button class="btn btn-sm btn-primary" id="pgAutomationQueueDialogSave" type="submit">Save queue</button></div>
   </form>
  </dialog>
  <div id="pgAutomationTabRecipes" role="tabpanel" aria-labelledby="pgAutomationRecipesTab" style="display:none">

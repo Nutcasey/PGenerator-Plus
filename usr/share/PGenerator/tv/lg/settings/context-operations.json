@@ -45,7 +45,7 @@
       }}},
       "evidence": [
         {"source_id": "lg-control-clients-panel-protection", "strength": "library_implementation", "scope": "setTemporalPeakControl and setGlobalStressReduction {enable} on 2020+ OLEDs; three independent open-source LG control tools expose the same pair."},
-        {"source_id": "calman-forum-asbl-practice", "strength": "user_report", "scope": "Calibrators disable TPC/GSR (ASBL) for the duration of a session because static patterns are dimmed after roughly a minute; not a claim about any individual set."}
+        {"source_id": "calibrator-forum-asbl-practice", "strength": "user_report", "scope": "Calibrators disable TPC/GSR (ASBL) for the duration of a session because static patterns are dimmed after roughly a minute; not a claim about any individual set."}
       ]
     }
   ]

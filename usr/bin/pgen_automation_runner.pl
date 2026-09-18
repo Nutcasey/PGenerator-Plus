@@ -46,6 +46,23 @@ my $HTTP = HTTP::Tiny->new(
 );
 my $API_RETRY_INTERVAL = 5;
 my $API_RETRY_WINDOW = 300;
+# Stop and finish cleanup: every call is idempotent (worker stop/kill, meter
+# session stop, CAL_END, run/end, status, idle pattern), so a transport
+# failure gets a bounded retry instead of parking the batch as "cleanup
+# required" with the TV possibly still in calibration mode. Each call may
+# retry for up to $CLEANUP_RETRY_WINDOW, but one cleanup pass shares a single
+# $CLEANUP_RETRY_BUDGET so a daemon that is down outright cannot stretch a
+# stop to thirteen windows; once the budget is spent every call is a single
+# attempt, as before.
+my $CLEANUP_RETRY_WINDOW = 30;
+my $CLEANUP_RETRY_BUDGET = 120;
+my $CLEANUP_DEADLINE = 0;
+sub _cleanup_window {
+    $CLEANUP_DEADLINE = time() + $CLEANUP_RETRY_BUDGET if !$CLEANUP_DEADLINE;
+    my $left = $CLEANUP_DEADLINE - time();
+    return 0 if $left <= 0;
+    return $left < $CLEANUP_RETRY_WINDOW ? $left : $CLEANUP_RETRY_WINDOW;
+}
 # The heartbeat rewrites run.json (0.9 s to decode on the appliance) and
 # execution.json. At 2 s it kept the runner at 75 % CPU and slowed every
 # helper spawn; the daemon reaps by pid, not heartbeat age, and the UI warns
@@ -250,12 +267,12 @@ sub _heartbeat {
 }
 
 sub _sleep_controlled {
-    my ($seconds) = @_;
+    my ($seconds, $ignore_stop) = @_;
     $seconds = 0 if !defined($seconds) || $seconds < 0;
     my $deadline = time() + $seconds;
     while (time() < $deadline) {
         _refresh_control();
-        return 0 if $STOP_REQUESTED && !$RESTORING_PREFLIGHT;
+        return 0 if $STOP_REQUESTED && !$RESTORING_PREFLIGHT && !$ignore_stop;
         _heartbeat(0);
         select(undef, undef, undef, 0.5);
     }
@@ -515,7 +532,9 @@ sub _api {
         last if $remaining <= 0;
         my $delay = $remaining < $API_RETRY_INTERVAL ? $remaining : $API_RETRY_INTERVAL;
         _log("daemon request $method $path failed; retrying in ${API_RETRY_INTERVAL} seconds (attempt $attempt, ${retry_window}s window)");
-        last if !_sleep_controlled($delay);
+        # A cleanup call (allow_stop) keeps its retry window even though a stop
+        # is what started it; the plain sleep would return at once.
+        last if !_sleep_controlled($delay, $allow_stop);
     }
     $::LAST_ERROR_CODE = 'daemon-unreachable';
     return $last || { status => 'error', error_code => 'daemon-unreachable' };
@@ -1479,7 +1498,7 @@ sub _calibration_manages_setting {
     return 0 if ($item->{settings}{$key} || '') !~ /^(?:auto|native|wide|extended)$/i;
     # Only a committed 3D LUT owns the post-calibration gamut control. Never
     # waive baseline checks, failed uploads, or a later invalidated checkpoint.
-    # LG LUT integration: https://lightillusion.com/lg_manual.html (LUT Upload).
+    # (Per the LG LUT-upload guidance in the reference calibration documentation.)
     my ($commit) = reverse grep { ref($_) eq 'HASH' && ($_->{name} || '') eq 'volume-done' } @{$item->{checkpoints} || []};
     return $commit && ($commit->{status} || '') eq 'done' && ($commit->{verified} // '') eq '1' ? 1 : 0;
 }
@@ -1663,7 +1682,7 @@ sub _expected_calibration_gamut_state {
     # A completed, verified 1D stage after that reset can leave Auto reported
     # as Wide. This is a phase-specific state, not a global Auto/Wide alias.
     # In particular, isolated 1D workflows can retain normal gamut management:
-    # https://lightillusion.com/lg_manual.html (LUT Upload).
+    # (LG LUT-upload guidance in the reference calibration documentation.)
     # Use the latest records so failed/superseded stages cannot grant a waiver.
     my ($reset, $grey);
     for my $record (@{$item->{checkpoints} || []}) {
@@ -2861,13 +2880,23 @@ sub _close_calibration {
         last if $closed;
         _sleep_controlled(1) or last;
     }
+    # Close the live LG autocal session by the run id that run/begin returned,
+    # not the automation run id: the daemon ignores a mismatched id but still
+    # answers ok, which would leave the workflow flags set for the next tab.
+    # With no stored id (begin timed out after the daemon created the run, or
+    # run.json was momentarily unreadable) send an empty id so the daemon
+    # attributes the call by client_run_token instead of a queue id that can
+    # never match.
     my $end = _api('POST', '/api/lg/autocal/run/end', {
         status => 'complete',
         note => 'Automation calibration stage complete',
-        run_id => $RUN_ID,
+        run_id => _run()->{lg_run_id} || '',
         client_run_token => $TOKEN,
     });
-    my $end_ok = ref($end) eq 'HASH' && ($end->{status} || '') eq 'ok';
+    my $end_ok = ref($end) eq 'HASH' && ($end->{status} || '') eq 'ok'
+        && !$end->{stale_run_ignored};
+    $::LAST_ERROR = 'Another autocal session owns the live LG run, so this job could not close it'
+        if ref($end) eq 'HASH' && $end->{stale_run_ignored};
     return ($closed && $end_ok, $off, $status, $end);
 }
 
@@ -3344,6 +3373,7 @@ sub _stop_active {
     my ($parking) = @_;
     return if $STOP_HANDLED++;
     $STOPPING = 1;
+    $CLEANUP_DEADLINE = time() + $CLEANUP_RETRY_BUDGET;
     # Journal an unfinished cleanup before issuing device commands. A process
     # interruption or a failed result write must not expose an older successful
     # cleanup as proof that this attempt safely released the TV and meter.
@@ -3362,7 +3392,7 @@ sub _stop_active {
     # The stage pointer can be empty/stale during startup and handoffs.
     # Signal every worker first; never rely on that pointer for safety.
     foreach my $worker (sort keys %paths) {
-        _api('POST',$paths{$worker}.'/stop',{automation_graceful=>JSON::PP::true},1,0);
+        _api('POST',$paths{$worker}.'/stop',{automation_graceful=>JSON::PP::true},1,_cleanup_window());
     }
     my $deadline=time()+5;
     while (time()<$deadline && grep { _worker_process_alive($_) } keys %paths) {
@@ -3371,7 +3401,7 @@ sub _stop_active {
     foreach my $worker (sort keys %paths) {
         next if !_worker_process_alive($worker);
         _log_action("Force stopping $worker worker after cancellation grace period");
-        _api('POST',$paths{$worker}.'/kill',{automation_force=>JSON::PP::true},1,0);
+        _api('POST',$paths{$worker}.'/kill',{automation_force=>JSON::PP::true},1,_cleanup_window());
     }
     my @alive=grep { _worker_process_alive($_) } sort keys %paths;
     if ($ACTIVE_WORKER eq 'series' && $ACTIVE_ITEM && $ACTIVE_SERIES_KEY && $ACTIVE_SERIES_PHASE) {
@@ -3379,21 +3409,23 @@ sub _stop_active {
         _snapshot_series($ACTIVE_ITEM->{item_number} || 0, $ACTIVE_SERIES_PHASE, $ACTIVE_SERIES_KEY, $partial)
             if ref($partial) eq 'HASH';
     }
-    my $meter_session=_api('POST','/api/meter/session/stop',{},1,0);
+    my $meter_session=_api('POST','/api/meter/session/stop',{},1,_cleanup_window());
     my $item=ref($ACTIVE_ITEM) eq 'HASH' ? $ACTIVE_ITEM : {};
     _log_action('Workers cancelled; sending TV calibration exit even if no job is active');
     # Reconnect using the saved pairing when needed; never initiate pairing.
     _ensure_lg_connection();
+    # CAL_END is the call that releases the TV: it keeps its own idempotent
+    # window even after the worker stops have spent the shared budget.
     my $off=_api('POST','/api/lg/calibration-mode',{
         enabled=>JSON::PP::false,
         picture_mode=>_picture_mode($item),signal_mode=>_signal($item),
-    },1,0);
+    },1,_cleanup_window() || $CLEANUP_RETRY_WINDOW);
     my $saved=_run();
     my $end=$parking ? {} : _api('POST','/api/lg/autocal/run/end',{
         status=>'aborted',note=>'Automation stopped',
-        run_id=>$saved->{lg_run_id}||$RUN_ID,client_run_token=>$TOKEN,
-    },1,0);
-    my $status=_api('GET','/api/lg/status',undef,1,0);
+        run_id=>$saved->{lg_run_id}||'',client_run_token=>$TOKEN,
+    },1,_cleanup_window());
+    my $status=_api('GET','/api/lg/status',undef,1,_cleanup_window());
     my $exit_ack=_response_ok($off) || (_response_ok($end) && exists($end->{calibration_mode}) && !$end->{calibration_mode} && !$end->{stale_run_ignored});
     my $closed=$exit_ack && _response_ok($status)
         && !$status->{disconnected} && exists($status->{calibration_mode}) && !$status->{calibration_mode};
@@ -3428,14 +3460,14 @@ sub _stop_active {
     if (_run()->{preflight_restore_required} && !_restore_preflight_context()) {
         _log_action('Preflight restoration still requires cleanup: '.($::LAST_ERROR||'unconfirmed'));
     }
-    my $visible=_api('POST','/api/pattern',{name=>'gray50'},1,0);
+    my $visible=_api('POST','/api/pattern',{name=>'gray50'},1,_cleanup_window());
     _log_action('Stop idle pattern: '.($visible->{status}||'unavailable'));
     $STOPPING = 0;
 }
 
 sub _finish {
     my ($status, $failure) = @_;
-    my $meter = _api('POST', '/api/meter/session/stop', {}, 1, 0);
+    my $meter = _api('POST', '/api/meter/session/stop', {}, 1, _cleanup_window());
     my $run = _run();
     my $cleanup = $run->{stop_cleanup};
     # Do not switch signal while CAL_END is still unconfirmed. Keep the saved

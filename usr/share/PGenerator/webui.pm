@@ -14183,8 +14183,10 @@ sub webui_automation_readiness_data (@) {
      my $expected=$recipe_setting->{value};
      $recipe_settings{$key}=$expected;
      if(exists($settings->{$key})) {
-      my $actual_json=eval { JSON::PP->new->canonical(1)->encode($settings->{$key}) }||"";
-      my $expected_json=eval { JSON::PP->new->canonical(1)->encode($expected) }||"";
+      # allow_nonref: recipe values are plain scalars, which JSON::PP 2.27 on
+      # the appliance refuses to encode by default (4.x on CI accepts them).
+      my $actual_json=eval { JSON::PP->new->canonical(1)->allow_nonref(1)->encode($settings->{$key}) }//"";
+      my $expected_json=eval { JSON::PP->new->canonical(1)->allow_nonref(1)->encode($expected) }//"";
       my $matches=lg_setting_values_agree($recipe_contracts->{$key},$expected,$settings->{$key});
       $check->($matches,"item-$index-recipe-$key",
        $matches

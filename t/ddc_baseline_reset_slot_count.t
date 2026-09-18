@@ -105,4 +105,26 @@ my $merged_mask_sites = () = $src =~ /map\s*\{\s*0\s*\}\s*\(1\.\.ddc_slot_count\
 cmp_ok($merged_mask_sites, '>=', 3,
        'measurement-domain zero-masks still use the merged ddc_slot_count()');
 
+# --- the upload boundary and every white-balance array site use the base ladder ---
+# set_picture_values sends whatever arrays it is handed straight to the daemon,
+# so the cap must hold at that boundary whatever a caller's in-memory length is.
+{
+  my ($body) = $src =~ /(sub set_picture_values\b.*?\n\})/s;
+  ok($body, 'found set_picture_values');
+  $body //= '';
+  my ($settings_block) = $body =~ /(my \$settings=\{.*?\n\s*\};\n[^\n]*adjustingLuminance[^\n]*\n)/s;
+  ok($settings_block, 'found the $settings upload block in set_picture_values');
+  $settings_block //= '';
+  like($settings_block,
+       qr/numeric_array\(\$arrays->\{\$_\},ddc_baseline_slot_count\(\)\)[^\n]*\n\s*qw\(whiteBalanceRed whiteBalanceGreen whiteBalanceBlue\)/,
+       'set_picture_values uploads the RGB white-balance arrays sized from ddc_baseline_slot_count()');
+  like($settings_block,
+       qr/\$settings->\{"adjustingLuminance"\}=numeric_array\(\$arrays->\{"adjustingLuminance"\},ddc_baseline_slot_count\(\)\)/,
+       'set_picture_values uploads adjustingLuminance sized from ddc_baseline_slot_count()');
+  unlike($settings_block, qr/ddc_slot_count\(\)/, 'the upload block never uses the merged ddc_slot_count()');
+  my $merged_wb_sites = () = $src =~ /numeric_array\([^\n]*?(?:whiteBalance(?:Red|Green|Blue)|adjustingLuminance)[^\n]*?,ddc_slot_count\(\)\)/g;
+  is($merged_wb_sites, 0,
+     'no whiteBalance/adjustingLuminance array is sized from the merged ddc_slot_count()');
+}
+
 done_testing();

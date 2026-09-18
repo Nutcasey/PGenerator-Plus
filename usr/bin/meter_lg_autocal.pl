@@ -12954,15 +12954,20 @@ sub lg_autocal_26_queue_sdr_1d_dpg_upload {
 sub set_picture_values {
  my ($picture,$arrays,$target,$picture_mode,$calibration_mode_active,$state,$verify_ddc_upload,$keep_calibration_mode)=@_;
  $keep_calibration_mode=1 if(!defined($keep_calibration_mode));
+ # Upload the base DDC ladder only (20 on hdr20, 26 on sdr26): the webOS schema
+ # caps these arrays at 26 items and the helper reads them by physical slot
+ # position. The Dark-Detail-merged ddc_slot_count() (31/32) is a reading
+ # ladder; an array that long is refused as "array has too many items" before
+ # the first measurement. Positions past the base ladder are dropped here,
+ # exactly as the helper always did (FAB-038 covers the filler mapping).
 	my $settings={
 		  whiteBalanceMethod => "22",
 		  whiteBalanceIre => $target->{"write_ire"}||$target->{"array_ire"}||$target->{"ire"},
 		  ddc_layout => $LG_AUTOCAL_DDC_LAYOUT,
-		  whiteBalanceRed => $arrays->{"whiteBalanceRed"},
-		  whiteBalanceGreen => $arrays->{"whiteBalanceGreen"},
-		  whiteBalanceBlue => $arrays->{"whiteBalanceBlue"},
+		  (map { ($_ => (ref($arrays->{$_}) eq "ARRAY" ? numeric_array($arrays->{$_},ddc_baseline_slot_count()) : $arrays->{$_})) }
+		   qw(whiteBalanceRed whiteBalanceGreen whiteBalanceBlue)),
 		 };
-	 $settings->{"adjustingLuminance"}=$arrays->{"adjustingLuminance"} if(ref($arrays->{"adjustingLuminance"}) eq "ARRAY");
+	 $settings->{"adjustingLuminance"}=numeric_array($arrays->{"adjustingLuminance"},ddc_baseline_slot_count()) if(ref($arrays->{"adjustingLuminance"}) eq "ARRAY");
 	 my $attempts=4;
 	 my $last_message="LG white-balance write failed";
 	 for(my $attempt=1;$attempt<=$attempts;$attempt++) {
@@ -12998,20 +13003,20 @@ sub set_picture_values {
 	  set_state_calibration_mode($state,$response->{"calibration_mode"} ? 1 : 0,$response->{"calibration_picture_mode"}||$picture_mode||($picture->{"pictureMode"}||"")) if(exists($response->{"calibration_mode"}));
 	  my $pic=$response->{"picture_settings"};
 		  if(ref($pic) eq "HASH") {
-		   $arrays->{"whiteBalanceRed"}=numeric_array($pic->{"whiteBalanceRed"},ddc_slot_count());
-		   $arrays->{"whiteBalanceGreen"}=numeric_array($pic->{"whiteBalanceGreen"},ddc_slot_count());
-		   $arrays->{"whiteBalanceBlue"}=numeric_array($pic->{"whiteBalanceBlue"},ddc_slot_count());
-		   $arrays->{"adjustingLuminance"}=numeric_array($pic->{"adjustingLuminance"},ddc_slot_count());
+		   $arrays->{"whiteBalanceRed"}=numeric_array($pic->{"whiteBalanceRed"},ddc_baseline_slot_count());
+		   $arrays->{"whiteBalanceGreen"}=numeric_array($pic->{"whiteBalanceGreen"},ddc_baseline_slot_count());
+		   $arrays->{"whiteBalanceBlue"}=numeric_array($pic->{"whiteBalanceBlue"},ddc_baseline_slot_count());
+		   $arrays->{"adjustingLuminance"}=numeric_array($pic->{"adjustingLuminance"},ddc_baseline_slot_count());
 		   return ($pic,undef);
 		  }
 	  my $next_picture=clone_picture($picture);
 	  $next_picture->{"pictureMode"}=$picture_mode if(defined($picture_mode) && $picture_mode ne "");
 	  $next_picture->{"whiteBalanceMethod"}=$settings->{"whiteBalanceMethod"};
 	  $next_picture->{"whiteBalanceIre"}=$settings->{"whiteBalanceIre"};
-		  $next_picture->{"whiteBalanceRed"}=numeric_array($arrays->{"whiteBalanceRed"},ddc_slot_count());
-		  $next_picture->{"whiteBalanceGreen"}=numeric_array($arrays->{"whiteBalanceGreen"},ddc_slot_count());
-		  $next_picture->{"whiteBalanceBlue"}=numeric_array($arrays->{"whiteBalanceBlue"},ddc_slot_count());
-		  $next_picture->{"adjustingLuminance"}=numeric_array($arrays->{"adjustingLuminance"},ddc_slot_count());
+		  $next_picture->{"whiteBalanceRed"}=numeric_array($arrays->{"whiteBalanceRed"},ddc_baseline_slot_count());
+		  $next_picture->{"whiteBalanceGreen"}=numeric_array($arrays->{"whiteBalanceGreen"},ddc_baseline_slot_count());
+		  $next_picture->{"whiteBalanceBlue"}=numeric_array($arrays->{"whiteBalanceBlue"},ddc_baseline_slot_count());
+		  $next_picture->{"adjustingLuminance"}=numeric_array($arrays->{"adjustingLuminance"},ddc_baseline_slot_count());
 		  return ($next_picture,undef);
 	 }
 	 $last_message=(ref($response) eq "HASH") ? ($response->{"message"}||"LG white-balance write failed") : "LG white-balance write failed";
@@ -22341,10 +22346,10 @@ eval {
  my $picture_mode=$config->{"picture_mode"}||$picture->{"pictureMode"}||"";
  $active_picture_mode_for_cleanup=$picture_mode;
 	 my $arrays={
-			  whiteBalanceRed => numeric_array($picture->{"whiteBalanceRed"},ddc_slot_count()),
-			  whiteBalanceGreen => numeric_array($picture->{"whiteBalanceGreen"},ddc_slot_count()),
-			  whiteBalanceBlue => numeric_array($picture->{"whiteBalanceBlue"},ddc_slot_count()),
-			  adjustingLuminance => numeric_array($picture->{"adjustingLuminance"},ddc_slot_count()),
+			  whiteBalanceRed => numeric_array($picture->{"whiteBalanceRed"},ddc_baseline_slot_count()),
+			  whiteBalanceGreen => numeric_array($picture->{"whiteBalanceGreen"},ddc_baseline_slot_count()),
+			  whiteBalanceBlue => numeric_array($picture->{"whiteBalanceBlue"},ddc_baseline_slot_count()),
+			  adjustingLuminance => numeric_array($picture->{"adjustingLuminance"},ddc_baseline_slot_count()),
 			 };
 		 my @calibrated_ddc_slots=map { 0 } (1..ddc_slot_count());
 			 if(autocal_config_is_post_series_revert($config)) {

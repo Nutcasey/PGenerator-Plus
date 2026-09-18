@@ -40,9 +40,9 @@
       "retrieved_at": "2026-09-16",
       "use": "com.webos.service.oledepl setTemporalPeakControl / setGlobalStressReduction with an enable boolean on 2020 and newer OLEDs. Write-only; no readback exists."
     },
-    "calman-forum-asbl-practice": {
-      "title": "Calibrator practice: disable ASBL (TPC/GSR) during LG OLED measurement",
-      "url": "local:ColoursTrue/References/Calman/Forum",
+    "calibrator-forum-asbl-practice": {
+      "title": "Calibrator forum practice: disable ASBL (TPC/GSR) during LG OLED measurement",
+      "url": "local:ColoursTrue/References (calibration-software user forum thread, not in the tree)",
       "license": "user-provided",
       "retrieved_at": "2026-09-16",
       "use": "Static patterns dim after about 60 s with panel protection on; calibrators switch TPC and GSR off for the session and back on afterwards. Pattern insertion is the alternative mitigation."
@@ -54,24 +54,24 @@
       "retrieved_at": "2026-09-15",
       "use": "Official public settings request shapes."
     },
-    "portrait-lg-autocal": {
-      "title": "Calibrating LG TVs with Calman",
-      "url": "https://www.portrait.com/resource-center/calibrating-lg-tvs-with-calman/",
+    "calibration-software-lg-autocal-support": {
+      "title": "Third-party calibration software: LG AutoCal support inventory",
+      "url": "local:docs/Reference (third-party calibration-software LG AutoCal support article, gitignored snapshot)",
       "license": "documentation",
       "published_at": "2025-11-10",
       "retrieved_at": "2026-09-15",
       "use": "Model-year and processor-family AutoCal support inventory."
     },
-    "portrait-lg-2023-guide": {
-      "title": "Calman 2023 LG OLED calibration guide",
-      "url": "https://www.portrait.com/resource-center/lg-2023-oled-calibration-and-user-settings-no-matter-what/",
+    "calibration-software-lg-2023-guide": {
+      "title": "Third-party calibration software: 2023 LG OLED calibration guide",
+      "url": "local:docs/Reference (third-party calibration-software 2023 LG OLED guide, gitignored snapshot)",
       "license": "documentation",
       "retrieved_at": "2026-09-15",
       "use": "Signal-specific calibration preparation values."
     },
-    "portrait-lg-2024-guide": {
-      "title": "2024 LG AutoCal guide",
-      "url": "https://www.portrait.com/resource-center/2024-lg-autocal-guide/",
+    "calibration-software-lg-2024-guide": {
+      "title": "Third-party calibration software: 2024 LG AutoCal guide",
+      "url": "local:docs/Reference (third-party calibration-software 2024 LG AutoCal guide, gitignored snapshot)",
       "license": "documentation",
       "retrieved_at": "2026-09-15",
       "use": "Signal-specific calibration preparation values and TV setup guidance."
