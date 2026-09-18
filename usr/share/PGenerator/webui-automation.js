@@ -1272,10 +1272,26 @@ function pgAutomationRenderReadiness(result,run){
  // checks; list each distinct (job, outcome, message) once. The outcome is
  // part of the key so a passing duplicate can never hide a failing check.
  const seen=new Set();
- const checks=[...(result.checks||[])].filter(check=>{const key=String(check.item_number??'')+'|'+(check.ok?1:0)+'|'+String(check.level||'')+'|'+String(check.message||check.name||'');if(seen.has(key))return false;seen.add(key);return true;}).sort((a,b)=>Number(a.ok)-Number(b.ok));
- const problems=checks.filter(check=>!check.ok);
- box.innerHTML='<p class="auto-muted">'+pgAutomationEscape(result.message||'Readiness')+' · '+checks.length+' checks. See the activity log for details.</p>'
-  +(problems.length?'<ul class="auto-readiness-problems">'+problems.map(check=>'<li data-level="'+(check.level==='warning'?'warning':'error')+'">'+pgAutomationEscape(pgAutomationIssueText(check))+'</li>').join('')+'</ul>':'');
+ const checks=[...(result.checks||[])].filter(check=>{const key=String(check.item_number??'')+'|'+(check.ok?1:0)+'|'+String(check.level||'')+'|'+String(check.message||check.name||'');if(seen.has(key))return false;seen.add(key);return true;});
+ // Grouped by job in queue order, equipment first, behind one disclosure:
+ // the runner checks the last job first, so the raw order reads backwards,
+ // and six jobs' manual notices as one flat list buried the verdict.
+ const esc=pgAutomationEscape,names=result.jobs||run?.items||pgAutomation.queue?.items||[];
+ const groups=new Map();
+ for(const check of checks){const key=check.item_number==null||check.item_number===''?-1:Number(check.item_number);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(check);}
+ const problems=checks.filter(check=>!check.ok),errors=problems.filter(check=>check.level!=='warning').length,warnings=problems.length-errors;
+ const summary=[checks.length+' checks',errors?errors+' failed':null,warnings?warnings+' to verify manually':null].filter(Boolean).join(' · ');
+ const line=check=>'<li data-level="'+(check.level==='warning'?'warning':'error')+'">'+esc(pgAutomationIssueText({...check,item_number:null,signal_format:check.signal_format||(check.item_number!=null?(run?.items||[])[Number(check.item_number)]?.signal_format:'')}))+'</li>';
+ const group=key=>{
+  const list=groups.get(key),bad=list.filter(check=>!check.ok),good=list.length-bad.length;
+  const title=key<0?'Equipment and queue':'Job '+(key+1)+(names[key]?.name?' · '+names[key].name:'');
+  return '<section class="auto-readiness-job"><h5>'+esc(title)+' <span class="auto-muted">'+(bad.length?bad.length+' to check':'passed')+(good&&bad.length?' · '+good+' passed':'')+'</span></h5>'
+   +(bad.length?'<ul class="auto-readiness-problems">'+bad.map(line).join('')+'</ul>':'')+'</section>';
+ };
+ box.innerHTML='<p class="auto-muted">'+esc(result.message||'Readiness')+'</p>'
+  +(problems.length
+   ?'<details class="auto-readiness-details"'+(errors?' open':'')+'><summary>'+esc(summary)+'</summary>'+[...groups.keys()].sort((a,b)=>a-b).map(group).join('')+'</details>'
+   :'<p class="auto-muted">'+checks.length+' checks passed.</p>');
  // Readiness is a saved result. Rendering it must never replace the live
  // activity payload supplied by runs/current (including runner events).
  if(result.scope!=='queue')box.scrollIntoView({block:'nearest'});

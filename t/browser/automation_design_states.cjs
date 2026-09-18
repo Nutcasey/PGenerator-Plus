@@ -12,6 +12,32 @@ const root=path.resolve(__dirname,'../../usr/share/PGenerator');
   });
   assert.equal(await page.$$eval('#pgAutomationReadiness li',els=>els.length),2,'failed checks are directly visible, successful ones remain in the log');
   assert.match(await page.$eval('#pgAutomationReadiness',e=>e.textContent),/Pair and connect/);
+  assert.equal(await page.$eval('#pgAutomationReadiness details',e=>e.open),true,'a failed check opens the list');
+  // 18 Sep 2026: a six-job check listed 42 manual notices as one flat list in
+  // the order the runner visited the jobs (last first). Group them by job in
+  // queue order, equipment first, and keep warnings-only results folded.
+  await page.evaluate(()=>{
+   pgAutomation.queue={name:'Reference settings',items:[{name:'DV Filmmaker',signal_format:'dv'},{name:'HDR Filmmaker',signal_format:'hdr10'},{name:'SDR Filmmaker',signal_format:'sdr'}]};
+   pgAutomationRenderReadiness({scope:'queue',ready:true,message:'All 3 pending jobs passed live preflight.',jobs:[{name:'DV Filmmaker'},{name:'HDR Filmmaker'},{name:'SDR Filmmaker'}],checks:[
+    {ok:true,message:'Meter detected'},
+    {ok:false,level:'warning',item_number:2,message:'TruMotion: verify Off in the TV menu'},
+    {ok:false,level:'warning',item_number:2,message:'LG did not expose screenSaver through the control API'},
+    {ok:true,item_number:2,message:'Picture mode filmMaker matches sdr'},
+    {ok:false,level:'warning',item_number:1,message:'TruMotion: verify Off in the TV menu'},
+    {ok:false,level:'warning',item_number:0,message:'TruMotion: verify Off in the TV menu'},
+    {ok:false,level:'warning',item_number:'0',message:'TruMotion: verify Off in the TV menu'}]},
+    {id:'r1',queue_name:'Reference settings',items:[{name:'DV Filmmaker'},{name:'HDR Filmmaker'},{name:'SDR Filmmaker'}]});
+  });
+  assert.equal(await page.$eval('#pgAutomationReadiness details',e=>e.open),false,'warnings only: the list stays folded behind the verdict');
+  assert.match(await page.$eval('#pgAutomationReadiness summary',e=>e.textContent),/6 checks · 4 to verify manually/,'the summary counts distinct checks and what needs a look');
+  assert.deepEqual(await page.$$eval('#pgAutomationReadiness h5',els=>els.map(e=>e.textContent.replace(/\s+/g,' ').trim())),
+   ['Equipment and queue passed','Job 1 · DV Filmmaker 1 to check','Job 2 · HDR Filmmaker 1 to check','Job 3 · SDR Filmmaker 2 to check · 1 passed'],
+   'checks are grouped per job in queue order, matching the job list, however the runner visited them');
+  assert.equal(await page.$$eval('#pgAutomationReadiness li',els=>els.filter(e=>/^Job \d+:/.test(e.textContent)).length),0,'a job heading replaces the per-line job prefix');
+  assert.equal(await page.$$eval('#pgAutomationReadiness li',els=>els.length),4,'a job reported twice (batch and job pass) is listed once');
+  await page.evaluate(()=>{
+   pgAutomationRenderReadiness({ready:false,message:'Resolve these checks',checks:[{ok:false,level:'error',message:'Pair and connect the LG TV before starting automation'},{ok:false,level:'warning',message:'Verify TruMotion is off in the TV menu'},{ok:true,message:'Meter connected'}]});
+  });
   for(const theme of ['dark','light']){
    await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
    assert.notEqual(await page.$eval('#pgAutomationReadiness [data-level=error]',e=>getComputedStyle(e).color),await page.$eval('#pgAutomationReadiness [data-level=warning]',e=>getComputedStyle(e).color),theme+': failures and warnings differ');
