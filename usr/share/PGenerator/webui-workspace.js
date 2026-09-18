@@ -15060,8 +15060,7 @@ function drawRGBChart(gs,allSteps,readingMap){
  // is the full input tuple (formula, grey-ref mode, black level, gamut,
  // readings generation, white ref, entry count), not the formula alone —
  // see meterRgbBalancePlotKey.
- ctx.canvas._meterRgbBalancePlot={key:meterRgbBalancePlotKey(greyMode,blackLevel,meterReadingsGenerationValue(),
-   effectiveWhiteRGB.X+'/'+effectiveWhiteRGB.Y+'/'+effectiveWhiteRGB.Z,Object.keys(balMap).length),balanceByIre:balMap};
+ ctx.canvas._meterRgbBalancePlot={key:meterRgbBalancePlotIdentity(gs,greyMode,blackLevel,effectiveWhiteRGB),balanceByIre:balMap};
  // Auto-scale Y axis based on actual data, but keep the chart centered on 100
  // with the conventional +/-5% minimum span in every RGB balance mode.
  const allVals=Object.values(balMap).filter(b=>b&&!b.noChroma).flatMap(b=>[b.R,b.G,b.B]);
@@ -15093,8 +15092,8 @@ function drawRGBChart(gs,allSteps,readingMap){
  // noise' before the operator has to hover. Pure annotation — plotted values
  // and the axis scale are untouched; clipping keeps it inside the plot under
  // a box-zoom.
- const noiseFloor=meterRgbBalanceNoiseFloor();
- if(noiseFloor>0&&meterRgbBalanceFormula()==='perceptual'){
+ const noiseFloor=meterRgbBalanceActiveNoiseFloor();
+ if(noiseFloor>0){
   // chart.toX/toY take NORMALIZED [0,1] view coordinates (same convention as
   // refY and the rPts/gPts/bPts points above), not data values — convert.
   const toNorm=v=>(v-yMin)/(yMax-yMin);
@@ -15106,8 +15105,11 @@ function drawRGBChart(gs,allSteps,readingMap){
    if(!bal||bal.noChroma) return;
    // Gain must come from the READING (the analysis_ire/patch stamps live on
    // readings), same object rgbBalance and the hover tooltip divide by — a
-   // step definition can carry a different slot IRE and skew the envelope.
-   const gain=meterPerceptualRgbBalanceGain(readingMap&&readingMap[step.ire]?readingMap[step.ire]:step);
+   // step definition can carry a different slot IRE and skew the envelope,
+   // so a point with no reading is skipped, not graded against the step.
+   const rdZone=readingMap&&readingMap[step.ire];
+   if(!rdZone) return;
+   const gain=meterPerceptualRgbBalanceGain(rdZone);
    const dev=noiseFloor*gain;
    zone.push({x:meterGreyCategoryChartX(xSteps,idx),hi:toNorm(100+dev),lo:toNorm(100-dev)});
   });
@@ -15135,6 +15137,7 @@ function drawRGBChart(gs,allSteps,readingMap){
    const zText='±'+noiseFloor+' L* noise';
    ctx.font='bold 9px sans-serif';
    const zW=ctx.measureText(zText).width;
+   // Clamp keeps the whole pill inside the plot rect on both axes.
    const zx=Math.min(chart.pad.l+chart.w-zW-6,chart.toX(zp.x)+6);
    const zy=Math.max(chart.pad.t+10,Math.min(chart.pad.t+chart.h-6,chart.toY(zp.hi)-6));
    ctx.fillStyle='rgba(160,190,255,0.9)';
@@ -15166,9 +15169,7 @@ function drawRGBChart(gs,allSteps,readingMap){
    // but outside the view are clamped by the clip and must be flagged too.
    const vLo=chart.view.y0, vHi=chart.view.y1;
    const flags=norm.map(n=>meterRgbBalanceOffScaleDir(n,vLo,vHi));
-   // idx is the position inside rPts/gPts/bPts (they skip noChroma steps), NOT
-   // the xSteps index.
-   if(flags.some(f=>f!==0)) offScale.push({x:x,idx:rPts.length-1,flags:flags,norm:norm,vLo:vLo,vHi:vHi,bal:bal});
+   if(flags.some(f=>f!==0)) offScale.push({x:x,flags:flags,norm:norm,vLo:vLo,vHi:vHi});
   }
  });
  if(rPts.length>1){drawLine(ctx,chart,rPts,'#f44',2);drawLine(ctx,chart,gPts,'#4caf50',2);drawLine(ctx,chart,bPts,'#42a5f5',2);}
@@ -18426,8 +18427,7 @@ function chartRegisterInteraction(){
    if(visibleX<0||visibleX>1) return;
    const cx=pad.l+xInset+visibleX*dw;
    const plotted=(cid==='chartRGB'&&canvas._meterRgbBalancePlot
-    &&canvas._meterRgbBalancePlot.key===meterRgbBalancePlotKey(greyMode,rgbBlackLevel,meterReadingsGenerationValue(),
-     effectiveWhiteRGB.X+'/'+effectiveWhiteRGB.Y+'/'+effectiveWhiteRGB.Z,gs.length))
+    &&canvas._meterRgbBalancePlot.key===meterRgbBalancePlotIdentity(gs,greyMode,rgbBlackLevel,effectiveWhiteRGB))
     ? canvas._meterRgbBalancePlot.balanceByIre[rd.ire]
     : null;
    const bal=plotted||(effectiveWhiteRGB?rgbBalance(rd,effectiveWhiteRGB,greyMode,rgbBlackLevel):{R:100,G:100,B:100,noChroma:true});
@@ -18481,7 +18481,8 @@ function chartHandleHover(e,canvasId){
  if(targetY!=='--') html+=' &nbsp; <span>Target Y: '+targetY+' cd/m\u00B2</span>';
  if(rd.cct) html+='<br>CCT: '+rd.cct+'K';
  html+='<br>x: '+(rd.x!=null?rd.x.toFixed(4):'--')+' &nbsp;y: '+(rd.y!=null?rd.y.toFixed(4):'--');
- html+='<br>R: '+bal.R.toFixed(3)+' &nbsp;G: '+bal.G.toFixed(3)+' &nbsp;B: '+bal.B.toFixed(3);
+ if(bal.noChroma) html+='<br>R/G/B: — (no chroma at this level)';
+ else html+='<br>R: '+bal.R.toFixed(3)+' &nbsp;G: '+bal.G.toFixed(3)+' &nbsp;B: '+bal.B.toFixed(3);
  if(meterRgbBalanceFormula()==='perceptual'){
   const perceptualGain=meterPerceptualRgbBalanceGain(rd);
   if(perceptualGain>1.0005) html+='<br>Perceptual gain: '+perceptualGain.toFixed(2)+'x';
@@ -18495,13 +18496,11 @@ function chartHandleHover(e,canvasId){
   // that emitted no measurable light — the chart omits the point for the
   // same reason (PR-16 review finding).
   if(meterRgbBalanceNoiseFloor()>0&&!bal.noChroma){
-   const within=[bal.R,bal.G,bal.B].map(v=>meterRgbBalanceWithinNoise(v,perceptualGain));
-   if(within.some(Boolean)){
-    const pg=(Number.isFinite(perceptualGain)&&perceptualGain>0)?perceptualGain:1;
-    const raw=[bal.R,bal.G,bal.B];
-    const parts=['R','G','B'].map((c,i)=>within[i]?c+' '+(Math.abs(raw[i]-100)/pg).toFixed(2):null).filter(Boolean);
-    html+='<br><span style="opacity:.75">'+parts.join(' · ')+' L* pre-gain — within meter noise</span>';
-   }
+   const pg=(Number.isFinite(perceptualGain)&&perceptualGain>0)?perceptualGain:1;
+   const parts=[['R',bal.R],['G',bal.G],['B',bal.B]]
+    .map(e=>{const d=Math.abs(e[1]-100)/pg;return (Number.isFinite(e[1])&&d<=meterRgbBalanceNoiseFloor())?e[0]+' '+d.toFixed(2):null;})
+    .filter(Boolean);
+   if(parts.length) html+='<br><span style="opacity:.75">'+parts.join(' · ')+' L* pre-gain — within meter noise</span>';
   }
  }
  if(gamma!=null) html+='<br>Gamma: '+gamma.toFixed(2);
