@@ -923,7 +923,9 @@ class Handler(BaseHTTPRequestHandler):
             # The ref picker queries GitHub only — no Pi credentials required,
             # so it must resolve before connection_from() validates the host.
             if self.path == "/api/refs":
-                source = github_source_from({**payload, "ref": payload.get("ref") or "main"})
+                # No ref pre-default here: github_source_from() normalizes
+                # empty/missing/whitespace refs to "main" itself (one site).
+                source = github_source_from(payload)
                 self.send_json({"ok": True, **github_refs(source)})
                 return
             connection = connection_from(payload)
