@@ -37,7 +37,7 @@ APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 # Shown in the dashboard and reported by /api/health so a support thread can
 # establish which console someone is running. Bump when behaviour changes.
-DEPLOYER_BUILD = "1.1"
+DEPLOYER_BUILD = "1.2"
 # The console's own files as they appear in the repository snapshot. They are
 # not deployable, but they are extracted alongside the snapshot so the running
 # console can notice that the repository carries a different version of itself:
@@ -346,6 +346,58 @@ def github_commit(source: dict[str, str]) -> dict[str, str]:
     if not SHA_RE.fullmatch(sha):
         raise AppError("GitHub returned an invalid commit identifier.", HTTPStatus.BAD_GATEWAY)
     return {"sha": sha, "date": date, "message": message}
+
+
+# Branch list cache keyed by "owner/repo": short-lived so a freshly pushed
+# branch shows up on the next focus without hammering the API on every click.
+REFS_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+REFS_CACHE_TTL = 60
+REFS_MAX_PAGES = 6
+
+
+def github_refs(source: dict[str, str]) -> dict[str, Any]:
+    """List repository branches (default first) for the ref picker.
+
+    Uses the unauthenticated-friendly branch list endpoint with pagination;
+    an explicit `?per_page=100` keeps round-trips low on repos with many
+    branches. Tags and raw SHAs stay typeable in the same field — this only
+    saves re-typing common branch names.
+    """
+    owner = urllib.parse.quote(source["owner"], safe="")
+    repo = urllib.parse.quote(source["repo"], safe="")
+    key = f"{owner}/{repo}"
+    cached = REFS_CACHE.get(key)
+    if cached and time.time() - cached[0] < REFS_CACHE_TTL:
+        return {"branches": cached[1], "cached": True}
+    branches: list[dict[str, Any]] = []
+    default_branch = ""
+    try:
+        with github_open(f"{GITHUB_API}/repos/{owner}/{repo}", source["token"]) as response:
+            info = json.loads(response.read(1024 * 1024 + 1))
+        default_branch = str(info.get("default_branch", ""))
+    except AppError:
+        raise
+    for page in range(1, REFS_MAX_PAGES + 1):
+        url = f"{GITHUB_API}/repos/{owner}/{repo}/branches?per_page=100&page={page}"
+        with github_open(url, source["token"]) as response:
+            raw = response.read(4 * 1024 * 1024 + 1)
+        try:
+            batch = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise AppError("GitHub returned an invalid branch list.", HTTPStatus.BAD_GATEWAY) from exc
+        if not isinstance(batch, list):
+            raise AppError("GitHub returned an invalid branch list.", HTTPStatus.BAD_GATEWAY)
+        for item in batch:
+            name = str((item or {}).get("name", ""))
+            sha = str(((item or {}).get("commit") or {}).get("sha", ""))
+            if name:
+                branches.append({"name": name, "sha": sha.lower() if SHA_RE.fullmatch(sha) else "",
+                                 "default": name == default_branch})
+        if len(batch) < 100:
+            break
+    branches.sort(key=lambda b: (not b["default"], b["name"].lower()))
+    REFS_CACHE[key] = (time.time(), branches)
+    return {"branches": branches, "cached": False}
 
 
 def cleanup_snapshots() -> None:
@@ -863,6 +915,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             payload = self.read_json()
+            # The ref picker queries GitHub only — no Pi credentials required,
+            # so it must resolve before connection_from() validates the host.
+            if self.path == "/api/refs":
+                source = github_source_from({**payload, "ref": payload.get("ref") or "main"})
+                self.send_json({"ok": True, **github_refs(source)})
+                return
             connection = connection_from(payload)
             if self.path == "/api/scan":
                 source = github_source_from(payload)
