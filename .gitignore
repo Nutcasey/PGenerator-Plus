@@ -53,3 +53,5 @@ local-deployer/
 
 # Release/image tooling from BigShoots (local only)
 tools/
+release-draft/
+tools-testing/
