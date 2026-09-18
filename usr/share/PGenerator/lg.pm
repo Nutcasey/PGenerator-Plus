@@ -3718,6 +3718,26 @@ sub webui_lg_calibration_history_reupload (@) {
  my $enable_cal=($payload->{"enable_calibration"} // 1) ? 1 : 0;
  my $disable_cal=($payload->{"disable_calibration"} // 1) ? 1 : 0;
 
+ # A Dolby Vision reupload enters calibration mode (CAL_START), which the TV
+ # rejects with an opaque "500 Driver error" unless the display is in Relative
+ # DV map mode (dv_map_mode 2); Absolute (1) or unset is what fails. The DV
+ # AutoCal path enforces the same rule (webui_lg_autocal_dv_map_mode_error, PR #3)
+ # and the Web UI switches to Relative before calling this (lgCalHistoryReupload
+ # -> meterDvAutoCalSetMapMode). This is the safety net: it turns a stale/Absolute
+ # map mode into an actionable error for a direct caller or a failed switch,
+ # before the archive read or any TV call. The rule is inlined (not the webui.pm
+ # predicate) so the reupload dispatcher stays loadable without webui.pm, as the
+ # rest of lg.pm is. %pgenerator_conf is the main program's daemon-wide global;
+ # reference it by package so this stays clean under strict when lg.pm loads alone.
+ if($enable_cal && $id =~ /^dv(?:file)?:/) {
+  my $map_mode=defined($main::pgenerator_conf{"dv_map_mode"}) ? $main::pgenerator_conf{"dv_map_mode"} : "";
+  if($map_mode ne "2") {
+   my $seen=($map_mode eq "") ? "unset" : (($map_mode eq "1") ? "Absolute (1)" : "'".$map_mode."'");
+   return &lg_encode_json({ status => "error", error_code => "dv-map-mode-not-relative",
+    message => "Dolby Vision reupload requires DV map mode Relative (dv_map_mode 2); it is currently ".$seen.". Set the DV map mode to Relative before reuploading, as the Web UI does automatically." });
+  }
+ }
+
  if($id =~ /^1d:([A-Za-z0-9._-]+)$/) {
   my $run=$1;
   my $state=_lg_cal_hist_read_json_file("$_lg_cal_hist_runs/$run/grey-state.json");

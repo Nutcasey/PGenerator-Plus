@@ -27,6 +27,10 @@ my $text=do {local $/;<$source>};close $source;
 my ($dispatch)=$text=~/(sub webui_lg_calibration_history_reupload\s*\(\@\)\s*\{.*?)(?=\nsub webui_lg_api)/s;
 die 'History dispatcher not found' if !$dispatch;
 eval 'package main; {my $_lg_cal_hist_runs=q{'.$dir.'/runs};my $_lg_cal_hist_luts=q{'.$dir.'/luts};my $_lg_cal_hist_dir=q{'.$dir.'/history};'.$dispatch.'}';die $@ if $@;
+# A DV reupload now refuses unless the display is in Relative DV map mode
+# (dv_map_mode 2); set it so the DV bookend cases exercise the restore flow
+# rather than the map-mode guard. See t/lg_cal_hist_reupload_dv_map_mode.t.
+$main::pgenerator_conf{dv_map_mode}='2';
 my (@calls,$entry,$exit,$upload,$entry_throw,$exit_throw,$upload_throw);
 local *main::webui_lg_calibration_mode=sub {
  my $body=main::lg_decode_json($_[0]);push @calls,$body->{enabled}?'enter':'exit';
