@@ -2378,6 +2378,15 @@ async function lgCalHistoryReupload(id){
  lgCalHistoryBusy=true;
  try{
   if(typeof lgBeginCommand==='function') lgBeginCommand('Reuploading '+lgCalHistoryTypeLabel(item.type));
+  // Dolby Vision calibration entry (CAL_START) is rejected in Absolute DV map
+  // mode, so a DV reupload must switch to Relative first -- the same step the DV
+  // AutoCal path takes (meterDvAutoCalSetMapMode). Without it the TV returns an
+  // opaque "500 Driver error". The server guards this too, but switching here is
+  // what actually lets the reupload succeed.
+  if((item.type==='dv'||item.signal_mode==='dv')&&typeof meterDvAutoCalSetMapMode==='function'){
+   const relative=await meterDvAutoCalSetMapMode('2');
+   if(!relative){ toast('Could not switch the display to Relative DV map mode, which a Dolby Vision reupload requires.','err'); return; }
+  }
   const body={id:id,picture_mode:item.picture_mode||'',signal_mode:item.signal_mode||'',enable_calibration:true,disable_calibration:true};
   const r=await fetchJSON('/api/lg/calibration-history/reupload',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),_timeoutMs:180000});
   if(r&&r.status==='ok') toast(lgCalHistoryTypeLabel(item.type)+' reuploaded to TV');

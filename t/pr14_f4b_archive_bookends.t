@@ -29,6 +29,10 @@ open my $b,'>',"$dir/luts/archived.bin" or die;print {$b} 'x';close $b;
 open my $src,'<',"$WT/usr/share/PGenerator/lg.pm" or die;my $text=do{local $/;<$src>};close $src;
 my ($dispatch)=$text=~/(sub webui_lg_calibration_history_reupload\s*\(\@\)\s*\{.*?)(?=\nsub webui_lg_api)/s or die;
 eval 'package main; {my $_lg_cal_hist_runs=q{'.$dir.'/runs};my $_lg_cal_hist_luts=q{'.$dir.'/luts};my $_lg_cal_hist_dir=q{'.$dir.'/history};'.$dispatch.'}';die $@ if $@;
+# A DV reupload now refuses unless the display is in Relative DV map mode
+# (dv_map_mode 2); set it so the DV bookend cases exercise the restore flow
+# rather than the map-mode guard. See t/lg_cal_hist_reupload_dv_map_mode.t.
+$main::pgenerator_conf{dv_map_mode}='2';
 # Real webui_lg_calibration_mode; stub only process/network/file boundaries.
 my $clients={client_key=>'k',ip=>'192.0.2.1',clients=>[{client_key=>'k',ip=>'192.0.2.1'}]};
 local *main::lg_automation_guard_json=sub {''};
