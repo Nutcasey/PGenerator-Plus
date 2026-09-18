@@ -40,7 +40,13 @@
           </label>
           <label>
             <span>Branch, tag, or commit</span>
-            <input id="ref" value="main" placeholder="main" autocomplete="off" required>
+            <!-- Suggestions come from /api/refs (branch list), loaded on page
+                 open. The field starts empty: a datalist filters by the
+                 current value, so a prefilled "main" would show only "main".
+                 Stays free-text so tags and raw SHAs remain typeable. -->
+            <input id="ref" value="" placeholder="main — or pick a branch" autocomplete="off" required
+                   list="refList">
+            <datalist id="refList"></datalist>
           </label>
           <label>
             <span>GitHub token <small>optional</small></span>

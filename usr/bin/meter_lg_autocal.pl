@@ -5207,6 +5207,11 @@ sub xyz_to_linear_rgb {
  ];
 }
 
+# Solver-side RGB balance: unweighted L* deltas (/100 normalized). The browser
+# chart offers Perceptual/Absolute/Chromaticity PRESENTATION views
+# (usr/share/PGenerator/webui-app.js, rgbBalance dispatcher); this loop's
+# convergence grading is independent of that selection. Keep the two ends
+# cross-referenced when changing either.
 sub rgb_balance_error {
  my ($reading)=@_;
  return undef if(ref($reading) ne "HASH");

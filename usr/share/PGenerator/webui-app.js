@@ -3855,6 +3855,14 @@ let meterCcssCreateMethod='measure';
 let meterCcssCreateTargetPort='';
 let meterCcssCreateJsonLoaded=false;
 let meterReadings=[];
+// Bumped on every reading-set mutation (replace/upsert/overwrite). The RGB
+// balance plot cache keys on this so hover values can't survive a re-read.
+let meterReadingsGeneration=0;
+// Accessor, not a bare global read: meterReadingsGeneration is a top-level
+// `let` (script-scoped, NOT a window property), so the second served script
+// block (webui-workspace.js) can only reach it through a function. Inlining
+// this wrapper breaks the RGB-balance plot cache key cross-file.
+function meterReadingsGenerationValue(){ return meterReadingsGeneration; }
 let meterReadingsIndex=new Map();
 let meterReadingsIndexSource=meterReadings;
 let meterReadingsIndexLength=0;
@@ -9621,6 +9629,10 @@ function ynToLstar(yn){
 function meterRgbBalanceFormula(){
  const sel=document.getElementById('meterRgbBalanceFormula');
  if(sel && sel.value) return sel.value;
+ // Fallback default. The same 'absolute' default is declared at four sibling
+ // sites and must be changed together: webui-body.html (select 'selected'
+ // option), meterRgbBalanceFormula (here), and the two webui.pm saved-config
+ // injection sites in webui_meter_settings_load.
  return 'absolute';
 }
 
@@ -9628,6 +9640,10 @@ function meterRgbBalanceFormula(){
 // the added separation below 30% IRE, where small channel errors are easiest
 // to lose in a normal base-100 chart. The gain is bounded at 20x near black
 // and is exactly 1x at 100% IRE and above.
+// The gain is derived from the TARGET slot IRE (meterGreyscaleTargetSlotIre),
+// not the measured light level: the axis position and the magnification must
+// agree, so a failed patch at a bright slot keeps the bright-slot gain instead
+// of being graded as a shadow. Deliberate — monotonic gain along the axis.
 function meterPerceptualRgbBalanceGain(reading){
  const slot=(typeof meterGreyscaleTargetSlotIre==='function')?meterGreyscaleTargetSlotIre(reading):null;
  const measuredIre=Number(slot!=null?slot:(reading&&reading.ire));
@@ -9660,11 +9676,11 @@ function meterBalanceTargetRow(reading,ire){
  return row;
 }
 
-// L* RGB balance shared by the weighted Perceptual mode and the unweighted
-// Absolute mode. The ire>0 branch builds a luminance-compensated target
-// (chroma-only) in 'absolute'/'relative' grey-reference modes, or an absolute
-// target in 'eotf' grey-reference mode.
-function rgbBalancePerceptual(reading,whiteRef,modeOrIncl,blackLevel,shadowWeighted){
+// Core L* RGB balance shared by the shadow-weighted Perceptual wrapper and the
+// unweighted Absolute wrapper. The ire>0 branch builds a luminance-compensated
+// target (chroma-only) in 'absolute'/'relative' grey-reference modes, or an
+// absolute target in 'eotf' grey-reference mode.
+function rgbBalanceLstar(reading,whiteRef,modeOrIncl,blackLevel,shadowWeighted){
  const readingXYZ=meterReadingXYZ(reading);
  const whiteXYZ=meterReadingXYZ(whiteRef);
  if(!readingXYZ||!whiteXYZ||whiteXYZ.Y<=0) return {R:100,G:100,B:100,noChroma:true};
@@ -9738,16 +9754,25 @@ function rgbBalancePerceptual(reading,whiteRef,modeOrIncl,blackLevel,shadowWeigh
   : 1;
  // Per-channel percent: magnify the signed L* error around the neutral 100
  // baseline. A perfectly balanced channel remains exactly 100 at every IRE.
+ // gain is the shadow gain that WAS applied: consumers that un-scale a
+ // deviation (noise floor annotation) must divide by this value, never by a
+ // gain re-derived from some other object.
  return {
   R:(ynToLstar(mRgb[0])-ynToLstar(tRgb[0]))*shadowGain+100,
   G:(ynToLstar(mRgb[1])-ynToLstar(tRgb[1]))*shadowGain+100,
-  B:(ynToLstar(mRgb[2])-ynToLstar(tRgb[2]))*shadowGain+100
+  B:(ynToLstar(mRgb[2])-ynToLstar(tRgb[2]))*shadowGain+100,
+  gain:shadowGain
  };
+}
+
+// Shadow-weighted wrapper: identical to the core with the near-black gain on.
+function rgbBalancePerceptual(reading,whiteRef,modeOrIncl,blackLevel){
+ return rgbBalanceLstar(reading,whiteRef,modeOrIncl,blackLevel,true);
 }
 
 // Original unweighted L* balance retained as an explicit comparison view.
 function rgbBalanceAbsolute(reading,whiteRef,modeOrIncl,blackLevel){
- return rgbBalancePerceptual(reading,whiteRef,modeOrIncl,blackLevel,false);
+ return rgbBalanceLstar(reading,whiteRef,modeOrIncl,blackLevel,false);
 }
 
 // HCFR-style RGB balance for the luma-mode-OFF branch.
@@ -9772,7 +9797,7 @@ function rgbBalanceHCFR(reading,whiteRef,modeOrIncl,blackLevel){
   const Lb=Number.isFinite(explicitBlack)&&explicitBlack>=0?explicitBlack:meterBlackReadingY();
   const targetPeak = meterGreyTargetPeak(whiteXYZ.Y);
   const targetIre=((typeof meterGreyscaleTargetSlotIre==='function')?meterGreyscaleTargetSlotIre(reading):null)||reading.ire;
-  // Same stimulus-based target as the gamma chart (see rgbBalancePerceptual):
+  // Same stimulus-based target as the gamma chart (see rgbBalanceLstar):
   // avoids the limited-only meterGreyCodeRange skewing full-range gamma error.
   const tgtY = (typeof meterGreyTargetLuminanceForChartPoint==='function')
    ? meterGreyTargetLuminanceForChartPoint(targetIre/100, targetPeak, Lb, meterBalanceTargetRow(reading,targetIre))
@@ -9785,8 +9810,208 @@ function rgbBalanceHCFR(reading,whiteRef,modeOrIncl,blackLevel){
  return { R:r*100, G:g*100, B:b*100 };
 }
 
+// Direction a balance value sits outside the VISIBLE y-window in normalized
+// axis space (0..1 across yMin..yMax, then windowed by box-zoom view.y0/y1):
+// -1 below, +1 above, 0 inside. Box-zoom is the reason this cannot compare to
+// plain 0/1 — a value inside the axis range can still be outside the zoomed
+// view, and that is exactly the clamped case the marker must flag.
+function meterRgbBalanceOffScaleDir(normValue,vLo,vHi){
+ if(!Number.isFinite(normValue)) return 0;
+ if(normValue<(Number.isFinite(vLo)?vLo:0)) return -1;
+ if(normValue>(Number.isFinite(vHi)?vHi:1)) return 1;
+ return 0;
+}
+
+// Identity of the full RGB-balance input tuple. The plotted-value cache and
+// the hover hit zones both key on this instead of the formula alone: the
+// plotted values also depend on the grey-reference mode, the analysis gamut
+// matrix, the black level, and the measurement generation. Reuse that checks
+// only the formula can serve hover values computed under a stale grey-ref
+// mode, gamut, black level, or reading set — the exact desync the cache exists
+// to prevent. Callers must pass the same greyMode/blackLevel tuple members
+// they passed to rgbBalance, and bump generation on any re-read/series reset.
+// whiteId is the white reference's X/Y/Z triple (taken from the object here,
+// never assembled at call sites) and plotCount the distinct plotted IREs:
+// the plotted values also depend on the white ref and the reading subset,
+// which a caller-filtered `gs` can differ on while every other key member
+// coincides. Hover's fallback recompute is always correct, so a false-positive
+// key match is the only failure mode this guards.
+function meterRgbBalancePlotKey(greyMode,blackLevel,generation,whiteRef,plotCount){
+ const gamut=(typeof meterActiveGamutKey==='function')?meterActiveGamutKey():'';
+ const whiteId=whiteRef?whiteRef.X+'/'+whiteRef.Y+'/'+whiteRef.Z:null;
+ return meterRgbBalanceFormula()+'|'+(greyMode==null?'':greyMode)+'|'
+  +(blackLevel==null?'':String(blackLevel))+'|'+gamut+'|'+(generation==null?'0':String(generation))
+  +'|'+(whiteId==null?'':String(whiteId))+'|'+(plotCount==null?'':String(plotCount));
+}
+// The ONE plot-key assembly both the draw site and the hover site call, so
+// the members can never be ordered, omitted or derived differently (a
+// previously shipped bug: the draw side counted distinct IREs via
+// Object.keys(balMap), the hover side counted gs.length, and any duplicate-IRE
+// series mismatched the key forever — a silent permanent cache miss). Derives
+// the distinct-IRE count identically from the reading set and null-guards the
+// white reference once.
+function meterRgbBalancePlotIdentity(gs,greyMode,blackLevel,whiteRef){
+ return meterRgbBalancePlotKey(greyMode,blackLevel,meterReadingsGenerationValue(),
+  whiteRef||null,new Set(gs.map(r=>r&&r.ire)).size);
+}
+
+// Operator-selectable noise floor in L* points (pre-gain deviation), read from
+// the meterRgbBalanceNoiseFloor select next to the RGB bal picker. Off (empty
+// value) disables the 'within meter noise' annotation entirely. The floor
+// never changes plotted values — the tooltip annotates them, so the operator
+// keeps the full trace and only gains context.
+function meterRgbBalanceNoiseFloor(){
+ const input=document.getElementById('meterRgbBalanceNoiseFloor');
+ const floor=Number(input&&input.value);
+ // Cap at the control's declared max (10): a stored pref can be out of
+ // range (hand-edited config, or a future change to max), and the
+ // band/hover annotations would scale to an absurd envelope. Sub-0.01
+ // values are below any meter's repeatability and render an invisible
+ // band: resolve them to Off so the control never claims 'on' while
+ // annotating nothing (and never rewrites the field as '1e-7').
+ // Out-of-range garbage still resolves to Off below (Math.min(10,NaN)
+ // is NaN, so it is the >0 test, not the cap, that rejects junk).
+ const capped=Math.min(10,floor);
+ return (capped>=0.01)?capped:0;
+}
+// chValue is a balance channel result (100-centered), gain the perceptual gain
+// applied to it (1 for the unweighted formula). Returns true when the raw L*
+// deviation is inside the operator-selected meter noise floor (false when the
+// floor is Off or the value is not finite).
+function meterRgbBalanceWithinNoise(chValue,gain){
+ const floor=meterRgbBalanceNoiseFloor();
+ if(!(floor>0)) return false;
+ if(!Number.isFinite(chValue)) return false;
+ return Math.abs((chValue-100)/(Number.isFinite(gain)&&gain>0?gain:1))<=floor;
+}
+// The 'within meter noise' annotation is a Perceptual-view affordance: the
+// floor divides out the shadow gain, which only exists in that formula. When
+// another formula is selected the control would silently do nothing, so it
+// dims (but stays editable — the operator's saved value survives the toggle).
+function meterRgbBalanceNoiseFloorApplies(){
+ return meterRgbBalanceFormula()==='perceptual';
+}
+// The single definition of 'the annotation is live': the operator's floor,
+// or 0 when the selected formula does not use it. Every annotation site
+// (chart band, live bars, hover) gates on this or sits inside a Perceptual
+// branch, so the definition cannot drift between panels.
+function meterRgbBalanceActiveNoiseFloor(){
+ return meterRgbBalanceNoiseFloorApplies()?meterRgbBalanceNoiseFloor():0;
+}
+function meterUpdateNoiseFloorControlAvailability(){
+ const input=document.getElementById('meterRgbBalanceNoiseFloor');
+ if(!input) return;
+ const applies=meterRgbBalanceNoiseFloorApplies();
+ const applied=meterRgbBalanceNoiseFloor();
+ const label=input.closest('label');
+ const target=label||input;
+ // Dim the editable members individually, never #meterNoiseFloorControl
+ // itself: the inactive hint is a sibling inside that row, and opacity
+ // inherits multiplicatively — dimming the row would dim the affordance
+ // that explains the dim below legibility. The label keeps the title.
+ target.style.opacity='';
+ input.style.opacity=applies?'':'0.45';
+ // The authored active-state tooltip lives in webui-body.html; cache it on
+ // first run so the long sentence exists in exactly one place and a second
+ // JS copy can never drift from it.
+ if(target.dataset&&!target.dataset.activeTitle) target.dataset.activeTitle=target.title;
+ target.title=(applies&&target.dataset&&target.dataset.activeTitle)?target.dataset.activeTitle
+  :'Noise floor applies to the Perceptual RGB bal formula only — switch RGB bal to Perceptual to use it. The saved value is kept.';
+ // One-tap return to Off: clearing a typed number by hand is fiddly on a
+ // touch screen, so show a × only when the floor is actually on. Dim it
+ // with the rest of the row when the floor is inert — a lone bright control
+ // in a dimmed row reads as live.
+ const clear=document.getElementById('meterRgbBalanceNoiseFloorClear');
+ if(clear&&clear.style){ clear.style.display=applied>0?'':'none'; clear.style.opacity=applies?'':'0.45'; }
+ // Highlight the preset whose value equals the applied floor, so the button
+ // row answers 'which one is in play' (a typed 0.35 matches none, which is
+ // itself information). aria-pressed carries the same state to AT. No
+ // try/catch: a literal querySelectorAll either returns Elements or an empty
+ // NodeList — a throw here is a real bug and must stay loud.
+ const btns=document.querySelectorAll('.noise-floor-preset');
+ for(let i=0;i<btns.length;i++){
+  const btn=btns[i];
+  const v=Number(btn.dataset&&btn.dataset.value);
+  const on=applied>0&&Number.isFinite(v)&&Math.abs(v-applied)<1e-9;
+  btn.style.opacity=applies?'':'0.45';
+  btn.style.borderColor=on?'var(--accent,#5b7fff)':'';
+  btn.style.color=on?'var(--accent,#5b7fff)':'';
+  btn.setAttribute('aria-pressed',on?'true':'false');
+ }
+ // Floor set but formula not Perceptual: the dimming says "inactive" but only
+ // the hover title says why, and touch screens never hover. Show an inline
+ // hint that doubles as a one-tap switch to the formula that uses the floor.
+ const hint=document.getElementById('meterRgbBalanceNoiseFloorHint');
+ if(hint&&hint.style) hint.style.display=(meterRgbBalanceNoiseFloor()>0&&!applies)?'':'none';
+}
+// One-tap repair for the inline hint: select Perceptual RGB bal and run the
+// shared change path, exactly as if the operator had used the formula picker.
+function meterSwitchToPerceptualRgbBalance(){
+ const sel=document.getElementById('meterRgbBalanceFormula');
+ if(sel) sel.value='perceptual';
+ meterOnRgbBalanceFormulaChange();
+}
+// Apply a preset button value through the same path a typed edit takes:
+// write the field, commit-normalize, redraw, persist. Buttons must never
+// annotate a value the field does not show. Tapping the ACTIVE preset turns
+// the floor Off — the buttons carry aria-pressed, so they must behave like
+// real toggles (a pressed control that cannot be released breaks AT users'
+// expectations and the × button's job on touch screens).
+function meterApplyNoiseFloorPreset(value){
+ // Tapping the active preset is exactly the × button's action — delegate so
+ // 'turn the floor Off' has one definition. Without an input,
+ // meterRgbBalanceNoiseFloor() is 0, so no positive v matches and the clear
+ // path's own missing-element guard returns identically.
+ const v=Number(value);
+ if(Number.isFinite(v)&&v>0&&Math.abs(v-meterRgbBalanceNoiseFloor())<1e-9) return meterOnRgbBalanceNoiseFloorClear();
+ const input=document.getElementById('meterRgbBalanceNoiseFloor');
+ if(!input) return;
+ input.value=String(value);
+ meterOnRgbBalanceNoiseFloorChange();
+}
+// Clear the noise floor back to Off and redraw the annotation (chart band,
+// hover tooltips, live bars) exactly like an operator edit would.
+function meterOnRgbBalanceNoiseFloorClear(){
+ const input=document.getElementById('meterRgbBalanceNoiseFloor');
+ if(!input) return;
+ input.value='';
+ meterOnRgbBalanceNoiseFloorChange();
+}
+// Commit-time normalization: the effective floor (meterRgbBalanceNoiseFloor)
+// caps at 10 and resolves non-positive/non-finite input to Off, but the field
+// used to keep whatever was typed — '20' annotated the chart with ±10 while
+// the input read 20. Rewrite the field to the applied value at commit time
+// (change/Enter/blur) so the number shown always matches the band, tooltip,
+// and bar dimming. Mid-typing (oninput) is deliberately untouched.
+function meterCommitRgbBalanceNoiseFloorInput(){
+ const input=document.getElementById('meterRgbBalanceNoiseFloor');
+ if(!input) return;
+ const raw=String(input.value==null?'':input.value);
+ const trimmed=raw.trim();
+ // Whitespace-only text is Off like empty — and must be erased from the
+ // field so the display never shows blank-space instead of the placeholder.
+ if(!trimmed){ if(raw!=='') input.value=''; return; }
+ const n=Number(trimmed);
+ // Sub-0.01 values resolve to Off in meterRgbBalanceNoiseFloor (invisible
+ // band, below meter repeatability, and String() would print exponential
+ // notation) — so commit must blank the field for them, or the display and
+ // the applied annotation disagree again.
+ if(!Number.isFinite(n)||n<=0||Math.min(10,n)<0.01){ input.value=''; return; }
+ const capped=Math.min(10,n);
+ const norm=String(capped);
+ // Whitespace-padded text always rewrites to the clean form even when the
+ // numeric value matches (type=number hides this today; prefs restore and
+ // programmatic callers can still land here with padded text).
+ if(trimmed!==raw||norm!==trimmed) input.value=norm;
+}
+
 // Dispatcher — keeps every existing caller working while honoring the
-// new <select id="meterRgbBalanceFormula"> selector.
+// new <select id="meterRgbBalanceFormula"> selector. All three formulas here
+// are PRESENTATION views. The on-device AutoCal solver grades convergence with
+// its own unweighted L* balance (usr/bin/meter_lg_autocal.pl, rgb_balance_error)
+// and its own thresholds; balancing to 100/100/100 under Perceptual does NOT
+// mean AutoCal saw zero shadow error. Keep both ends in sync when changing
+// either formula.
 function rgbBalance(reading,whiteRef,modeOrIncl,blackLevel){
  const formula=meterRgbBalanceFormula();
  if(formula==='hcfr') return rgbBalanceHCFR(reading,whiteRef,modeOrIncl,blackLevel);
@@ -9849,13 +10074,32 @@ function meterColorPatchRgbBalance(reading,whiteRef,blackRef,includeLuminance){
 
 function meterLiveRgbData(reading){
  if(!reading) return {mode:'balance',R:100,G:100,B:100};
+ // Per-channel 'within meter noise' flags for balance results, computed the
+ // same way the chart-hover tooltip does it: pre-gain L* deviation vs the
+ // operator floor. The live bar charts carry the flag per bar from here.
+ const tagBalNoise=bal=>{
+  // Exclude the noChroma sentinel: {R:100,G:100,B:100,noChroma} has finite
+  // channels and deviation exactly 0, so without this gate a patch that
+  // emitted no measurable light is annotated 'within meter noise — not a
+  // real error' on the live bars and the LG TV columns. Same reasoning as
+  // the hover and band exclusions.
+  if(meterRgbBalanceNoiseFloor()>0&&meterRgbBalanceFormula()==='perceptual'&&!bal.noChroma&&Number.isFinite(bal.R)){
+   // Divide by the gain that was actually APPLIED to this balance result
+   // (the core reports it on the object). The neutral-color branch balances
+   // a rewritten clone, so the outer reading's gain can differ; fall back to
+   // it only for balance objects that predate the gain field.
+   const g=(Number.isFinite(bal.gain)&&bal.gain>0)?bal.gain:meterPerceptualRgbBalanceGain(reading);
+   bal.noise=[meterRgbBalanceWithinNoise(bal.R,g),meterRgbBalanceWithinNoise(bal.G,g),meterRgbBalanceWithinNoise(bal.B,g)];
+  }
+  return bal;
+ };
  const measured=meterReadingXYZ(reading);
  const isColorSeries=meterActiveSeriesType==='colors'||meterActiveSeriesType==='saturations';
  if(!isColorSeries){
   const whiteRef=meterEffectiveGreyscaleWhiteReference(Array.isArray(meterReadings)&&meterReadings.length?meterReadings:[reading]);
   const blackReadings=Array.isArray(meterReadings)&&meterReadings.length?meterReadings:[reading];
   const blackLevel=meterChartBlackLevel(blackReadings);
-  return whiteRef?{mode:'balance',...rgbBalance(reading,whiteRef,meterGreyRefMode(),blackLevel)}:{mode:'balance',R:100,G:100,B:100};
+  return whiteRef?tagBalNoise({mode:'balance',...rgbBalance(reading,whiteRef,meterGreyRefMode(),blackLevel)}):{mode:'balance',R:100,G:100,B:100};
  }
  // A neutral color-series patch uses the exact greyscale RGB-balance path.
  // This keeps the result centered on 100 (a +1% channel error is 101%) and
@@ -9867,7 +10111,7 @@ function meterLiveRgbData(reading){
   const grey=meterNeutralColorGreyscaleReading(reading);
   const whiteRef=meterGreyscaleRgbBalanceReference(neutralReadings);
   const blackLevel=meterChartBlackLevel(neutralReadings);
-  return whiteRef?{mode:'balance',...rgbBalance(grey,whiteRef,meterGreyRefMode(),blackLevel)}:{mode:'balance',R:100,G:100,B:100};
+  return whiteRef?tagBalNoise({mode:'balance',...rgbBalance(grey,whiteRef,meterGreyRefMode(),blackLevel)}):{mode:'balance',R:100,G:100,B:100};
  }
  if(!measured||!(measured.Y>0)) return {mode:'balance',R:null,G:null,B:null,noChroma:true};
  const readings=Array.isArray(meterReadings)&&meterReadings.length?meterReadings:[reading];
@@ -11469,8 +11713,36 @@ function meterQueueGreyAnalysisRefresh(){
 // its hit zones, and the live RGB companion immediately from one formula state
 // so the plotted lines cannot lag behind the hover values while the general
 // two-frame analysis refresh queue is yielding to browser input.
+// Changing the noise floor is also presentation-only, and the redraw effect
+// is identical to a formula change (chart band, hover annotations, live bars),
+// so reuse it. The shared handler redraws synchronously (it cancels the
+// queued two-frame analysis refresh); typing is not rate-limited here.
+function meterOnRgbBalanceNoiseFloorChange(){
+ // Normalize the field first so the redraw and the displayed number agree.
+ // No try/catch on purpose: a commit failure must abort BEFORE the redraw
+ // annotates with the applied value while the field still shows something
+ // else (the desync this function exists to prevent), and it must be loud.
+ meterCommitRgbBalanceNoiseFloorInput();
+ meterOnRgbBalanceFormulaChange();
+ // The shared path only refreshes the live panels when the current patch
+ // step has a real measurement. Floor edits carry interpolated floor text
+ // into the bar titles and the LG TV columns at draw time, so reviewing a
+ // finished series (no live patch) would leave bars dimmed with a stale
+ // floor value asserted. Re-render from the last measured reading instead.
+ try{
+  const live=meterCurrentPatchStep?meterFindReadingForStep(meterCurrentPatchStep):null;
+  if(!(live&&meterReadingIsRealMeasurement(live))){
+   const last=[...(meterReadings||[])].reverse().find(rd=>rd&&meterReadingHasLuminance(rd));
+   if(last&&typeof updateLiveReading==='function') updateLiveReading(last);
+  }
+ }catch(e){}
+}
+
 function meterOnRgbBalanceFormulaChange(){
  try{ meterSaveColorPrefs(); }catch(e){}
+ // The noise floor only annotates the Perceptual view; refresh its dimmed
+ // state first so it stays correct even when there are no readings to redraw.
+ try{ meterUpdateNoiseFloorControlAvailability(); }catch(e){}
  if(!Array.isArray(meterReadings)||!meterReadings.length) return;
  const isColor=meterActiveSeriesType==='colors'||meterActiveSeriesType==='saturations';
  if(isColor||meterIsTwoPointGreyscale()){
@@ -11541,6 +11813,7 @@ function meterSaveColorPrefs(){
    grey_ref_mode: v('meterGreyRefMode'),
    gray_world:    v('meterGrayWorld'),
    rgb_formula:   v('meterRgbBalanceFormula'),
+   rgb_noise_floor: v('meterRgbBalanceNoiseFloor'),
    de_form:       v('meterDeltaEForm'),
    color_de_form: v('meterColorDeltaEForm'),
   color_incl_lum:cb('meterColorIncludeLumError'),
@@ -11594,6 +11867,15 @@ function meterLoadColorPrefs(){
     setVal('meterGreyRefMode', greyMode);
   setVal('meterGrayWorld',   p.gray_world);
   setVal('meterRgbBalanceFormula', p.rgb_formula);
+  setVal('meterRgbBalanceNoiseFloor', p.rgb_noise_floor);
+  // Normalize immediately so the field never displays a stale out-of-range
+  // value — but do NOT save here: meterSaveColorPrefs serializes the live DOM
+  // for ALL prefs, and everything below this line has not been restored yet,
+  // so a mid-load save writes HTML defaults over the operator's stored EOTF/
+  // chart/gamma preferences (silent loss on the next reload). The re-save of
+  // the committed value happens after the last restore below.
+  try{ meterCommitRgbBalanceNoiseFloorInput(); }catch(e3){}
+  try{ meterUpdateNoiseFloorControlAvailability(); }catch(e2){}
   setVal('meterDeltaEForm',  meterNormalizeSavedGreyDeltaEForm(p.de_form));
   setVal('meterColorDeltaEForm', p.color_de_form);
   setChk('meterColorIncludeLumError', p.color_incl_lum);
@@ -11614,6 +11896,12 @@ function meterLoadColorPrefs(){
   setVal('meterHdrDiffuseWhite', p.hdr_diffuse_white);
   setChk('meterHdrDiffuseWhiteAuto', p.hdr_diffuse_white_auto==null?'1':p.hdr_diffuse_white_auto);
   meterSyncHdrDiffuseWhiteControl();
+  // All controls are restored now: re-commit the noise floor (a stored pref
+  // can be out of range or garbage — hand-edited config, or a future cap
+  // change) and re-persist the clean value. Saving here is safe because the
+  // DOM now mirrors the full saved prefs object; saving earlier would
+  // serialize un-restored defaults.
+  try{ meterCommitRgbBalanceNoiseFloorInput(); meterSaveColorPrefs(); }catch(e3){}
   try{ meterUpdateCie3dLabel(); meterApplyCie3dLayout(); }catch(e2){}
  }catch(e){}
 }
@@ -13572,6 +13860,7 @@ function meterRebuildReadingsIndex(readings){
 
 function meterReplaceReadings(readings){
  meterReadings=Array.isArray(readings)?readings:[];
+ meterReadingsGeneration++;
  meterRebuildReadingsIndex(meterReadings);
  return meterReadings;
 }
@@ -13605,6 +13894,7 @@ function meterUpsertSeriesReading(reading,step){
   keys.forEach(key=>{ if(!index.has(key)) index.set(key,idx); });
   meterReadingsIndexLength=meterReadings.length;
  }
+ meterReadingsGeneration++;
 }
 
 function meterReadingHasLuminance(rd){
@@ -14205,10 +14495,14 @@ function meterRgbDeltasForLive(reading,bal,includeDeltaE){
  if(!bal) return null;
  const isDelta=(bal.mode==='delta');
  const center=isDelta?0:100;
+ // bal.noise (from meterLiveRgbData) carries the per-channel 'within meter
+ // noise' flags; the bar renderer dims a flagged bar (0.4 alpha on canvas,
+// .45 opacity in the HTML LG columns).
+ const noise=Array.isArray(bal.noise)?bal.noise:null;
  const entries=[
-  {key:'R',label:'R',color:'#f44',v:(bal.R!=null)?bal.R-center:null,labelV:(bal.R!=null)?(isDelta?(bal.R-center):bal.R):null,showPlus:isDelta},
-  {key:'G',label:'G',color:'#4caf50',v:(bal.G!=null)?bal.G-center:null,labelV:(bal.G!=null)?(isDelta?(bal.G-center):bal.G):null,showPlus:isDelta},
-  {key:'B',label:'B',color:'#42a5f5',v:(bal.B!=null)?bal.B-center:null,labelV:(bal.B!=null)?(isDelta?(bal.B-center):bal.B):null,showPlus:isDelta}
+  {key:'R',label:'R',color:'#f44',v:(bal.R!=null)?bal.R-center:null,labelV:(bal.R!=null)?(isDelta?(bal.R-center):bal.R):null,showPlus:isDelta,noise:!!(noise&&noise[0])},
+  {key:'G',label:'G',color:'#4caf50',v:(bal.G!=null)?bal.G-center:null,labelV:(bal.G!=null)?(isDelta?(bal.G-center):bal.G):null,showPlus:isDelta,noise:!!(noise&&noise[1])},
+  {key:'B',label:'B',color:'#42a5f5',v:(bal.B!=null)?bal.B-center:null,labelV:(bal.B!=null)?(isDelta?(bal.B-center):bal.B):null,showPlus:isDelta,noise:!!(noise&&noise[2])}
  ];
  if(includeDeltaE&&reading){
   let de=null;
@@ -14216,7 +14510,7 @@ function meterRgbDeltasForLive(reading,bal,includeDeltaE){
   if(Number.isFinite(de)) entries.push({key:'DE',label:'ΔE',color:de<1?'#4caf50':de<3?'#ff9800':'#ff4444',v:de,labelV:de,showPlus:false,unit:'',decimals:2});
   else entries.push({key:'DE',label:'ΔE',color:'#888',v:null,labelV:null,showPlus:false,unit:'',decimals:2});
  }
- return {title:'RGB Δ',unit:'%',entries,decimals:2,minHalfRange:5,scaleHeadroom:1.6};
+ return {kind:'rgb',title:'RGB Δ',unit:'%',entries,decimals:2,minHalfRange:5,scaleHeadroom:1.6};
 }
 
 // Build xy/Y deltas vs. the active target for the live bar chart. Uses the
@@ -14290,6 +14584,23 @@ function meterXYYDeltasForLive(reading){
 function drawDeltaBarsVertical(canvasId,spec){
  const c=document.getElementById(canvasId);
  if(!c) return;
+ // Canvas has no per-bar tooltip, so a dimmed (within-noise) bar would look
+ // like a render bug on hover. Summarize the flagged channels once on the
+ // canvas title element; empty title when nothing is flagged. Specs are
+ // tagged by their producer (kind:'rgb' from meterRgbDeltasForLive); xyY and
+ // other specs share this renderer and must keep their own title untouched.
+ // Any non-RGB render (null clear or foreign spec) resets OUR title if this
+ // canvas carried one, so a stale assertion never survives a redraw.
+ try{
+  if(spec&&spec.kind==='rgb'&&Array.isArray(spec.entries)){
+   const flagged=spec.entries.filter(e=>e.noise&&e.v!=null).map(e=>e.label);
+   c.title=flagged.length
+    ? flagged.join(', ')+' within meter noise floor (±'+meterRgbBalanceNoiseFloor()+' L* pre-gain) — noise, not a real error.'
+    : '';
+  } else if(c.title&&c.title.indexOf('within meter noise floor')>=0){
+   c.title='';
+  }
+ }catch(e){}
  const rect=c.getBoundingClientRect();
  if(rect.width<2||rect.height<2) return;
  const dpr=pgCanvasPixelRatio();
@@ -14353,7 +14664,9 @@ function drawDeltaBarsVertical(canvasId,spec){
    const left=Math.round(Math.min(cx,xV));
    const width=Math.max(Math.round(Math.abs(xV-cx)),1);
    const barH=Math.max(6,Math.min(14,rowH*0.42));
-   ctx.fillStyle=e.color;ctx.globalAlpha=0.88;
+   // e.noise: deviation sits inside the meter noise floor — dim the bar so
+   // it reads as "not a real error" without hiding the value.
+   ctx.fillStyle=e.color;ctx.globalAlpha=e.noise?0.4:0.88;
    ctx.fillRect(left,Math.round(cy-barH/2),width,Math.round(barH));
    ctx.globalAlpha=1;
    ctx.beginPath();ctx.arc(Math.round(xV),Math.round(cy),3,0,Math.PI*2);ctx.fillStyle=e.color;ctx.fill();
@@ -14406,7 +14719,8 @@ function drawDeltaBarsVertical(canvasId,spec){
   const width=Math.max(Math.round(barW),1);
   const height=Math.max(Math.round(Math.abs(yV-cy)),1);
   ctx.save();
-  ctx.fillStyle=e.color;ctx.globalAlpha=0.9;
+  ctx.globalAlpha=e.noise?0.4:0.9;
+  ctx.fillStyle=e.color;
   if(themedColorBars){ctx.shadowColor=e.color;ctx.shadowBlur=8;roundedRect(left,top,width,height,3);ctx.fill();}
   else {ctx.fillRect(left,top,width,height);ctx.beginPath();ctx.arc(Math.round(cx),yVPx,3,0,Math.PI*2);ctx.fill();}
   ctx.restore();

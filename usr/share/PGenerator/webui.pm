@@ -7754,6 +7754,9 @@ sub webui_meter_settings_load (@) {
      }
   # Absolute is the baseline RGB-balance presentation. Perceptual remains an
   # explicit shadow-detail view and must only be restored when it was saved.
+  # The 'absolute' default lives at four sibling sites and must be changed
+  # together: webui-body.html (select 'selected' option), meterRgbBalanceFormula
+  # in webui-app.js, and both injection points below in this file.
   if($json!~/"rgb_formula"\s*:/) {
    $json=~s/\{\s*/{"rgb_formula":"absolute",/;
   }
