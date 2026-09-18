@@ -3541,6 +3541,7 @@ async function checkUpdate(){
   document.getElementById('updateStatus').textContent=r?r.message:'Check failed — no internet?';
   return;
  }
+ if(r.repo) updateOtaRepoNote(r.repo);
  document.getElementById('updateCurrent').textContent='v'+r.current;
  document.getElementById('updateLatest').textContent='v'+r.latest;
  document.getElementById('updatePublished').textContent=r.published?r.published.split('T')[0]:'-';
@@ -3563,7 +3564,47 @@ function showUpdateCard(){
  document.getElementById('updateCard').style.display='';
  if(document.body.classList.contains('layout-desktop')) pgSelectDesktopWorkspace('system');
  document.getElementById('updateCard').scrollIntoView({behavior:'smooth'});
+ loadOtaRepo();
  if(!_updateChecked) checkUpdate();
+}
+// ── OTA source repo setting ──
+// Persisted server-side as ota_repo in PGenerator.conf and read by
+// /usr/sbin/pgenerator-update on every check/apply. Clearing the field
+// restores the official default repo.
+function updateOtaRepoNote(repo){
+ const note=document.getElementById('otaRepoNote');
+ if(!note||!repo) return;
+ const def=note.dataset.defaultRepo||'oldgithubman/PGenerator-Plus';
+ note.textContent=(repo===def)?('Official updates: '+repo):('Custom update source: '+repo);
+}
+async function loadOtaRepo(){
+ const r=await fetchJSON('/api/update/repo',{_quiet:true,_timeoutMs:8000});
+ if(!r||r.status!=='ok') return;
+ const input=document.getElementById('otaRepo');
+ if(input&&document.activeElement!==input) input.value=r.custom?r.repo:'';
+ const note=document.getElementById('otaRepoNote');
+ if(note&&r.default_repo) note.dataset.defaultRepo=r.default_repo;
+ updateOtaRepoNote(r.repo);
+}
+async function saveOtaRepo(){
+ const input=document.getElementById('otaRepo');
+ const btn=document.getElementById('saveOtaRepoBtn');
+ const raw=(input&&input.value||'').trim();
+ // Normalize client-side just for the confirm message; the server
+ // re-validates authoritatively.
+ const btnState=btn?btn.textContent:'';
+ if(btn){btn.disabled=true;btn.textContent='Saving...';}
+ const r=await fetchJSON('/api/update/repo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo:raw}),_quiet:true,_timeoutMs:10000});
+ if(btn){btn.disabled=false;btn.textContent=btnState;}
+ if(!r||r.status!=='ok'){
+  toast(r&&r.message?r.message:'Failed to save update repo','error');
+  return;
+ }
+ if(input) input.value=r.custom?r.repo:'';
+ updateOtaRepoNote(r.repo);
+ toast(raw?'Update source set to '+r.repo:'Update source restored to default');
+ _updateChecked=false;
+ checkUpdate();
 }
 async function applyUpdate(){
  if(!confirm('Install update now? PGenerator+ will restart.'))return;

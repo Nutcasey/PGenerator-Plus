@@ -1854,6 +1854,12 @@ sub webui_handle_request (@) {
     my $len=length($result);
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
    }
+   elsif($path eq "/api/update/repo") {
+    # OTA / release-notification source repo (operator-selectable).
+    my $result=($method eq "POST") ? &webui_update_repo_set($body) : &webui_update_repo_get();
+    my $len=length($result);
+    print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
+   }
    elsif($path eq "/api/update/apply" && $method eq "POST") {
     my $r='{"status":"ok","message":"Update started. PGenerator+ will restart shortly."}';
     my $len=length($r);
@@ -9829,6 +9835,48 @@ sub webui_config_json (@) {
  }
  $json.="}";
  return $json;
+}
+
+# ── OTA / release-notification source repo ──
+# Operators can point the updater at a different GitHub repo (fork or
+# channel). The value persists as ota_repo=owner/name in
+# PGenerator.conf; /usr/sbin/pgenerator-update reads it at check/apply
+# time. An empty value clears the key and restores the factory default.
+my $ota_repo_default="oldgithubman/PGenerator-Plus";
+sub webui_ota_repo_normalize ($) {
+ my ($raw)=@_;
+ $raw="" unless defined $raw;
+ $raw=~s/^\s+|\s+$//g;
+ $raw=~s{^https?://github\.com/}{}i;
+ $raw=~s{^git\@github\.com:}{}i;
+ $raw=~s{/releases(/latest)?/?$}{}i;
+ $raw=~s{/+$}{};
+ $raw=~s/\.git$//i;
+ return "" if($raw eq "");
+ return undef unless($raw=~/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/);
+ return $raw;
+}
+
+sub webui_update_repo_get (@) {
+ &webui_reload_pgenerator_conf();
+ my $repo=&webui_ota_repo_normalize($pgenerator_conf{"ota_repo"} || "");
+ $repo=$ota_repo_default if(!defined $repo || $repo eq "");
+ $repo=&_webui_json_escape($repo);
+ return "{\"status\":\"ok\",\"repo\":\"$repo\",\"default_repo\":\"$ota_repo_default\",\"custom\":".(($pgenerator_conf{"ota_repo"}||"") ne "" ? "true" : "false")."}";
+}
+
+sub webui_update_repo_set (@) {
+ my ($body)=@_;
+ my ($raw)=$body=~/"repo"\s*:\s*"([^"]*)"/;
+ return '{"status":"error","message":"repo field required"}' unless defined $raw;
+ my $repo=&webui_ota_repo_normalize($raw);
+ if(!defined $repo){
+  return '{"status":"error","message":"Invalid repo: use owner/name or a github.com repo URL"}';
+ }
+ &sudo("SET_PGENERATOR_CONF","ota_repo",$repo);
+ &webui_reload_pgenerator_conf();
+ my $out=&webui_update_repo_get();
+ return $out;
 }
 
 sub webui_apply_config (@) {
