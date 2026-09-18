@@ -107,7 +107,10 @@ normalize_repo() {
 
 GITHUB_REPO_RAW="${GITHUB_REPO:-$(read_conf_val ota_repo)}"
 GITHUB_REPO="$(normalize_repo "$GITHUB_REPO_RAW")"
-if [[ ! "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+if [[ ! "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] \
+   || [[ "${GITHUB_REPO%/*}" =~ ^[.]+$ ]] || [[ "${GITHUB_REPO#*/}" =~ ^[.]+$ ]]; then
+ # Second clause: dot-only segments ('..', '.') pass the charset check
+ # but URL-join against api.github.com; refuse them outright.
  GITHUB_REPO="$DEFAULT_GITHUB_REPO"
 fi
 GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"

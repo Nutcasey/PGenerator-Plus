@@ -9929,6 +9929,9 @@ sub webui_ota_repo_normalize ($) {
  $raw=~s/\.git$//i;
  return "" if($raw eq "");
  return undef unless($raw=~/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/);
+ # Dot-only segments ('..', '.') match the charset but URL-join; refuse.
+ my ($o,$r)=split m{/}, $raw, 2;
+ return undef if($o=~/^[.]+$/ || $r=~/^[.]+$/);
  return $raw;
 }
 

@@ -20,7 +20,7 @@ use strict;
 use warnings;
 use FindBin qw($Bin);
 use File::Temp qw(tempdir);
-use Test::More tests => 33;
+use Test::More tests => 36;
 
 my $script = "$Bin/../usr/sbin/pgenerator-update";
 ok(-f $script, 'pgenerator-update is present');
@@ -93,6 +93,15 @@ is(resolved_api(conf => "ota_repo=a/b/c\n"), $default_api,
 # slash-containing traversal was the only case; both are pinned now).
 is(resolved_api(conf => "ota_repo=..\n"), $default_api,
    'bare .. is rejected');
+# '../..' HAS a slash and all charset-legal chars: Nutcasey's review
+# showed it reaches the curl target as a URL-join ('..') segment. Both
+# validators now refuse dot-only segments; pinned here AND in parity.
+is(resolved_api(conf => "ota_repo=../..\n"), $default_api,
+   'dot-dot/dot-dot (URL-join traversal) is rejected');
+is(resolved_api(conf => "ota_repo=owner/..\n"), $default_api,
+   'owner/.. is rejected');
+is(resolved_api(conf => "ota_repo=owner/...\n"), $default_api,
+   'owner/... is rejected');
 
 # The check JSON must report which repo served the release so the WebUI
 # can show it next to the "Latest" version, plus the trust state.
@@ -146,10 +155,14 @@ sub bash_norm {
  local $ENV{PGEN_TEST_VAL}=$v;
  local $ENV{PGENERATOR_CONF_FILE}="$tmp/noconf";
  my $out=`bash "$runner" 2>/dev/null`;
- # Apply the same validator the script uses after normalize_repo, so the
- # comparison is against the RESOLVED value on both sides (the Perl sub
- # validates internally; the bash function is validation-free).
- return ($out =~ m{^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$}) ? $out : '';
+ # Apply the same validator the script uses after normalize_repo (charset
+ # plus the dot-only segment refusal), so the comparison is against the
+ # RESOLVED value on both sides (the Perl sub validates internally; the
+ # bash function is validation-free).
+ return '' unless $out =~ m{^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$};
+ my ($o,$r2) = split m{/}, $out, 2;
+ return '' if $o =~ /^\.+$/ || $r2 =~ /^\.+$/;
+ return $out;
 }
 sub perl_norm {
  my ($v)=@_;
@@ -163,7 +176,8 @@ my @parity_inputs = ('"foo/bar"', "'foo/bar'", ' foo/bar ', 'foo/bar ',
  'foo/bar/releases', 'foo/bar/', 'foo/bar.git', 'owner/name',
  'HTTPS://GITHUB.COM/foo/bar/RELEASES/LATEST', 'foo/bar//',
  'HTTPS://GITHUB.COM/Foo/Bar.GIT', 'http://github.com/foo/bar',
- 'foo bar', 'justowner', '../etc/passwd', 'a/b/c', '..', '');
+ 'foo bar', 'justowner', '../etc/passwd', 'a/b/c', '..', '../..',
+ 'owner/..', 'owner/...', './owner', 'owner/.git');
 my @mismatch;
 for my $v (@parity_inputs) {
  my ($b,$p) = (bash_norm($v), perl_norm($v));
