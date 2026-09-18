@@ -127,7 +127,12 @@ def connection_from(payload: dict[str, Any]) -> dict[str, str]:
 
 def github_source_from(payload: dict[str, Any]) -> dict[str, str]:
     raw_repo = str(payload.get("repository", "")).strip()
-    ref = str(payload.get("ref", "main")).strip()
+    # `... or "main"` after the strip, not a dict default: the frontend
+    # sends ref:"" when the picker field is untouched (the input starts
+    # empty so the datalist stays unfiltered), and dict.get only defaults
+    # on a MISSING key, so "" would reach REF_RE and fail the scan.
+    # Trim first so whitespace-only refs resolve the same way.
+    ref = str(payload.get("ref") or "").strip() or "main"
     token = str(payload.get("githubToken", "")).strip()
     repo = raw_repo
     for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
