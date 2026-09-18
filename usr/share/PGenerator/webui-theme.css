@@ -364,11 +364,18 @@ padding:4px 24px 4px 8px;border-radius:6px;font-size:.74rem;outline:none;transit
  #meterNoiseFloorControl #meterRgbBalanceNoiseFloorHint{
   min-height:44px;min-width:44px
  }
- /* input measured 39px wide under coarse rules in a real render — also
-    below the 44px minimum; min-width grows the hit box, 6ch still fits
-    any valid value (up to "10"). */
+ /* Belt and braces: the input's declared width (10ch, ~66px) already
+    exceeds 44px at the current font size; min-width holds the floor if the
+    declared width ever shrinks again (it measured 39px back at 6ch). */
  #meterNoiseFloorControl #meterRgbBalanceNoiseFloor{min-height:44px;min-width:44px}
 }
+/* Preset button look lives here, not inline: the highlight reset in
+   meterUpdateNoiseFloorControlAvailability sets style.color='' /
+   borderColor='' on inactive buttons (and on all of them at first load),
+   which deletes the inline longhands — with no author rule to fall back to,
+   the UA's button{color:ButtonText} wins and the row renders near-white on
+   the dark theme. An author class rule restores the tokens on reset. */
+.noise-floor-preset{appearance:none;background:var(--surface-inset,rgba(255,255,255,.06));border:1px solid var(--border);border-radius:4px;color:var(--text2);font-size:.62rem;line-height:1;padding:3px 5px;cursor:pointer}
 #meterSettingsGrid{display:flex;flex-wrap:wrap;gap:10px 12px;align-items:flex-start}
 #meterSettingsGrid .field{flex:0 0 auto;min-width:0}
 #meterSettingsGrid > .field > label:first-child{min-height:18px;display:flex;align-items:center}
