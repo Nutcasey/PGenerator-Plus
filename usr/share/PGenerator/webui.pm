@@ -13249,6 +13249,18 @@ sub webui_automation_log_level (@) {
  return 'info';
 }
 
+# A check's severity for the activity log. A warning that only asks the
+# operator to look at a TV menu the API does not expose (manual controls,
+# hazard settings, panel protection) is a note: shown, but not coloured as a
+# problem, or six jobs' reminders drown the lines that matter.
+sub webui_automation_check_level (@) {
+ my ($check)=@_;
+ return "ok" if($check->{ok});
+ my $level=$check->{level}||"warning";
+ return "note" if($level eq "warning" && ($check->{name}||"")=~/-(?:manual|panel-protection)\z|-hazard-/);
+ return $level;
+}
+
 sub webui_automation_activity (@) {
  my ($run,$preflight)=@_;
  my @entries;
@@ -13258,7 +13270,7 @@ sub webui_automation_activity (@) {
   my $items=$run->{items}||[];
   for(my $i=0;$i<@$items;$i++) {
    foreach my $check (@{$items->[$i]{readiness}{checks}||[]}) {
-    push @entries,{time=>$check->{time},level=>$check->{ok}?"ok":($check->{level}||"warning"),message=>$check->{message}||$check->{name}||"",item_number=>$i,source=>"Job check"};
+    push @entries,{time=>$check->{time},level=>&webui_automation_check_level($check),message=>$check->{message}||$check->{name}||"",item_number=>$i,source=>"Job check"};
    }
   }
  }
@@ -13269,7 +13281,7 @@ sub webui_automation_activity (@) {
  }
  if(ref($source) eq "HASH") {
   foreach my $check (@{$source->{checks}||$source->{issues}||[]}) {
-   push @entries,{time=>$check->{time},level=>$check->{ok}?"ok":($check->{level}||"warning"),message=>$check->{message}||$check->{name}||"",item_number=>$check->{item_number},source=>"Startup check"};
+   push @entries,{time=>$check->{time},level=>&webui_automation_check_level($check),message=>$check->{message}||$check->{name}||"",item_number=>$check->{item_number},source=>"Startup check"};
   }
  }
  if(ref($run) eq "HASH" && PGAutomation::safe_component($run->{id})) {
@@ -13309,6 +13321,18 @@ sub webui_automation_read_run (@) {
  $run->{id}=$run_id if(ref($run) eq "HASH" && (!defined($run->{id}) || $run->{id} eq ""));
  return $run if(ref($run) eq "HASH");
  return undef;
+}
+
+# The manifest as webui_automation_read_run returns it, decoded once per change.
+sub webui_automation_read_run_cached (@) {
+ my ($run_id)=@_;
+ $run_id=PGAutomation::safe_component($run_id);
+ return undef if($run_id eq "");
+ my $run=PGAutomation::read_json_cached(PGAutomation::run_dir($run_id)."/run.json");
+ return undef if(ref($run) ne "HASH");
+ $run->{active_item}=$run->{active_item}{item_number} if(ref($run->{active_item}) eq "HASH");
+ $run->{id}=$run_id if(!defined($run->{id}) || $run->{id} eq "");
+ return $run;
 }
 
 # The live view of a run, for status polls and liveness checks only. The
@@ -13446,7 +13470,9 @@ sub webui_automation_fresh_worker (@) {
 
 sub webui_automation_job_detail (@) {
  my ($id,$index)=@_;
- my $run=&webui_automation_read_run($id);
+ # Polled every few seconds by every open tab; the manifest is decoded once
+ # per change, not once per poll.
+ my $run=&webui_automation_read_run_cached($id);
  return undef if(ref($run) ne "HASH" || $index !~ /^\d+$/ || $index >= scalar(@{$run->{items}||[]}));
  my $item=PGAutomation::clone($run->{items}[$index]);
  my $dir=PGAutomation::item_dir($run->{id},$index);
@@ -13480,7 +13506,7 @@ sub webui_automation_job_detail (@) {
    && ref($execution) eq "HASH" && ($execution->{owner}||"") eq "automation" && ($execution->{run_id}||"") eq $run->{id}
    && ($run->{token}||"") ne "" && ($execution->{token}||"") eq $run->{token} && $run->{stage_started_at}) {
   my $state=&webui_automation_fresh_worker($source->[1],$run->{stage_started_at});
-  my $after=&webui_automation_read_run($id);
+  my $after=&webui_automation_read_live($id);
   if(ref($state) eq "HASH" && ($source->[0] eq "series" || ($state->{full_autocal_run_id}||"") eq $run->{id}) && ref($after) eq "HASH" && ($after->{status}||"") eq "running"
     && defined($after->{active_item}) && $after->{active_item} == $index && ($after->{active_stage}||"") eq $stage
     && ($after->{stage_started_at}||0) == $run->{stage_started_at}) {

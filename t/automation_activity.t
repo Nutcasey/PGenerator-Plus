@@ -18,6 +18,17 @@ is($log->{entries}[1]{item_number},1,'check job identity retained');
 is($log->{entries}[2]{time},main::webui_automation_log_time('2026-09-13T10:00:00'),'legacy runner timestamp resolved on the device');
 is($log->{entries}[3]{level},'error','failure highlighted');
 unlike(PGAutomation::encode_json($log),qr/private-token|abc|xyz|partial/,'secrets and unfinished lines excluded');
+# A reminder to look at a TV menu the API does not expose is a note, shown but
+# not coloured as a problem; a control that could not be verified stays a warning.
+{
+ my $notes=main::webui_automation_activity({id=>'notes-test',items=>[{readiness=>{checks=>[
+  {ok=>0,level=>'warning',name=>'item-0-manual',message=>'TruMotion: verify Off in the TV menu'},
+  {ok=>0,level=>'warning',name=>'item-0-hazard-screenSaver',message=>'LG did not expose screenSaver'},
+  {ok=>0,level=>'warning',name=>'item-0-panel-protection',message=>'Panel protection will be switched off'},
+  {ok=>0,level=>'warning',name=>'item-0-key-colorGamut',message=>'colorGamut: Requested Auto; LG reported Wide'},
+  {ok=>0,level=>'error',name=>'item-0-hazard-autoPowerOff',message=>'autoPowerOff could not be read'}]}}]},undef);
+ is_deeply([map {$_->{level}} @{$notes->{entries}}],[qw(note note note warning error)],'menu reminders are notes; unverified controls and errors keep their severity');
+}
 ok(!$log->{truncated},'short log is not truncated');
 PGAutomation::append_line_locked($path,"\n".join('',map {"[2026-09-13T10:01:00] line $_ ".('x'x300)."\n"} 1..600));
 $log=main::webui_automation_activity($run,undef);

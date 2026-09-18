@@ -291,11 +291,13 @@ sub file_mtime {
 # size, mtime; every writer here renames a fresh file into place) is the same.
 # Callers get their own deep copy: the cached value is never handed out.
 my %JSON_CACHE;
-my $JSON_CACHE_LIMIT = 24;
-# Only small files are kept: the live status and the preflight status are a
-# few tens of kilobytes; a full manifest is not, and every daemon worker
-# thread holds its own cache for as long as the daemon runs.
-our $JSON_CACHE_MAX_BYTES = 262144;
+# Bounded by bytes of JSON held, not by entry count: every daemon worker
+# thread holds its own cache for as long as the daemon runs. A single file
+# over the per-file limit is never kept; when the total passes the budget the
+# least recently used entries go first. A run manifest (a few hundred KB
+# while a batch runs) fits; the live and preflight status files are small.
+our $JSON_CACHE_MAX_BYTES = 1048576;
+our $JSON_CACHE_BUDGET_BYTES = 3145728;
 sub read_json_cached {
     my ($path) = @_;
     return undef if !defined($path) || $path eq '';
@@ -310,11 +312,15 @@ sub read_json_cached {
     if (!$entry || $entry->{key} ne $key) {
         my $value = eval { read_json_file($path) };
         return undef if !defined($value);
-        if (keys(%JSON_CACHE) >= $JSON_CACHE_LIMIT) {
-            my ($oldest) = sort { $JSON_CACHE{$a}{used} <=> $JSON_CACHE{$b}{used} } keys %JSON_CACHE;
+        delete $JSON_CACHE{$path};
+        my $held = 0;
+        $held += $JSON_CACHE{$_}{bytes} for keys %JSON_CACHE;
+        for my $oldest (sort { $JSON_CACHE{$a}{used} <=> $JSON_CACHE{$b}{used} } keys %JSON_CACHE) {
+            last if $held + $st[7] <= $JSON_CACHE_BUDGET_BYTES;
+            $held -= $JSON_CACHE{$oldest}{bytes};
             delete $JSON_CACHE{$oldest};
         }
-        $entry = $JSON_CACHE{$path} = { key => $key, value => $value };
+        $entry = $JSON_CACHE{$path} = { key => $key, value => $value, bytes => $st[7] };
     }
     $entry->{used} = time();
     return ref($entry->{value}) ? Storable::dclone($entry->{value}) : $entry->{value};

@@ -1001,7 +1001,7 @@ function pgAutomationRenderActivity(){
  pgAutomation.logSignature=signature;
  const top=box.scrollTop,follow=pgAutomation.logFollow;
  const rows=entries.slice(-500);
- box.innerHTML=rows.length?rows.map(entry=>'<div data-level="'+(['error','warning','ok'].includes(entry.level)?entry.level:'info')+'"><time>'+pgAutomationEscape(entry.time?pgAutomationFormatTime(typeof entry.time==='number'?entry.time*1000:entry.time):'Time not recorded')+'</time> · '+pgAutomationEscape(entry.source||'Activity')+(entry.item_number!=null?' · Job '+(Number(entry.item_number)+1):'')+' · '+pgAutomationEscape(entry.message)+'</div>').join(''):'No activity yet.';
+ box.innerHTML=rows.length?rows.map(entry=>'<div data-level="'+(['error','warning','note','ok'].includes(entry.level)?entry.level:'info')+'"><time>'+pgAutomationEscape(entry.time?pgAutomationFormatTime(typeof entry.time==='number'?entry.time*1000:entry.time):'Time not recorded')+'</time> · '+pgAutomationEscape(entry.source||'Activity')+(entry.item_number!=null?' · Job '+(Number(entry.item_number)+1):'')+' · '+pgAutomationEscape(entry.message)+'</div>').join(''):'No activity yet.';
  box.scrollTop=follow?box.scrollHeight:top;
  pgAutomationEl('LogCount').textContent='· '+rows.length+' entries';
  pgAutomationEl('LogContext').textContent=(historical?'History · ':'')+(run?.queue_name||pre?.queue_name||'Startup checks and batch output');
@@ -1239,7 +1239,7 @@ function pgAutomationRenderProgress(){
  const unique=[...new Set(issues.map(pgAutomationIssueText).filter(Boolean))];
  box.innerHTML='<strong>'+pgAutomationEscape(title||(error?'Automation needs attention':'Automation'))+'</strong><div class="auto-muted">'+pgAutomationEscape(message)+'</div>'
   +((showRun||pre)?pgAutomationProgressMeters(showRun?run:null,pre)+pgAutomationReadoutsHtml(showRun?run:null,pre,completed,total,showRun):'')
-  +(unique.length?'<details '+(error?'open':'')+'><summary>'+(error?'Problems requiring attention':'Warnings and manual checks')+' ('+unique.length+')</summary><div class="auto-issues">'+unique.map(text=>'<p class="auto-muted"'+(issues.some(issue=>pgAutomationIssueText(issue)===text&&issue.level==='warning')?' data-level="warning"':'')+'>'+pgAutomationEscape(text)+'</p>').join('')+'</div></details>':'')
+  +(unique.length?'<details '+(error?'open':'')+'><summary>'+(error?'Problems requiring attention':'Warnings and manual checks')+' ('+unique.length+')</summary><div class="auto-issues">'+unique.map(text=>{const match=issues.find(issue=>pgAutomationIssueText(issue)===text);const level=match&&match.level==='warning'?pgAutomationCheckLevel({...match,ok:false}):'';return '<p class="auto-muted"'+(level?' data-level="'+level+'"':'')+'>'+pgAutomationEscape(text)+'</p>';}).join('')+'</div></details>':'')
   +(!showRun&&pre?.id&&['ready','blocked','failed','interrupted'].includes(pre.status)?'<p class="auto-muted">This is a saved check result, not an active calibration lock. After correcting the issue, check again or dismiss this result. Dismissing does not bypass future safety checks.</p><button id="pgAutomationDismissReadiness" type="button" class="btn btn-sm btn-secondary" onclick="pgAutomationDismissReadiness(this)">Dismiss previous check</button>':'');
 }
 function pgAutomationBeginChecks(intent){
@@ -1262,6 +1262,16 @@ function pgAutomationReadinessQueueMatches(run){
  const mine=(pgAutomation.queue?.items||[]).map(label),theirs=(run.items||[]).map(label);
  return mine.length>0&&mine.length===theirs.length&&mine.every((name,i)=>name===theirs[i]);
 }
+// Three kinds of notice. An error needs fixing before calibration; a warning
+// changed the outcome (a control that could not be verified, a mismatch); a
+// note asks the operator to look at a TV menu the API does not expose. Only
+// the first two deserve a colour, or six jobs' menu reminders paint the whole
+// page orange.
+function pgAutomationCheckLevel(check){
+ if(!check||check.ok)return 'ok';
+ if(check.level==='warning'&&/-(?:manual|panel-protection)$|-hazard-/.test(String(check.name||'')))return 'note';
+ return check.level==='warning'?'warning':'error';
+}
 function pgAutomationRenderReadiness(result,run){
  const box=pgAutomationEl('Readiness');if(!result){box.textContent='Readiness request failed';return;}
  if(run&&!pgAutomationReadinessQueueMatches(run)){
@@ -1279,13 +1289,15 @@ function pgAutomationRenderReadiness(result,run){
  const esc=pgAutomationEscape,names=result.jobs||run?.items||pgAutomation.queue?.items||[];
  const groups=new Map();
  for(const check of checks){const key=check.item_number==null||check.item_number===''?-1:Number(check.item_number);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(check);}
- const problems=checks.filter(check=>!check.ok),errors=problems.filter(check=>check.level!=='warning').length,warnings=problems.length-errors;
- const summary=[checks.length+' checks',errors?errors+' failed':null,warnings?warnings+' to verify manually':null].filter(Boolean).join(' · ');
- const line=check=>'<li data-level="'+(check.level==='warning'?'warning':'error')+'">'+esc(pgAutomationIssueText({...check,item_number:null,signal_format:check.signal_format||(check.item_number!=null?(run?.items||[])[Number(check.item_number)]?.signal_format:'')}))+'</li>';
+ const tally=list=>{const t={error:0,warning:0,note:0,ok:0};list.forEach(check=>{t[pgAutomationCheckLevel(check)]++;});return t;};
+ const describe=t=>[t.error?t.error+' failed':null,t.warning?t.warning+' to check':null,t.note?t.note+' manual':null].filter(Boolean).join(' · ');
+ const problems=checks.filter(check=>!check.ok),totals=tally(checks),errors=totals.error;
+ const summary=[checks.length+' checks',describe(totals)].filter(Boolean).join(' · ');
+ const line=check=>'<li data-level="'+pgAutomationCheckLevel(check)+'">'+esc(pgAutomationIssueText({...check,item_number:null,signal_format:check.signal_format||(check.item_number!=null?(run?.items||[])[Number(check.item_number)]?.signal_format:'')}))+'</li>';
  const group=key=>{
-  const list=groups.get(key),bad=list.filter(check=>!check.ok),good=list.length-bad.length;
+  const list=groups.get(key),bad=list.filter(check=>!check.ok),t=tally(list);
   const title=key<0?'Equipment and queue':'Job '+(key+1)+(names[key]?.name?' · '+names[key].name:'');
-  return '<section class="auto-readiness-job"><h5>'+esc(title)+' <span class="auto-muted">'+(bad.length?bad.length+' to check':'passed')+(good&&bad.length?' · '+good+' passed':'')+'</span></h5>'
+  return '<section class="auto-readiness-job"><h5>'+esc(title)+' <span class="auto-muted">'+(bad.length?describe(t):'passed')+(t.ok&&bad.length?' · '+t.ok+' passed':'')+'</span></h5>'
    +(bad.length?'<ul class="auto-readiness-problems">'+bad.map(line).join('')+'</ul>':'')+'</section>';
  };
  box.innerHTML='<p class="auto-muted">'+esc(result.message||'Readiness')+'</p>'

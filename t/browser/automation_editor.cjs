@@ -15,7 +15,7 @@ const root=path.resolve(__dirname,'../..');
   await page.addStyleTag({content:fs.readFileSync(path.join(root,'usr/share/PGenerator/webui-theme.css'),'utf8')});
   // Injected styles transition from the browser's native button colour.
   // Inspect the settled UI, not the first animation frame.
-  await page.waitForFunction(()=>getComputedStyle(document.getElementById('pgAutomationStartButton')).backgroundColor==='rgb(255, 68, 68)');
+  await page.waitForFunction(()=>{const b=getComputedStyle(document.getElementById('pgAutomationStartButton')).backgroundColor;return b!=='rgba(0, 0, 0, 0)'&&b!==getComputedStyle(document.getElementById('pgAutomationReadinessButton')).backgroundColor;});
   const lg=fs.readFileSync(path.join(root,'usr/share/PGenerator/webui-lg.js'),'utf8');
   const metadata=lg.match(/const LG_DISPLAY_CONTROL_ITEMS=\[[\s\S]*?const LG_DISPLAY_CONTROL_KEYS=[^;]+;/);
   assert.ok(metadata,'shared LG settings metadata found');
@@ -33,7 +33,9 @@ const root=path.resolve(__dirname,'../..');
    const runButton=pgAutomationEl('StartButton'),runRect=runButton.getBoundingClientRect();
    const readiness=pgAutomationEl('ReadinessButton'),runStyle=getComputedStyle(runButton),readyStyle=getComputedStyle(readiness);
    check(runRect.height===readiness.getBoundingClientRect().height&&runStyle.padding===readyStyle.padding&&runStyle.fontSize===readyStyle.fontSize,'Run queue uses the same compact sizing as Check Readiness');
-   check(runButton.classList.contains('btn-danger')&&runStyle.backgroundColor!==readyStyle.backgroundColor&&runStyle.boxShadow==='none','Run queue uses the standard red action colour without a glow');
+   // 18 Sep 2026: red is for Stop. Run queue is the primary action, and a
+   // disabled primary must not sit on the page as a red block for hours.
+   check(runButton.classList.contains('btn-primary')&&!runButton.classList.contains('btn-danger')&&runStyle.backgroundColor!==readyStyle.backgroundColor&&runStyle.backgroundColor!=='rgb(255, 68, 68)'&&runStyle.boxShadow==='none','Run queue uses the primary action colour, not red, without a glow');
    check(document.querySelectorAll('#pgAutomationStartButton').length===1&&runButton.classList.contains('btn-sm')&&runRect.bottom<pgAutomationEl('QueueItems').getBoundingClientRect().top,'Run queue remains a single compact action above the jobs');
    check(pgAutomationEl('DeleteQueueButton').disabled&&!/colourstrue|built-in template|template setup/i.test(document.body.innerText),'reference queue has no branded panel or template labels');
    for(const [index,item] of pgAutomation.queue.items.entries()){
@@ -287,7 +289,9 @@ const root=path.resolve(__dirname,'../..');
    check(!pgAutomationEl('Live').textContent.includes('Heartbeat')&&!pgAutomationEl('Live').querySelector('[aria-current="step"]'),'stopped job list has no live heartbeat or current step');
    pgAutomation.current={run};pgAutomationRenderLiveRun(run,null);
    const originalFetch=window.fetchJSON;window.fetchJSON=async()=>null;
-   try{await pgAutomationPollLive();check(pgAutomation.current.run===run&&pgAutomationEl('Progress').textContent.includes('progress is unconfirmed'),'lost status requests retain last known run and show a connection error');}
+   // One missed poll is a delay; the connection error appears after three in a row.
+   try{await pgAutomationPollLive();check(pgAutomation.current.run===run&&pgAutomation.pollDelayed&&!pgAutomationEl('Progress').textContent.includes('progress is unconfirmed'),'one lost status request retains the last known run as a delay');
+    await pgAutomationPollLive();await pgAutomationPollLive();check(pgAutomation.current.run===run&&pgAutomationEl('Progress').textContent.includes('progress is unconfirmed'),'repeated lost status requests retain last known run and show a connection error');}
    finally{window.fetchJSON=originalFetch;if(pgAutomation.liveTimer)clearTimeout(pgAutomation.liveTimer);pgAutomation.liveTimer=null;}
    return checks;
   });

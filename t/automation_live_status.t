@@ -101,6 +101,23 @@ is(PGAutomation::read_json_cached($status_file)->{worker_status}{message},'Fresh
  is(PGAutomation::read_json_cached($status_file)->{worker_status}{message},'Fresher','and never served stale');
 }
 {
+ # The cache is bounded by bytes held; the least recently used entries go first.
+ local $PGAutomation::JSON_CACHE_BUDGET_BYTES=(-s $status_file)+(-s $run_file)-1;
+ my $a=PGAutomation::read_json_cached($run_file);
+ my $b=PGAutomation::read_json_cached($status_file);
+ ok(ref($a) eq 'HASH' && ref($b) eq 'HASH','both files read under a budget that cannot hold both');
+ is(PGAutomation::read_json_cached($status_file)->{worker_status}{message},'Fresher','the most recent stays cached and correct');
+ PGAutomation::with_lock($run_file,sub {$_[0]{checkpoint}='budget-check';return $_[0];});
+ is(PGAutomation::read_json_cached($run_file)->{checkpoint},'budget-check','an evicted file is re-read from disk when asked again');
+ main::_update_live(sub {$_[0]{worker_status}={message=>'Fresher'};});
+}
+{
+ # The job detail the tabs poll every few seconds reads the manifest through the cache.
+ my $detail=main::webui_automation_job_detail($run_id,0);
+ is($detail->{item}{name},'SDR Filmmaker','job detail still serves the item');
+ is($detail->{item}{checkpoints}[0]{name},'tv-setup-verified','with its full checkpoint record');
+}
+{
  local *main::webui_automation_reap_dead_runner=sub {0};
  my $poll=PGAutomation::decode_json(main::webui_automation_api('/api/automation/runs/current','GET',''));
  is($poll->{run}{worker_status}{message},'Fresher','the status poll reflects the live status');

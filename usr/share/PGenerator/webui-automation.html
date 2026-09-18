@@ -59,6 +59,8 @@
  #automationCard .auto-log time{color:var(--text2)}
  #automationCard .auto-issues{max-height:180px;overflow:auto;overscroll-behavior:contain}
  #automationCard .auto-issues [data-level=warning],#automationCard .auto-readiness-problems [data-level=warning]{color:var(--orange)}
+ /* A reminder to check a menu the TV does not expose is a note, not a problem. */
+ #automationCard .auto-issues [data-level=note],#automationCard .auto-readiness-problems [data-level=note],#automationCard .auto-log [data-level=note]{color:var(--text2)}
  #automationCard .auto-readiness-problems{padding-left:20px;margin:10px 0}
  #automationCard .auto-readiness-problems li{padding:3px 0}
  #automationCard .auto-readiness-problems [data-level=error]{color:var(--red)}
@@ -187,7 +189,7 @@
   </div>
   <div class="field"><label for="pgAutomationFinishPolicy">When the batch finishes</label><select id="pgAutomationFinishPolicy" onchange="pgAutomationFinishPolicyChanged()"><option value="restore-original">Restore original signal and picture mode where readable</option><option value="keep-last">Leave the final calibrated mode selected</option></select><small>Temporary protection settings are restored in both cases. An unreadable original picture mode is never guessed.</small></div>
   <div class="auto-toolbar auto-run-actions">
-   <button class="btn btn-sm btn-danger" id="pgAutomationStartButton" type="button" onclick="pgAutomationStart()">Run queue</button>
+   <button class="btn btn-sm btn-primary" id="pgAutomationStartButton" type="button" onclick="pgAutomationStart()">Run queue</button>
    <button class="btn btn-sm btn-secondary" id="pgAutomationReadinessButton" type="button" onclick="pgAutomationReadiness()">Check Readiness</button>
    <button class="btn btn-sm btn-primary" id="pgAutomationSavePendingButton" type="button" style="display:none" onclick="pgAutomationEditActiveQueue()">Save Pending Changes</button>
   </div>
