@@ -3541,7 +3541,7 @@ async function checkUpdate(){
   document.getElementById('updateStatus').textContent=r?r.message:'Check failed — no internet?';
   return;
  }
- if(r.repo) updateOtaRepoNote(r.repo);
+ if(r.repo) updateOtaRepoNote(r.repo,r.trusted==='yes'||r.trusted===true);
  document.getElementById('updateCurrent').textContent='v'+r.current;
  document.getElementById('updateLatest').textContent='v'+r.latest;
  document.getElementById('updatePublished').textContent=r.published?r.published.split('T')[0]:'-';
@@ -3570,12 +3570,17 @@ function showUpdateCard(){
 // ── OTA source repo setting ──
 // Persisted server-side as ota_repo in PGenerator.conf and read by
 // /usr/sbin/pgenerator-update on every check/apply. Clearing the field
-// restores the official default repo.
-function updateOtaRepoNote(repo){
+// restores the official default repo. A custom source is a root-trust
+// decision (releases are unsigned), so saving one asks for an explicit
+// confirm and the server sets ota_repo_trusted=1; apply refuses any
+// non-default repo without it. The X-PGenerator-Write header marks
+// same-origin UI writes: a cross-origin form post cannot attach it.
+function updateOtaRepoNote(repo,trusted){
  const note=document.getElementById('otaRepoNote');
  if(!note||!repo) return;
  const def=note.dataset.defaultRepo||'oldgithubman/PGenerator-Plus';
- note.textContent=(repo===def)?('Official updates: '+repo):('Custom update source: '+repo);
+ if(repo===def) note.textContent='Official updates: '+repo;
+ else note.textContent=trusted?('Custom update source (trusted): '+repo):('Custom update source (NOT trusted — updates blocked): '+repo);
 }
 async function loadOtaRepo(){
  const r=await fetchJSON('/api/update/repo',{_quiet:true,_timeoutMs:8000});
@@ -3584,24 +3589,25 @@ async function loadOtaRepo(){
  if(input&&document.activeElement!==input) input.value=r.custom?r.repo:'';
  const note=document.getElementById('otaRepoNote');
  if(note&&r.default_repo) note.dataset.defaultRepo=r.default_repo;
- updateOtaRepoNote(r.repo);
+ updateOtaRepoNote(r.repo,r.trusted);
 }
 async function saveOtaRepo(){
  const input=document.getElementById('otaRepo');
  const btn=document.getElementById('saveOtaRepoBtn');
  const raw=(input&&input.value||'').trim();
- // Normalize client-side just for the confirm message; the server
- // re-validates authoritatively.
+ if(raw&&!confirm('Use '+raw+' as the update source?\n\nReleases are not code-signed: installing from a custom repo means fully trusting its owner with root on this device.')){
+  return;
+ }
  const btnState=btn?btn.textContent:'';
  if(btn){btn.disabled=true;btn.textContent='Saving...';}
- const r=await fetchJSON('/api/update/repo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo:raw}),_quiet:true,_timeoutMs:10000});
+ const r=await fetchJSON('/api/update/repo',{method:'POST',headers:{'Content-Type':'application/json','X-PGenerator-Write':'1'},body:JSON.stringify({repo:raw}),_quiet:true,_timeoutMs:10000});
  if(btn){btn.disabled=false;btn.textContent=btnState;}
  if(!r||r.status!=='ok'){
   toast(r&&r.message?r.message:'Failed to save update repo','error');
   return;
  }
  if(input) input.value=r.custom?r.repo:'';
- updateOtaRepoNote(r.repo);
+ updateOtaRepoNote(r.repo,r.trusted);
  toast(raw?'Update source set to '+r.repo:'Update source restored to default');
  _updateChecked=false;
  checkUpdate();
@@ -3610,7 +3616,7 @@ async function applyUpdate(){
  if(!confirm('Install update now? PGenerator+ will restart.'))return;
  document.getElementById('applyUpdateBtn').disabled=true;
  document.getElementById('updateStatus').innerHTML='<span class="spinner"></span> Downloading and installing...';
- const r=await fetchJSON('/api/update/apply',{method:'POST'});
+ const r=await fetchJSON('/api/update/apply',{method:'POST',headers:{'X-PGenerator-Write':'1'}});
  if(r&&r.status==='ok'){
   document.getElementById('updateStatus').textContent='Update started. The page will reload when PGenerator+ restarts...';
   setTimeout(()=>location.reload(),30000);

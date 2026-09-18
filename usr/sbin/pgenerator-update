@@ -9,7 +9,9 @@
 #
 # Update stream: https://github.com/oldgithubman/PGenerator-Plus/releases
 # (factory default; override via ota_repo in /etc/PGenerator/PGenerator.conf
-#  or the GITHUB_REPO environment variable)
+#  or the GITHUB_REPO environment variable). A non-default ota_repo only
+# passes `apply` when ota_repo_trusted=1 is also set — see the trust gate
+# in the apply branch.
 #
 # Release assets are tar.gz archives containing files in FHS layout:
 #   usr/share/PGenerator/*.pm
@@ -42,29 +44,55 @@ GITHUB_UA="User-Agent: PGenerator-Plus-Updater"
 # conf key > factory default. A full URL is accepted and normalized to
 # owner/repo. Values that are not a safe owner/repo pair fall back to the
 # default so a typo cannot brick the update path or inject a URL.
-read_conf_repo() {
- local v=""
+read_conf_val() {
  [ -f "$PGENERATOR_CONF_FILE" ] || return 0
- v=$(grep '^ota_repo=' "$PGENERATOR_CONF_FILE" 2>/dev/null | tail -1 | cut -d= -f2-)
- printf '%s' "$v"
+ # || true: with pipefail set, a missing key makes grep exit 1 and would
+ # abort the whole script from inside the $(...) in GITHUB_REPO_RAW.
+ grep "^$1=" "$PGENERATOR_CONF_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# A custom update source is a full root-trust decision (apply extracts an
+# unsigned tarball at / as root), so the WebUI sets ota_repo_trusted=1
+# alongside a custom ota_repo after an explicit operator confirm. apply
+# refuses any non-default repo without that second key, so a request that
+# rewrites only ota_repo (e.g. a cross-site drive-by) can never install
+# code. Manual conf edits must set both keys.
+custom_repo_trusted() {
+ [ "$(read_conf_val ota_repo_trusted)" = "1" ]
 }
 
 normalize_repo() {
+ # Byte-for-byte parity with webui_ota_repo_normalize() in webui.pm: trim
+ # whitespace; prefix strips (/releases suffix, trailing slashes, .git) in
+ # the same order; case-insensitive; quoted values are NOT stripped (they
+ # fail validation on both sides). The two normalizers disagreeing would
+ # let the UI show "Official updates" while the updater pulls from a fork
+ # (PR-20 review finding #2). Detection runs against a lowercased copy so
+ # every strip is case-insensitive without relying on nocasematch, which
+ # does not apply to ${var#pattern} expansions.
  local raw="${1:-}"
- raw="${raw%\"}"; raw="${raw#\"}"
- raw="${raw%\'}"; raw="${raw#\'}"
- # Accept https://github.com/owner/repo(/releases...)? and git@github.com:owner/repo(.git)
- raw="${raw#https://github.com/}"
- raw="${raw#http://github.com/}"
- raw="${raw#git@github.com:}"
- raw="${raw%/}"
- raw="${raw%/releases/latest}"
- raw="${raw%/releases}"
- raw="${raw%.git}"
+ raw="${raw#"${raw%%[![:space:]]*}"}"
+ raw="${raw%"${raw##*[![:space:]]}"}"
+ local lc
+ lc=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+ # Strip order mirrors webui.pm exactly: github prefix, /releases[(/latest)]
+ # with optional trailing slash, trailing slashes, then .git.
+ if [[ "$lc" == https://github.com/* ]]; then raw="${raw:19}"; lc="${lc:19}"
+ elif [[ "$lc" == http://github.com/* ]]; then raw="${raw:18}"; lc="${lc:18}"
+ elif [[ "$lc" == git@github.com:* ]]; then raw="${raw:15}"; lc="${lc:15}"
+ fi
+ # /releases(/latest)?/?$ — longest alternative first, like the Perl regex
+ if [[ "$lc" == */releases/latest ]]; then raw="${raw:0:${#lc}-16}"
+ elif [[ "$lc" == */releases/ ]]; then raw="${raw:0:${#lc}-10}"
+ elif [[ "$lc" == */releases ]]; then raw="${raw:0:${#lc}-9}"
+ fi
+ lc=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+ while [[ "$lc" == */ ]]; do raw="${raw:0:${#raw}-1}"; lc="${lc:0:${#lc}-1}"; done
+ [[ "$lc" == *.git ]] && raw="${raw:0:${#raw}-4}"
  printf '%s' "$raw"
 }
 
-GITHUB_REPO_RAW="${GITHUB_REPO:-$(read_conf_repo)}"
+GITHUB_REPO_RAW="${GITHUB_REPO:-$(read_conf_val ota_repo)}"
 GITHUB_REPO="$(normalize_repo "$GITHUB_REPO_RAW")"
 if [[ ! "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
  GITHUB_REPO="$DEFAULT_GITHUB_REPO"
@@ -431,19 +459,33 @@ case "$cmd" in
    changelog="A newer image release ($latest) is available, but it is outside the OTA family of your current version ($current). OTA updates only apply within the same major.minor series (e.g. 2.7.x -> 2.7.x). To move to $latest, download the full image and re-flash your SD card."
   fi
 
-  printf '{"status":"ok","current":%s,"latest":%s,"update_available":%s,"published":%s,"changelog":%s,"asset_url":%s,"repo":%s}\n' \
+  trusted=false
+  if [ "$GITHUB_REPO" = "$DEFAULT_GITHUB_REPO" ] || custom_repo_trusted; then trusted=true; fi
+  printf '{"status":"ok","current":%s,"latest":%s,"update_available":%s,"published":%s,"changelog":%s,"asset_url":%s,"repo":%s,"trusted":%s}\n' \
    "$(json_escape "$current")" \
    "$(json_escape "$latest")" \
    "$update_available" \
    "$(json_escape "$published")" \
    "$(json_escape "$changelog")" \
    "$(json_escape "$asset_url")" \
-   "$(json_escape "$GITHUB_REPO")"
+   "$(json_escape "$GITHUB_REPO")" \
+   "$trusted"
   ;;
 
  apply)
   current=$(get_current_version)
   log_msg "Update check started (current: $current)"
+
+  # Custom-repo root-trust gate (PR-20 review finding #1): apply extracts
+  # an unsigned tarball at / as root, so a non-default source requires the
+  # separate ota_repo_trusted=1 key. A cross-site request can at most
+  # rewrite ota_repo; without the trust key the download never starts.
+  if [ "$GITHUB_REPO" != "$DEFAULT_GITHUB_REPO" ] && ! custom_repo_trusted; then
+   log_msg "ERROR: refusing to apply from untrusted repo $GITHUB_REPO"
+   echo "ERROR: Update source $GITHUB_REPO is not trusted. Set it from the WebUI Software Update card and confirm the trust prompt." >&2
+   printf '{"status":"error","message":"Update source %s is not trusted. Save it from the WebUI and confirm the trust prompt.","repo":"%s"}\n' "$GITHUB_REPO" "$GITHUB_REPO"
+   exit 1
+  fi
 
   release_json=$(get_latest_release)
   if [ -z "$release_json" ]; then
