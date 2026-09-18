@@ -253,10 +253,10 @@ const LG_DISPLAY_CONTROL_ITEMS=[
  {key:'peakBrightness',label:'Peak Brightness',type:'select',options:['off','low','medium','high']},
  {key:'color',label:'Color',type:'number',min:0,max:100,step:1},
  {key:'colorDepth',label:'Color Depth',type:'number',min:0,max:100,step:1},
- {key:'tint',label:'Tint',type:'number',min:0,max:100,step:1},
- {key:'sharpness',label:'Sharpness',type:'number',min:0,max:100,step:1},
- {key:'hSharpness',label:'H Sharpness',type:'number',min:0,max:100,step:1},
- {key:'vSharpness',label:'V Sharpness',type:'number',min:0,max:100,step:1},
+ {key:'tint',label:'Tint',type:'number',min:-50,max:50,step:1},
+ {key:'sharpness',label:'Sharpness',type:'number',min:0,max:50,step:1},
+ {key:'hSharpness',label:'H Sharpness',type:'number',min:0,max:50,step:1},
+ {key:'vSharpness',label:'V Sharpness',type:'number',min:0,max:50,step:1},
  {key:'gamma',label:'Gamma',type:'select',options:['1.9','2.2','2.4','bt1886','BT.1886']},
  {key:'colorTemperature',label:'Color Temperature',type:'select',options:['cool','medium','warm','warm1','warm2','warm3','expert1','expert2']},
  {key:'colorGamut',label:'Color Gamut',type:'select',options:['auto','native','extended','wide']},
@@ -375,25 +375,34 @@ function lgAutomationHoldsPollers(){return Date.now()<lgAutomationCachedUntil;}
 let lgDisplayControlSnapshot=null;
 let lgVerification={busy:false,complete:false,rows:{},message:''};
 
+// The TV decides what the card offers: a control the capability data marks
+// hidden (the TV's API refuses it on this model, for this signal or in this
+// picture mode) is left off the card rather than shown dead.
 function lgDisplayControlVisibleItems(values,caps){
  const binding=(caps||{}).logicalControls?.panel_light;
- if(!binding) return LG_DISPLAY_CONTROL_ITEMS;
+ const contracts=(caps||{}).settingContracts||{};
+ const shown=meta=>contracts[meta.key]?.hidden!==true;
+ if(!binding) return LG_DISPLAY_CONTROL_ITEMS.filter(shown);
  const panelKeys=['backlight','oledLight','oledPixelBrightness'];
  return LG_DISPLAY_CONTROL_ITEMS.flatMap(meta=>{
   if(meta.key==='backlight') return [{...meta,key:binding.wire_key||'backlight',label:binding.label||'Panel brightness',logicalId:'panel_light'}];
   return panelKeys.includes(meta.key)?[]:[meta];
- });
+ }).filter(shown);
 }
 
 function lgVerificationEvidence(key,values,contracts,binding){
  const c=contracts[key]||{},present=values[key]!==undefined&&values[key]!==null;
  if(binding?.wire_key&&binding.aliases?.includes(key)&&key!==binding.wire_key&&!present)return 'Alternate API name; uses '+binding.wire_key;
  if(c.write_decision==='not_applicable'||c.read_decision==='not_applicable')return 'Not applicable to this signal';
+ if(c.availability==='unsupported')return 'Not offered by this TV';
+ if(c.availability==='hidden_in_mode')return 'Refused by this TV in this picture mode';
+ if(c.availability==='read_only'&&present)return 'Readable; this TV refuses changes';
  if(c.observation?.roundtrip?.status==='restore_failed')return 'Restoration needs attention';
  if(!present)return 'No value returned; write unverified';
  if(c.write_decision==='blocked')return 'Readable; write blocked by profile';
  if(c.observation?.roundtrip?.status==='verified')return 'Write + restoration verified';
  if(c.observation?.verify?.status==='verified')return 'Write verified by readback';
+ if(c.availability==='available')return 'Readable; writes proved on this TV model in this mode';
  return 'Readable; write unverified';
 }
 
@@ -490,9 +499,19 @@ function lgUses2018Or2019PictureModeMap(){
  return /OLED\d*(?:A|B|C|E|G|R|W|Z)(?:8|9)/.test(model);
 }
 
+// The last catalogue read from this TV. A refresh clears the snapshot while it
+// runs, and the hardcoded lists below offer modes a given TV refuses (the G3
+// has no hdrEco), so keep offering what this model reported until it changes.
+let lgLastPictureModeCatalogue={model:'',catalogue:null};
+function lgCurrentModelName(){
+ const state=window.lgStatusState||{};
+ return String(state.modelName||state.model_name||state.displayName||'');
+}
+
 function lgPictureModesForSignal(signalMode){
  const signal=String(signalMode||'sdr');
- const catalogue=lgDisplayControlSnapshot?.generation_profile?.picture_mode_catalogue;
+ const cached=lgLastPictureModeCatalogue.model&&lgLastPictureModeCatalogue.model===lgCurrentModelName()?lgLastPictureModeCatalogue.catalogue:null;
+ const catalogue=lgDisplayControlSnapshot?.generation_profile?.picture_mode_catalogue||cached;
  if(lgUses2018Or2019PictureModeMap()&&LG_2018_2019_PICTURE_MODES_BY_SIGNAL[signal]){
   return LG_2018_2019_PICTURE_MODES_BY_SIGNAL[signal];
  }
@@ -1248,7 +1267,10 @@ function lgDisplayControlRender(){
  const otherContext=lgDisplayControlOtherContext;
  grid.dataset.valueContext=otherContext?'other':'';
  grid.style.opacity=otherContext?'0.6':'';
- lgDisplayControlSetStatus(lgDisplayControlError||((lgAutomationHoldsPollers()||otherContext)?(lgDisplayControlCacheNote||'Values from the last read; refresh paused while automation runs'):(lgDisplayControlLoaded?'Picture controls loaded':'Refresh settings')),!!lgDisplayControlError);
+ const shared=lgDisplayControlSnapshot?.generation_profile?.settings_capabilities?.mode_availability?.shared_settings||{};
+ const signalNow=String(lgSignalModeKey()||'');
+ const sharedNote=shared[signalNow]?' '+signalNow.toUpperCase()+' modes share their settings with the '+String(shared[signalNow]).toUpperCase()+' modes of the same name on this TV.':'';
+ lgDisplayControlSetStatus(lgDisplayControlError||((lgAutomationHoldsPollers()||otherContext)?(lgDisplayControlCacheNote||'Values from the last read; refresh paused while automation runs'):(lgDisplayControlLoaded?'Picture controls loaded.'+sharedNote:'Refresh settings')),!!lgDisplayControlError);
 }
 
 function lgDisplayControlSyncNumber(key,value){
@@ -1315,6 +1337,7 @@ async function lgDisplayControlRefresh(force){
 	   lgDisplayControlValues=r.picture_settings||{};
 	   lgDisplayControlValuesContext=requestContext;
 	   lgDisplayControlSnapshot=r;
+	   if(r.generation_profile?.picture_mode_catalogue) lgLastPictureModeCatalogue={model:lgCurrentModelName(),catalogue:r.generation_profile.picture_mode_catalogue};
 	   lgDisplayControlCapabilities={
 	    supportedKeys:Array.isArray(r.supported_picture_keys)?r.supported_picture_keys:[],
 	    unsupportedKeys:(r.unsupported_picture_keys&&typeof r.unsupported_picture_keys==='object')?r.unsupported_picture_keys:{},

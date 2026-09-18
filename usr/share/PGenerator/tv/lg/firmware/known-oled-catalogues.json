@@ -93,9 +93,9 @@
       "evidence": [{ "source_id": "lg-firmware-settings-catalogues", "strength": "firmware_inventory", "scope": "C2 firmware 33.31.20 public settings inventory; availability remains context-dependent." }]
     },
     {
-      "profile_id": "lg/firmware/G3/23.25.55",
+      "profile_id": "lg/series/G3/public-settings",
       "priority": 50,
-      "match": { "retail_series": ["G3"], "firmware_versions": ["23.25.55"] },
+      "match": { "retail_series": ["G3"] },
       "data": {
         "firmware_inventory": { "catalogue_model": "G3", "firmware": "23.25.55", "webos": "9.2.2" },
         "settings": {

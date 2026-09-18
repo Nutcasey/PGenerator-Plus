@@ -1369,6 +1369,19 @@ sub lg_picture_get_workflow (@) {
   if($generation->{"ddc_only_white_balance"} || $force_ddc_white_balance);
  my $observed_mode=$generation->{"picture_mode_read_forbidden"} ? "" : &lg_current_picture_mode($session,$connect_timeout + 2);
  $requested_picture_mode=$observed_mode if($requested_picture_mode eq "" && $observed_mode ne "");
+ # On sets whose settings service answers every read from the active picture
+ # mode whatever dimension is sent (proved on the G3, 18 September 2026),
+ # a read for another mode would return the active mode's values under the
+ # requested mode's name. Read the active mode and say so instead.
+ my $requested_not_active="";
+ if($observed_mode ne "" && $requested_picture_mode ne "" && !$generation->{"ddc_only_white_balance"} && !$force_ddc_white_balance
+    && !&lg_picture_mode_tokens_agree($requested_picture_mode,$observed_mode,$signal_mode)) {
+  my $runtime=eval { resolve_lg_capabilities($generation)->{"data"}{"runtime"} } || {};
+  if(ref($runtime) eq "HASH" && $runtime->{"dimension_reads_follow_active_mode"}) {
+   $requested_not_active=$requested_picture_mode;
+   $requested_picture_mode=$observed_mode;
+  }
+ }
  my $read_context_confirmed=($current_input->{current_input}||"") ne ""
   && ($current_input->{current_input}||"") eq $tv_input && $observed_mode ne ""
   && &lg_picture_mode_tokens_agree($requested_picture_mode,$observed_mode,$signal_mode);
@@ -1604,6 +1617,10 @@ sub lg_picture_get_workflow (@) {
 	  client_key => $auth->{"client_key"},
 	  picture_settings => $picture_settings,
 	  %{$capabilities},
+	  ($requested_not_active ne "" ? (
+	   requested_picture_mode_not_active => $requested_not_active,
+	   message => "The TV is in $observed_mode, not $requested_not_active; this TV only reports the active mode, so these are $observed_mode values.",
+	  ) : ()),
 	  payload => $payload,
 	  hello_info => $auth->{"hello_info"},
   system_info => $auth->{"system_info"},
@@ -6902,7 +6919,11 @@ sub lg_picture_set_workflow (@) {
    &websocket_close($session);
    my $reason=$decision eq "not_applicable"
     ? "The setting is not applicable to the current ".($signal_mode||"unknown")." signal context."
-    : "The resolved TV capability profile marks this setting as unsupported.";
+    : ($contract->{"availability"}||"") eq "hidden_in_mode"
+     ? "This TV refuses it in the ".($active_picture_mode||"current")." picture mode."
+     : ($contract->{"availability"}||"") eq "read_only"
+      ? "This TV reports it but does not accept changes to it."
+      : "The resolved TV capability profile marks this setting as unsupported.";
    return &json_error("LG setting '$key' cannot be written. $reason",{
     ip=>$ip,
     error_code=>$decision eq "not_applicable" ? "setting-not-applicable" : "setting-write-blocked",
@@ -7028,6 +7049,15 @@ sub lg_picture_set_workflow (@) {
  }
  my $mode_lc=lc(&lg_picture_mode_for_calibration($active_picture_mode) || $active_picture_mode);
  my $mode_writable=($mode_lc ne "" && $mode_lc =~ /$WRITABLE_PICTURE_MODES_RE/) ? 1 : 0;
+ # The mode list above predates live proof. Where the capability data records
+ # this exact mode as verified on the connected series and none of the
+ # white-balance keys is hidden in it, a native (non-DDC) write is allowed:
+ # the G3 sweep of 18 September 2026 read back white-balance writes in every
+ # one of its 30 picture modes.
+ if(!$mode_writable && $native_white_balance) {
+  my @wb_keys=grep { /^(?:whiteBalance|adjustingLuminance)/ } keys(%{$settings_to_apply});
+  $mode_writable=1 if(@wb_keys && !grep { ($setting_contracts->{$_}{"availability"}||"") ne "available" } @wb_keys);
+ }
  if(($ddc_white_balance_only || $native_white_balance) && !$panel_light_only && $active_picture_mode ne "" && !$mode_writable) {
   &websocket_close($session);
   &diag_log_append("picture_set:preflight",{ ip => $ip, picture_mode => $active_picture_mode, blocked => "non-writable picture mode" });

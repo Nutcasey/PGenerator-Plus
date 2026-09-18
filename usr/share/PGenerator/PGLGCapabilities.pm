@@ -447,8 +447,11 @@ sub resolve_lg_capabilities {
  $effective=_expand_key_sets($effective,$library->{'key_sets'});
  my $has_platform=grep { /^lg\/platform\// } @applied;
  my $has_firmware=grep { /^lg\/firmware\// } @applied;
+ # Data verified on the owner's hardware applies to the whole retail series;
+ # the firmware it was proved on is recorded as evidence, not as a match key.
+ my $has_series=grep { /^lg\/series\// } @applied;
  my $has_model=grep { /^lg\/model\// } @applied;
- my $status=$has_firmware ? 'exact_firmware' : $has_platform ? 'platform' : $has_model ? 'retail_model_fallback' : 'conservative';
+ my $status=$has_firmware ? 'exact_firmware' : $has_series ? 'series' : $has_platform ? 'platform' : $has_model ? 'retail_model_fallback' : 'conservative';
  my @warnings;
  if($has_platform && ($effective->{'identity'}{'expected_platform_token'}||'') ne ''
     && ($effective->{'identity'}{'expected_platform_token'}||'') ne $normalized->{'platform_token'}) {
@@ -855,7 +858,10 @@ sub lg_best_settings_plan {
   my ($valid,undef,$error)=lg_normalize_setting_value($c,$requested->{$key},$values->{$key});
   my $write=$c->{write_decision}||'';
   if(!$valid || !$c->{declared} || $write eq 'blocked' || $write eq 'not_applicable') {
-   $plan->{blocked}{$key}=$error||'No applicable supported write contract';next;
+   my $why=($c->{availability}||'') eq 'hidden_in_mode' ? "This TV refuses it in $context{picture_mode}"
+    : ($c->{availability}||'') eq 'unsupported' ? 'This TV does not offer this setting'
+    : ($c->{availability}||'') eq 'read_only' ? 'This TV does not accept changes to this setting' : '';
+   $plan->{blocked}{$key}=$error||$why||'No applicable supported write contract';next;
   }
   next if(exists($values->{$key}) && defined($values->{$key}) && !exists($unavailable->{$key})
    && (!$response->{virtual_picture_settings} || $native{$key}));
@@ -895,6 +901,39 @@ sub lg_setting_write_accepted {
   && ($contract->{write_decision}||'') !~ /^(?:blocked|not_applicable)$/ ? 1 : 0;
 }
 
+# The TV token for the context's picture mode (a catalogue alias such as
+# dolbyVisionFilmMaker resolves to the dolbyHdrCinema the TV reports), and the
+# availability recorded for that signal and mode.
+sub _mode_availability {
+ my ($profile,$context)=@_;
+ my $settings=ref($profile->{'data'}{'settings'}) eq 'HASH' ? $profile->{'data'}{'settings'} : {};
+ my $table=ref($settings->{'mode_availability'}) eq 'HASH' ? $settings->{'mode_availability'} : undef;
+ return {} if(!$table);
+ my $signal=$context->{'signal_mode'}||'';
+ my $mode=$context->{'picture_mode'}||'';
+ my $rows=ref($profile->{'data'}{'picture_modes'}{$signal}) eq 'HASH' ? $profile->{'data'}{'picture_modes'}{$signal} : {};
+ my $record=$mode ne '' ? _find_picture_mode_record($rows,$mode) : undef;
+ my $token=$record ? ($record->{'settings_value'}||$record->{'value'}) : $mode;
+ my $signals=ref($table->{'signals'}) eq 'HASH' ? $table->{'signals'} : {};
+ my $entry=ref($signals->{$signal}) eq 'HASH' ? $signals->{$signal} : {};
+ my $verified=ref($entry->{'modes'}) eq 'ARRAY' ? $entry->{'modes'} : [];
+ my $hidden=ref($entry->{'hidden'}) eq 'HASH' && ref($entry->{'hidden'}{$token}) eq 'ARRAY' ? $entry->{'hidden'}{$token} : [];
+ return {
+  token=>$token,
+  verified_mode=>($token ne '' && _contains_ci($verified,$token)) ? 1 : 0,
+  hidden=>{map { lc($_)=>1 } @$hidden},
+ };
+}
+
+sub _control_availability {
+ my ($mode,$wire_key,$signal_applies,$read_decision,$write_decision,$control)=@_;
+ return 'unsupported' if($read_decision eq 'blocked' && $write_decision eq 'blocked');
+ return 'not_applicable' if(!$signal_applies);
+ return 'hidden_in_mode' if($mode->{'hidden'} && $mode->{'hidden'}{lc($wire_key)});
+ return 'read_only' if($write_decision eq 'blocked');
+ return $mode->{'verified_mode'} ? 'available' : 'unverified';
+}
+
 sub lg_setting_contracts {
  my ($identity,%options)=@_;
  $identity={} if(ref($identity) ne 'HASH');
@@ -911,6 +950,9 @@ sub lg_setting_contracts {
   (defined($options{'store_root'}) ? (store_root=>$options{'store_root'}) : ()));
  my @keys=@{ref($options{'keys'}) eq 'ARRAY' ? $options{'keys'} : []};
  @keys=sort map { $_->{'wire_key'}||() } values %{$controls} if(!@keys);
+ # Per-mode availability proved over the TV's API: a control the TV refuses
+ # in this picture mode is hidden and never written here.
+ my $mode_availability=_mode_availability($profile,$context);
  my %seen;
  my %contracts;
  foreach my $key (@keys) {
@@ -972,6 +1014,8 @@ sub lg_setting_contracts {
   # Acknowledgement on those sets is explicitly not hardware verification.
   $require_readback=JSON::PP::false if($write_route eq 'ddc_1d' && $profile->{platform_profile_applied}
    && !$profile->{data}{runtime}{readback_supported});
+  my $availability=_control_availability($mode_availability,$wire_key,$signal_applies,$read_decision,$write_decision,$control);
+  $write_decision='blocked' if($availability eq 'hidden_in_mode');
   my $allow_unverified=$profile->{library_valid} && $profile->{platform_profile_applied}
    && $signal_applies && $context->{category} eq 'picture'
    && $write_decision ne 'blocked' && $control->{write}{allow_unverified_readback}
@@ -979,6 +1023,8 @@ sub lg_setting_contracts {
   $write_decision='readback_preferred' if($allow_unverified && $write_decision ne 'allowed');
   $contracts{$key}={
    key=>$key, wire_key=>$wire_key, declared=>$declared,
+   availability=>$availability,
+   hidden=>($availability =~ /^(?:unsupported|hidden_in_mode|not_applicable)$/) ? JSON::PP::true : JSON::PP::false,
    category=>$control->{'category'}||$context->{'category'}||'picture',
    signals=>_clone($control->{'signals'}||[]), applies_to_signal=>$signal_applies ? JSON::PP::true : JSON::PP::false,
    value_schema=>_clone($control->{'value_schema'}||{type=>'unknown'}),

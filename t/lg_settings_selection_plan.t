@@ -40,7 +40,7 @@ ok(!$p->{panel_light}{writable},'strict-readback TV cannot inherit C1 write waiv
 $p=lg_settings_selection_plan({},$requested,{},%context);
 ok(!$p->{known}&&!$p->{panel_light}{wire_key}&&!$p->{panel_light}{target_available},'unknown TV never gets a guessed panel binding');
 is_deeply($p->{automatic},{},'unknown TV gets no automatic reference writes');
-$p=lg_settings_selection_plan($g3,{contrast=>101,gamma=>'bt1886'}, {},%context,signal_mode=>'hdr10',picture_mode=>'hdrCinema');
+$p=lg_settings_selection_plan({model_name=>'OLED65C26LA',platform_model=>'W22O'},{contrast=>101,gamma=>'bt1886'}, {},%context,signal_mode=>'hdr10',picture_mode=>'hdrCinema');
 ok($p->{blocked}{contrast}&&$p->{blocked}{gamma},'range-invalid and signal-inapplicable settings are blocked');
 $p=lg_settings_selection_plan($g3,{gamma=>'bt1886'},{unsupported_picture_keys=>{gamma=>'Socket disconnected'}},%context);
 ok(!$p->{manual}{gamma},'transport failures never establish a manual-only capability');

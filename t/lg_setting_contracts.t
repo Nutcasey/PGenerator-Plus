@@ -22,15 +22,23 @@ my %context=(
  picture_mode=>'hdrCinema',tv_input=>'hdmi1',
 );
 my $matrix=lg_setting_contracts($g3,%context,keys=>[qw(brightness gamma hdrDynamicToneMapping madeUpKey blackLevel)]);
-is($matrix->{match_status},'exact_firmware','setting contracts use the exact G3 firmware profile');
+is($matrix->{match_status},'series','setting contracts use the G3 series profile');
 is($matrix->{contracts}{brightness}{read_state},'inventory','firmware listing is represented as inventory evidence');
 is($matrix->{contracts}{brightness}{read_decision},'probe_required','inventory alone does not claim a live read');
 is($matrix->{contracts}{brightness}{write_decision},'verified_readback_required','inventory writes require TV readback');
-is($matrix->{contracts}{gamma}{write_decision},'not_applicable','SDR gamma is blocked in HDR10 context');
+# Signal scoping is data: the C2 keeps the common SDR-only gamma, while the G3
+# API accepted gamma in every signal (18 September 2026 sweep).
+my $c2={series=>'C2',platform_model=>'HE_DTV_W22O_AFABATAA',platform_year=>2022};
+is(lg_setting_contracts($c2,%context,keys=>['gamma'])->{contracts}{gamma}{write_decision},'not_applicable','SDR gamma is blocked in HDR10 context');
+is($matrix->{contracts}{gamma}{availability},'available','G3 gamma is available in HDR10, as its API proved');
 is($matrix->{contracts}{madeUpKey}{write_decision},'preflight_and_verified_readback_required','unlisted keys require a successful preflight and readback');
 
-my $dv=lg_setting_contracts($g3,%context,signal_mode=>'dv',keys=>['hdrDynamicToneMapping']);
+my $dv=lg_setting_contracts($c2,%context,signal_mode=>'dv',keys=>['hdrDynamicToneMapping']);
 is($dv->{contracts}{hdrDynamicToneMapping}{write_decision},'not_applicable','generic dynamic tone mapping is not sent in Dolby Vision');
+is(lg_setting_contracts($g3,%context,signal_mode=>'dv',picture_mode=>'dolbyVisionCinemaBright',keys=>['hdrDynamicToneMapping'])->{contracts}{hdrDynamicToneMapping}{availability},'available','G3 accepts tone mapping in Dolby Vision over its API');
+my $g3_unsupported=lg_setting_contracts($g3,%context,keys=>['truMotionMode','whiteBalanceLuminance']);
+is($g3_unsupported->{contracts}{truMotionMode}{availability},'unsupported','G3 refuses TruMotion on every public route');
+is($g3_unsupported->{contracts}{whiteBalanceLuminance}{availability},'read_only','G3 reports white-balance luminance but refuses changes');
 
 my ($valid,$value,$error)=lg_normalize_setting_value($matrix->{contracts}{brightness},85);
 ok($valid,'valid integer setting is accepted');

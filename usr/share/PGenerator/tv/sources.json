@@ -81,6 +81,13 @@
       "url": "local:usr/sbin/pgenerator-lg",
       "license": "project",
       "use": "Existing reset, readback and calibration transport behaviour retained during migration."
+    },
+    "owner-g3-sweep-20260918": {
+      "title": "Owner's LG OLED55G36LA (G3) live API sweep, 18 September 2026",
+      "url": "local:docs/tvtests/runs/G3-20260918",
+      "license": "project",
+      "retrieved_at": "2026-09-18",
+      "use": "Direct API calls on firmware 23.25.55 over HDMI: every picture mode selected per signal, every public picture key read and written at its limits and every listed value with readback and restore in each mode, HLG/HDR10 settings sharing and read scoping probed."
     }
   }
 }

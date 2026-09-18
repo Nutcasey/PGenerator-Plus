@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "vendor": "lg",
-  "library_version": "2026.09.16.2",
+  "library_version": "2026.09.18.1",
   "base": "base/conservative.json",
   "profile_files": [
     "picture-modes/catalogue.json",
@@ -11,7 +11,8 @@
     "models/oled-2020-2026.json",
     "platforms/webos-2020-2026.json",
     "firmware/known-oled-catalogues.json",
-    "firmware/known-oled-values.json"
+    "firmware/known-oled-values.json",
+    "series/g3.json"
   ],
   "recipe_files": [
     "recipes/autocal-sdr.json",

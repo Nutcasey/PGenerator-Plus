@@ -30,7 +30,7 @@ my $g3_profile=main::lg_generation_profile($g3);
  is(main::lg_connected_context_error({},$g3,1,'',''),undef,'unscoped cleanup does not require current input');
 }
 is($g3_profile->{lut_grid},33,'G3 runtime profile uses W23O 33-point geometry');
-is($g3_profile->{capability_match_status},'exact_firmware','G3 runtime profile includes exact firmware match');
+is($g3_profile->{capability_match_status},'series','G3 runtime profile includes the series match');
 like($g3_profile->{capability_profile_hash},qr/^[0-9a-f]{64}$/,'runtime profile includes deterministic hash');
 is(scalar(@{$g3_profile->{settings_capabilities}{public_routes}{read}{picture_keys}}),61,'runtime exposes exact-firmware settings matrix');
 
@@ -122,7 +122,12 @@ my $observation_store=tempdir(CLEANUP=>1);
  ok($confirmed->{settings_matrix}{context_confirmed},'independently matching input and mode establish observation scope');
  $actual_mode='hdrGame';
  my $wrong_mode=main::lg_picture_get_workflow('127.0.0.1','test-key',1,['brightness'],'hdrCinema','hdmi1',0,'hdr10',1,'picture');
- ok(!$wrong_mode->{settings_matrix}{context_confirmed},'active-mode mismatch prevents context promotion');
+ # The G3 answers every read from the active mode whatever dimension is sent
+# (18 September 2026 sweep), so a read requested for another mode is taken
+# and labelled as the active mode rather than filed under the requested one.
+is($wrong_mode->{requested_picture_mode_not_active},'hdrCinema','read for a non-active mode is flagged');
+is(lc($wrong_mode->{settings_matrix}{context}{picture_mode}),'hdrgame','values are attributed to the mode the TV is in');
+ok(!grep({ ($_->{settings_matrix}{context}{picture_mode}||'') eq 'hdrCinema' && $_->{settings_matrix}{context_confirmed} } $wrong_mode),'active-mode mismatch never promotes the requested mode');
 }
 
 {
@@ -140,6 +145,14 @@ my $observation_store=tempdir(CLEANUP=>1);
  my $invalid=main::lg_picture_set_workflow('127.0.0.1','test-key',1,{brightness=>101},[],'hdmi1',0,'hdrCinema',0,0,0,0,'hdr10','picture');
  is($invalid->{error_code},'invalid-setting-value','out-of-range write is rejected by the TV contract');
  is($transport_calls,0,'invalid value is rejected before a settings transport call');
+ # The G3's API accepts tone mapping in Dolby Vision, so prove the signal
+ # block on a C2, which keeps the common scoping.
+ local *main::lg_authenticated_session=sub {{
+  status=>'ok',session=>{},client_key=>'test-key',
+  system_info=>{modelName=>'OLED65C26LA'},
+  software_info=>{model_name=>'HE_DTV_W22O_AFABATAA',product_name=>'webOSTV 22',software_version=>'13.30.60',device_id=>'aa:bb:cc:dd:ee:02'},
+  hello_info=>{deviceOSReleaseVersion=>'7.3.1',deviceUUID=>'runtime-c2'},
+ }};
  my $inapplicable=main::lg_picture_set_workflow('127.0.0.1','test-key',1,{hdrDynamicToneMapping=>'off'},[],'hdmi1',0,'dolbyVisionCinemaBright',0,0,0,0,'dv','picture');
  is($inapplicable->{error_code},'setting-not-applicable','Dolby Vision tone-mapping write is blocked by signal applicability');
  is($transport_calls,0,'inapplicable write is rejected before a settings transport call');
@@ -215,8 +228,12 @@ my $observation_store=tempdir(CLEANUP=>1);
  local *main::lg_request=sub {push @scopes,$_[3];return {type=>'response',payload=>{settings=>{}}}};
  main::lg_picture_readback_settings({},'write-read',['brightness'],'hdrCinema','hdmi1','hdr10',1,'picture',{category=>'picture',dimension=>{pictureMode=>'hdrCinema',input=>'hdmi1'}});
  ok(!grep(($_->{category}||'') ne 'picture' || ($_->{dimension}{input}||'') ne 'hdmi1',@scopes),'post-write verification never searches a different scope');
- my ($keys)=main::lg_picture_reset_contract_keys($g3,[qw(brightness gamma madeUpKey)],'hdr10','hdrCinema','hdmi1',{});
+ # A G5 on its catalogued firmware keeps the common SDR-only gamma scoping.
+ my $g5=main::lg_generation_info({modelName=>'OLED83G54LW'},{model_name=>'HE_DTV_W25G_AFABATAA',product_name=>'webOSTV 25',software_version=>'33.21.81'},{deviceOSReleaseVersion=>'10.2.0'});
+ my ($keys)=main::lg_picture_reset_contract_keys($g5,[qw(brightness gamma madeUpKey)],'hdr10','hdrCinema','hdmi1',{});
  is_deeply($keys,['brightness'],'reset filters wrong-signal and unprobed keys through the matrix');
+ ($keys)=main::lg_picture_reset_contract_keys($g3,[qw(brightness gamma madeUpKey)],'hdr10','hdrCinema','hdmi1',{});
+ is_deeply($keys,['brightness','gamma'],'G3 reset keeps gamma in HDR10, where its API accepts it');
  ok(!main::lg_picture_reset_ddc_baseline_ok(1,{status=>'ok',ddc_baseline_reset=>1,ddc_reset_verified=>1,ddc_reset_verify_contract=>'write-accepted-readback-untrusted'}),'reset cannot relabel legacy acknowledgement as hardware verification');
 }
 

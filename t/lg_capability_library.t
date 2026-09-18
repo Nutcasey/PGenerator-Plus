@@ -19,7 +19,7 @@ my $root="$Bin/../usr/share/PGenerator/tv";
 my $validation=validate_lg_library($root);
 ok($validation->{ok},'the shipped LG capability library validates')
  or diag(join("\n",@{$validation->{errors}||[]}));
-is($validation->{version},'2026.09.16.2','library version is explicit');
+is($validation->{version},'2026.09.18.1','library version is explicit');
 is(lg_platform_token('HE_DTV_W23O_AFABATAA'),'W23O','internal platform token is extracted');
 is(lg_platform_token('W26G'),'W26G','bare platform token is accepted');
 
@@ -40,7 +40,7 @@ my $g3=resolve_lg_capabilities({
  series=>'G3', platform_model=>'HE_DTV_W23O_AFABATAA',
  software_version=>'23.25.55', platform_year=>2023,
 },root=>$root);
-is($g3->{match_status},'exact_firmware','G3 exact firmware overlay is selected');
+is($g3->{match_status},'series','G3 series overlay is selected');
 is(scalar(@{$g3->{data}{settings}{public_routes}{read}{picture_keys}}),61,'G3 has 61 firmware-inventory public read keys');
 is(scalar(@{$g3->{data}{settings}{public_routes}{write}{picture_keys}}),61,'G3 has 61 firmware-inventory public write-list keys');
 is($g3->{data}{settings}{public_routes}{write}{support_state},'firmware_inventory','a public write listing remains inventory, not verified');

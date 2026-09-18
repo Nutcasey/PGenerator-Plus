@@ -1731,14 +1731,11 @@
       ]
     },
     {
-      "profile_id": "lg/firmware/G3/23.25.55/values",
+      "profile_id": "lg/series/G3/values",
       "priority": 60,
       "match": {
         "retail_series": [
           "G3"
-        ],
-        "firmware_versions": [
-          "23.25.55"
         ]
       },
       "data": {
