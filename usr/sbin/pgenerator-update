@@ -26,6 +26,11 @@
 set -euo pipefail
 
 DEFAULT_GITHUB_REPO="oldgithubman/PGenerator-Plus"
+# Repos trusted out of the box for `apply` even without ota_repo_trusted=1:
+# the factory default plus upstream BigShoots (the original project home).
+# Keep in sync with $ota_repo_trusted_allowlist in webui.pm. Any other
+# repo still needs the explicit operator trust key.
+TRUSTED_REPO_ALLOWLIST="$DEFAULT_GITHUB_REPO BigShoots/PGenerator-Plus"
 PGENERATOR_CONF_FILE="${PGENERATOR_CONF_FILE:-/etc/PGenerator/PGenerator.conf}"
 VERSION_FILE="${VERSION_FILE:-/usr/share/PGenerator/version.pm}"
 UPDATE_MIGRATIONS_DIR="${UPDATE_MIGRATIONS_DIR:-/usr/share/PGenerator/update-migrations.d}"
@@ -52,13 +57,21 @@ read_conf_val() {
 }
 
 # A custom update source is a full root-trust decision (apply extracts an
-# unsigned tarball at / as root), so the WebUI sets ota_repo_trusted=1
-# alongside a custom ota_repo after an explicit operator confirm. apply
-# refuses any non-default repo without that second key, so a request that
-# rewrites only ota_repo (e.g. a cross-site drive-by) can never install
-# code. Manual conf edits must set both keys.
+# unsigned tarball at / as root), so apply accepts only repos in the
+# factory TRUSTED_REPO_ALLOWLIST, or any repo whose operator confirmed the
+# trust prompt (the WebUI then sets ota_repo_trusted=1 alongside
+# ota_repo). A request that rewrites only ota_repo (e.g. a cross-site
+# drive-by) can never install code. Manual conf edits must set both keys.
+repo_in_allowlist() {
+ local allowed
+ for allowed in $TRUSTED_REPO_ALLOWLIST; do
+  [ "$1" = "$allowed" ] && return 0
+ done
+ return 1
+}
+
 custom_repo_trusted() {
- [ "$(read_conf_val ota_repo_trusted)" = "1" ]
+ repo_in_allowlist "$1" || [ "$(read_conf_val ota_repo_trusted)" = "1" ]
 }
 
 normalize_repo() {
@@ -460,7 +473,7 @@ case "$cmd" in
   fi
 
   trusted=false
-  if [ "$GITHUB_REPO" = "$DEFAULT_GITHUB_REPO" ] || custom_repo_trusted; then trusted=true; fi
+  custom_repo_trusted "$GITHUB_REPO" && trusted=true
   printf '{"status":"ok","current":%s,"latest":%s,"update_available":%s,"published":%s,"changelog":%s,"asset_url":%s,"repo":%s,"trusted":%s}\n' \
    "$(json_escape "$current")" \
    "$(json_escape "$latest")" \
@@ -477,10 +490,11 @@ case "$cmd" in
   log_msg "Update check started (current: $current)"
 
   # Custom-repo root-trust gate (PR-20 review finding #1): apply extracts
-  # an unsigned tarball at / as root, so a non-default source requires the
-  # separate ota_repo_trusted=1 key. A cross-site request can at most
+  # an unsigned tarball at / as root, so only repos in the factory allow-
+  # list (default + upstream BigShoots) or a repo carrying the operator's
+  # ota_repo_trusted=1 key may install. A cross-site request can at most
   # rewrite ota_repo; without the trust key the download never starts.
-  if [ "$GITHUB_REPO" != "$DEFAULT_GITHUB_REPO" ] && ! custom_repo_trusted; then
+  if ! custom_repo_trusted "$GITHUB_REPO"; then
    log_msg "ERROR: refusing to apply from untrusted repo $GITHUB_REPO"
    echo "ERROR: Update source $GITHUB_REPO is not trusted. Set it from the WebUI Software Update card and confirm the trust prompt." >&2
    printf '{"status":"error","message":"Update source %s is not trusted. Save it from the WebUI and confirm the trust prompt.","repo":"%s"}\n' "$GITHUB_REPO" "$GITHUB_REPO"

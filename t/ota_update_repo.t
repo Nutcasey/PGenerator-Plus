@@ -20,7 +20,7 @@ use strict;
 use warnings;
 use FindBin qw($Bin);
 use File::Temp qw(tempdir);
-use Test::More tests => 29;
+use Test::More tests => 33;
 
 my $script = "$Bin/../usr/sbin/pgenerator-update";
 ok(-f $script, 'pgenerator-update is present');
@@ -55,6 +55,8 @@ sub resolved_api {
 }
 
 my $default_api = 'https://api.github.com/repos/oldgithubman/PGenerator-Plus/releases/latest';
+my ($ota_bash_default) = $full =~ /^DEFAULT_GITHUB_REPO="([^"]+)"/m;
+is($ota_bash_default, 'oldgithubman/PGenerator-Plus', 'bash factory default');
 
 is(resolved_api(conf => ''), $default_api, 'empty conf falls back to the official default');
 is(resolved_api(), $default_api, 'missing conf file falls back to the official default');
@@ -98,11 +100,12 @@ ok($full =~ /"repo":%s/, 'check output carries the repo field');
 ok($full =~ /"trusted":%s/, 'check output carries the trusted field');
 ok($full =~ /json_escape "\$GITHUB_REPO"/, 'check output escapes the resolved repo');
 
-# apply must refuse a non-default repo without the separate trust key
-# (drive-by POSTs can rewrite ota_repo only, never ota_repo_trusted via
-# this gate's own confirmation requirement).
-ok($full =~ /\$GITHUB_REPO" != "\$DEFAULT_GITHUB_REPO" \] && ! custom_repo_trusted/,
-   'apply refuses a non-default repo without ota_repo_trusted=1');
+# apply must route every repo through custom_repo_trusted: only the
+# factory allowlist (default + BigShoots) or an operator-confirmed
+# ota_repo_trusted=1 may install. Drive-by POSTs can rewrite ota_repo
+# only, never the trust key (that needs the write-confirmed save).
+ok($full =~ /if ! custom_repo_trusted "\$GITHUB_REPO"; then/,
+   'apply gates every repo through custom_repo_trusted (allowlist or trust key)');
 
 # ── Perl/bash normalizer parity (PR-20 finding #2) ──
 # Load webui.pm's normalizer WITHOUT loading the module (it drags in the
@@ -116,6 +119,19 @@ ok($norm_sub, 'webui.pm normalizer extracted for parity test');
 my $default_line = ($pm_src =~ /^my \$ota_repo_default="([^"]+)";/m) ? $1 : '';
 is($default_line, 'oldgithubman/PGenerator-Plus',
    'webui.pm factory default matches pgenerator-update DEFAULT_GITHUB_REPO');
+# The trusted-repo allowlist must be identical on both sides or the WebUI
+# can show a source as trusted while the updater refuses to install it.
+my ($bash_allow) = $full =~ /^TRUSTED_REPO_ALLOWLIST="(.+)"/m;
+ok(defined $bash_allow, 'bash TRUSTED_REPO_ALLOWLIST present');
+# Expand $DEFAULT_GITHUB_REPO, split on whitespace -> bash entry list
+my $bash_entries = do { my $s = $bash_allow; $s =~ s/\$DEFAULT_GITHUB_REPO/$ota_bash_default/g; [ split /\s+/, $s ] };
+# Pull the Perl list literal and resolve $ota_repo_default -> its value
+my ($perl_allow) = $pm_src =~ /\@ota_repo_trusted_allowlist=\(([^)]+)\)/;
+my $perl_entries = do { my $s = $perl_allow; $s =~ s/"//g; $s =~ s/\$ota_repo_default/$ota_bash_default/g; [ split /\s*,\s*/, $s ] };
+is_deeply([ sort @$perl_entries ], [ sort @$bash_entries ],
+   'Perl and bash trusted-repo allowlists contain the same repos');
+is_deeply([ sort @$bash_entries ], [ sort ('oldgithubman/PGenerator-Plus','BigShoots/PGenerator-Plus') ],
+   'factory allowlist is exactly default + BigShoots');
 eval $norm_sub;
 die "normalizer eval failed: $@" if $@;
 

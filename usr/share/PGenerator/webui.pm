@@ -9906,6 +9906,14 @@ sub webui_write_confirmed ($) {
 # Single source of truth for the factory default: keep in sync with
 # DEFAULT_GITHUB_REPO in usr/sbin/pgenerator-update.
 my $ota_repo_default="oldgithubman/PGenerator-Plus";
+# Repos apply accepts without the per-device ota_repo_trusted key: the
+# factory default plus upstream BigShoots (original project home).
+# Keep in sync with TRUSTED_REPO_ALLOWLIST in usr/sbin/pgenerator-update.
+my @ota_repo_trusted_allowlist=($ota_repo_default,"BigShoots/PGenerator-Plus");
+sub webui_ota_repo_is_allowlisted ($) {
+ my ($repo)=@_;
+ return scalar(grep { $_ eq $repo } @ota_repo_trusted_allowlist) ? 1 : 0;
+}
 # Byte-for-byte parity with normalize_repo() in /usr/sbin/pgenerator-update
 # (same trims, same strip order, case-insensitive, quotes NOT stripped --
 # a quoted value is rejected on both sides). If you change either copy,
@@ -9925,13 +9933,14 @@ sub webui_ota_repo_normalize ($) {
 }
 
 sub webui_ota_apply_blocked (@) {
- # True when /api/update/apply must be refused: a custom (non-default,
- # validly normalized) ota_repo that lacks the operator's ota_repo_trusted=1
- # confirm. Empty/invalid repo means the factory default, which is always
- # applyable. pgenerator-update repeats this check as root at apply time.
+ # True when /api/update/apply must be refused: a repo outside the
+ # factory trust allowlist that lacks the operator's ota_repo_trusted=1
+ # confirm. Empty/invalid repo means the factory default (always
+ # applyable). pgenerator-update repeats this check as root at apply time.
  &webui_reload_pgenerator_conf();
  my $er=&webui_ota_repo_normalize($pgenerator_conf{"ota_repo"}||"");
- return 0 if(!defined $er || $er eq "" || $er eq $ota_repo_default);
+ return 0 if(!defined $er || $er eq "");
+ return 0 if(&webui_ota_repo_is_allowlisted($er));
  return ($pgenerator_conf{"ota_repo_trusted"}||"") ne "1";
 }
 
@@ -9940,9 +9949,10 @@ sub webui_update_repo_get (@) {
  my $repo=&webui_ota_repo_normalize($pgenerator_conf{"ota_repo"} || "");
  my $custom=(defined $repo && $repo ne "");
  $repo=$ota_repo_default if(!$custom);
- my $trusted=($custom && ($pgenerator_conf{"ota_repo_trusted"}||"") eq "1") ? "true" : "false";
+ my $trusted=(&webui_ota_repo_is_allowlisted($repo) || ($pgenerator_conf{"ota_repo_trusted"}||"") eq "1") ? "true" : "false";
  $repo=&_webui_json_escape($repo);
- return "{\"status\":\"ok\",\"repo\":\"$repo\",\"default_repo\":\"$ota_repo_default\",\"custom\":".($custom?"true":"false").",\"trusted\":$trusted}";
+ my $allow=join(",", map { &_webui_json_escape($_) } \@ota_repo_trusted_allowlist);
+ return "{\"status\":\"ok\",\"repo\":\"$repo\",\"default_repo\":\"$ota_repo_default\",\"custom\":".($custom?"true":"false").",\"trusted\":$trusted,\"allowlist\":\"$allow\"}";
 }
 
 sub webui_update_repo_set (@) {
@@ -9959,7 +9969,7 @@ sub webui_update_repo_set (@) {
  # Trust key tracks the repo: a custom source needs the operator's
  # explicit confirm (see the applyUpdate trust gate in webui-app.js and
  # custom_repo_trusted() in pgenerator-update); default clears it.
- $res=&sudo("SET_PGENERATOR_CONF","ota_repo_trusted",($repo eq $ota_repo_default)?"":"1");
+ $res=&sudo("SET_PGENERATOR_CONF","ota_repo_trusted",(&webui_ota_repo_is_allowlisted($repo))?"":"1");
  return '{"status":"error","message":"Failed to write PGenerator.conf"}' unless(defined $res && $res=~/^OK/);
  &webui_reload_pgenerator_conf();
  return &webui_update_repo_get();

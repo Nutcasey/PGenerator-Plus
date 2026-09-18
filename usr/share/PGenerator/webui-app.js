@@ -3570,17 +3570,17 @@ function showUpdateCard(){
 // ── OTA source repo setting ──
 // Persisted server-side as ota_repo in PGenerator.conf and read by
 // /usr/sbin/pgenerator-update on every check/apply. Clearing the field
-// restores the official default repo. A custom source is a root-trust
-// decision (releases are unsigned), so saving one asks for an explicit
-// confirm and the server sets ota_repo_trusted=1; apply refuses any
-// non-default repo without it. The X-PGenerator-Write header marks
-// same-origin UI writes: a cross-origin form post cannot attach it.
+// restores the official default repo. Installing is root-trust: apply
+// allows only the factory allowlist (official default + upstream
+// BigShoots) or a repo whose operator confirmed the trust prompt on save
+// (server then sets ota_repo_trusted=1). The X-PGenerator-Write header
+// marks same-origin UI writes: a cross-origin form post cannot attach it.
 function updateOtaRepoNote(repo,trusted){
  const note=document.getElementById('otaRepoNote');
  if(!note||!repo) return;
  const def=note.dataset.defaultRepo||'oldgithubman/PGenerator-Plus';
  if(repo===def) note.textContent='Official updates: '+repo;
- else note.textContent=trusted?('Custom update source (trusted): '+repo):('Custom update source (NOT trusted — updates blocked): '+repo);
+ else note.textContent=trusted?('Update source: '+repo):('Update source (NOT trusted — updates blocked): '+repo);
 }
 async function loadOtaRepo(){
  const r=await fetchJSON('/api/update/repo',{_quiet:true,_timeoutMs:8000});
@@ -3589,13 +3589,18 @@ async function loadOtaRepo(){
  if(input&&document.activeElement!==input) input.value=r.custom?r.repo:'';
  const note=document.getElementById('otaRepoNote');
  if(note&&r.default_repo) note.dataset.defaultRepo=r.default_repo;
+ if(typeof r.allowlist==='string') window._otaRepoAllowlist=r.allowlist;
  updateOtaRepoNote(r.repo,r.trusted);
 }
 async function saveOtaRepo(){
  const input=document.getElementById('otaRepo');
  const btn=document.getElementById('saveOtaRepoBtn');
  const raw=(input&&input.value||'').trim();
- if(raw&&!confirm('Use '+raw+' as the update source?\n\nReleases are not code-signed: installing from a custom repo means fully trusting its owner with root on this device.')){
+ // Factory-trusted sources (official default, upstream BigShoots) need no
+ // root-trust confirm; anything else does. The allowlist comes from the
+ // server so both sides stay in sync; server enforces regardless.
+ const allow=((window._otaRepoAllowlist)||'').split(',');
+ if(raw&&!allow.includes(raw)&&!confirm('Use '+raw+' as the update source?\n\nReleases are not code-signed: installing from a custom repo means fully trusting its owner with root on this device.')){
   return;
  }
  const btnState=btn?btn.textContent:'';
