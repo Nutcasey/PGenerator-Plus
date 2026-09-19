@@ -541,6 +541,8 @@ my @LG_CONTROL_SAMPLES;
 my $LG_CONTROL_SESSION_SECONDS = 30;
 my $LG_CONTROL_TIMEOUT_CAP = 300;
 my $LG_CONTROL_LARGEST_GROUP = 18;
+# Keys the daemon reads when a readback names none (lg_picture_default_keys).
+my $LG_DEFAULT_READ_KEYS = 26;
 my $LG_CONTROL_SAMPLE_CAP = ($LG_CONTROL_TIMEOUT_CAP - $LG_CONTROL_SESSION_SECONDS) / $LG_CONTROL_LARGEST_GROUP;
 my $LG_CONTROL_STAMP_WARNED = 0;
 sub _lg_control_seconds {
@@ -604,7 +606,7 @@ sub _lg_helper_timeout_for {
         # Reads follow the same measured figure per key, never below the
         # 120 s that covered that readback.
         # Without a key list the daemon reads its whole default set.
-        my $keys = ref($payload->{keys}) eq 'ARRAY' && @{$payload->{keys}} ? scalar(@{$payload->{keys}}) : $LG_CONTROL_LARGEST_GROUP + 1;
+        my $keys = ref($payload->{keys}) eq 'ARRAY' && @{$payload->{keys}} ? scalar(@{$payload->{keys}}) : $LG_DEFAULT_READ_KEYS;
         my $read = $LG_CONTROL_SESSION_SECONDS + int($per_control + 0.5) * $keys;
         $read = 120 if $read < 120;
         $read = $LG_CONTROL_TIMEOUT_CAP if $read > $LG_CONTROL_TIMEOUT_CAP;
@@ -1710,7 +1712,7 @@ sub _calibration_manages_setting {
     # guards below decide whether a LUT actually owns the control.
     if ($key eq 'gamma') {
         return 0 if _signal($item) ne 'sdr' || !_stages($item)->{calibration}
-            || ($point || '') !~ /^(?:(?:resume-)?c(?:6|7|8|9|10)(?:-(?:confirm|repair|stable|recovery))?|resume-setup|resume-profile-baseline)$/;
+            || ($point || '') !~ /^(?:(?:resume-)?c(?:6|7|8|9|10)(?:-(?:confirm|repair|stable|recovery))?|resume-(?:setup|profile-baseline)(?:-pre)?)$/;
         return 0 if (_tv_gamma_value($item->{settings}{$key}) || '') !~ /^(?:low|medium|high1|high2)$/;
         # Uploaded 1D LUT data bypasses LG's menu gamma. Only this job's
         # completed, verified upload owns it; a later reset invalidates that.
@@ -1723,7 +1725,7 @@ sub _calibration_manages_setting {
         }
         return $grey && ($grey->{status} || '') eq 'done' && ($grey->{verified} // '') eq '1' ? 1 : 0;
     }
-    return 0 if $key ne 'colorGamut' || ($point || '') !~ /^(?:(?:resume-)?c(?:7|8|9|10)(?:-(?:confirm|repair|stable|recovery))?|resume-setup|resume-profile-baseline)$/;
+    return 0 if $key ne 'colorGamut' || ($point || '') !~ /^(?:(?:resume-)?c(?:7|8|9|10)(?:-(?:confirm|repair|stable|recovery))?|resume-(?:setup|profile-baseline)(?:-pre)?)$/;
     return 0 if _signal($item) !~ /^(?:sdr|hdr10)$/ || !_stages($item)->{calibration};
     return 0 if ($item->{settings}{$key} || '') !~ /^(?:auto|native|wide|extended)$/i;
     # Only a committed 3D LUT owns the post-calibration gamut control. Never
@@ -1905,7 +1907,7 @@ sub _read_and_verify_settings {
 
 sub _expected_calibration_gamut_state {
     my ($item, $key, $point) = @_;
-    return 0 if $key ne 'colorGamut' || ($point || '') !~ /^(?:(?:resume-)?c6(?:-(?:confirm|repair|stable|recovery))?|resume-setup|resume-profile-baseline)$/;
+    return 0 if $key ne 'colorGamut' || ($point || '') !~ /^(?:(?:resume-)?c6(?:-(?:confirm|repair|stable|recovery))?|resume-(?:setup|profile-baseline)(?:-pre)?)$/;
     return 0 if _signal($item) !~ /^(?:sdr|hdr10)$/ || !_stages($item)->{calibration};
     return 0 if lc($item->{settings}{$key} || '') ne 'auto';
     # Our SDR/HDR reset stage includes BOTH the 1D and 3D baseline reset.
@@ -2991,7 +2993,10 @@ sub _calibration_volume_stage {
     my ($item_number, $item) = @_;
     my $signal = _signal($item);
     if ($signal eq 'dv') {
-        unlink(PGAutomation::item_dir($RUN_ID, $item_number) . '/calibration/dv-profile-upload-dispatched.json');
+        # A new attempt starts with no dispatch marker and no accepted
+        # artifact from an earlier attempt.
+        unlink(PGAutomation::item_dir($RUN_ID, $item_number) . '/calibration/dv-profile-upload-dispatched.json',
+            PGAutomation::item_dir($RUN_ID, $item_number) . '/calibration/dv-profile-upload.json');
         return 0 if !_set_dv_map($item, '2');
         _log('launching Dolby Vision profile worker');
         $ACTIVE_WORKER = 'dv';
@@ -3106,12 +3111,12 @@ sub _dv_upload_unresolved {
     my ($number,$item)=@_;
     return 0 if _signal($item) ne 'dv';
     my $dir=PGAutomation::item_dir($RUN_ID,$number).'/calibration';
-    my $dispatched=(stat("$dir/dv-profile-upload-dispatched.json"))[9];
-    return 0 if !defined($dispatched);
+    return 0 if !-f "$dir/dv-profile-upload-dispatched.json";
+    # The stage start removes the previous attempt's accepted artifact with
+    # the marker, so an ok artifact beside a marker is this attempt's (the
+    # appliance has no clock worth ordering files by).
     my $upload=PGAutomation::read_json_file("$dir/dv-profile-upload.json");
-    return 1 if ref($upload) ne 'HASH' || ($upload->{status}||'') ne 'ok';
-    my $accepted=(stat("$dir/dv-profile-upload.json"))[9];
-    return (defined($accepted) && $accepted >= $dispatched) ? 0 : 1;
+    return (ref($upload) eq 'HASH' && ($upload->{status}||'') eq 'ok') ? 0 : 1;
 }
 
 # 1 when the committed 1D result carries the 3072-value curve the baseline
@@ -3157,6 +3162,7 @@ sub _restore_profile_baseline {
         {restored_at=>time(),picture_mode=>_picture_mode($item),verified=>JSON::PP::true,
          source=>'grey-state.json',data_count=>scalar @$dpg,unity_reset=>$reset,dpg_upload=>$upload});
     delete $item->{profile_baseline_needs_restore};
+    delete $item->{profile_baseline_restore_failures};
     return 1;
 }
 
@@ -3997,7 +4003,8 @@ sub _prepare_resume {
     delete $item->{profile_baseline_needs_restore};
     if ($item->{profile_baseline_restore_failed}) {
         delete $item->{profile_baseline_restore_failed};
-        _log_action('The 1D baseline could not be restored on the previous resume; the calibration restarts from its reset');
+        delete $item->{profile_baseline_restore_failures};
+        _log_action('The 1D baseline could not be restored on the previous resumes; the calibration restarts from its reset');
         _drop_resume_checkpoints($item, { map { $_ => 1 } qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete) });
         delete $item->{settings_recovery};
         delete $item->{drift_recovery_pending};
@@ -4985,8 +4992,13 @@ sub _run_item {
             if (!$baseline_restored) {
                 my $error = $@ || $::LAST_ERROR || 'Profile baseline restore failed';
                 # Recorded with the failure so the next resume takes the
-                # reset instead of arming the same restore again.
-                $item->{profile_baseline_restore_failed} = 1;
+                # reset instead of arming the same restore again. A restore
+                # cut short by a stop request is not a refusal, and one
+                # transient refusal earns a single retry before the latch.
+                if (!$STOP_REQUESTED && ($::LAST_ERROR_CODE || '') ne 'stopped' && $error !~ /\bstop requested\b/i) {
+                    $item->{profile_baseline_restore_failures} = ($item->{profile_baseline_restore_failures} || 0) + 1;
+                    $item->{profile_baseline_restore_failed} = 1 if $item->{profile_baseline_restore_failures} >= 2;
+                }
                 die $error;
             }
         }

@@ -191,11 +191,6 @@ sub grey_state {
  my $accepted=item(signal_format=>'dv',failure=>{stage=>'volume-done',message=>'x',at=>2});
  main::_prepare_resume(13,$accepted,1);
  is_deeply(names($accepted),[qw(item-started tv-setup-verified reset-and-reapply-verified panel-light-settled greyscale-done)],'an accepted result written after the dispatch keeps the greyscale');
- my $past=time()-100;
- utime($past,$past,"$dir/dv-profile-upload.json");
- my $stale=item(signal_format=>'dv',failure=>{stage=>'volume-done',message=>'x',at=>2});
- main::_prepare_resume(13,$stale,1);
- is_deeply(names($stale),[qw(item-started tv-setup-verified)],'an accepted result older than the dispatch counts for nothing');
 }
 
 # A Dolby Vision session-close failure with a verified profile keeps it.
@@ -209,6 +204,16 @@ sub grey_state {
  push(@{$item->{checkpoints}},{name=>'volume-done',status=>'done',at=>3},{name=>'volume-settings-verified',status=>'done',at=>3});
  main::_prepare_resume(14,$item,1);
  is_deeply(names($item),[qw(item-started tv-setup-verified reset-and-reapply-verified panel-light-settled greyscale-done greyscale-settings-verified volume-done volume-settings-verified)],'the verified Dolby Vision profile is kept');
+}
+
+# The pre-read of a resume-time pass carries the same ownership.
+{
+ my $owned={signal_format=>'hdr10',settings=>{colorGamut=>'auto'},
+  checkpoints=>[map { {name=>$_,status=>'done',verified=>1} } qw(reset-and-reapply-verified greyscale-done volume-done)]};
+ is(main::_calibration_manages_setting($owned,'colorGamut','resume-setup-pre'),1,'the resume-setup pre-read sees the kept LUT as the owner');
+ my $one_d={signal_format=>'hdr10',settings=>{colorGamut=>'auto'},
+  checkpoints=>[map { {name=>$_,status=>'done',verified=>1} } qw(reset-and-reapply-verified greyscale-done)]};
+ is(main::_expected_calibration_gamut_state($one_d,'colorGamut','resume-profile-baseline-pre'),1,'the baseline pre-read expects the post-1D transition');
 }
 
 # A baseline restore that failed on the previous resume is not armed again.

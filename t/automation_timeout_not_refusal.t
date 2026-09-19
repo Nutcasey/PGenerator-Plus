@@ -20,7 +20,7 @@ ok(main::_lg_connection_failure({status=>'error',error_code=>'lg-disconnected'})
 
 # Helper timeouts the runner asks for: only where the daemon action is known.
 # 18 Sep 2026: a 19-key readback took 59 s on the G3 against a 60 s budget.
-is(main::_lg_helper_timeout_for('/api/lg/picture-settings',{}),182,'a read with no key list is budgeted for the daemon default set');
+is(main::_lg_helper_timeout_for('/api/lg/picture-settings',{}),238,'a read with no key list is budgeted for the daemon default set of 26 keys');
 is(main::_lg_helper_timeout_for('/api/lg/picture-settings',{keys=>[1..19]}),182,'a 19-key read budgets the 8 s floor per key');
 is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{brightness=>50}}),45,'a lone control keeps the daemon default');
 is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..18}}),174,'eighteen controls get time for eighteen in-session writes');
