@@ -72,14 +72,20 @@ my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],
   best_available_write_ack=>{x=>1},tv_input=>'HDMI_1',hazards=>{a=>1},hazard_capabilities=>{b=>1},hazard_restore=>{c=>1},device_identity=>{d=>1},supported_picture_keys=>[('k')x40],calibration_settings_recipe=>{e=>1},
   checkpoints=>[map {{name=>"cp$_",status=>'done',verified=>1,completed_at=>1000+$_,duration_seconds=>5,evidence=>{profile=>'e'x5000}}} 1..12],
   readiness=>{passed=>2,checks=>[{ok=>1,message=>'fine'},{ok=>0,level=>'warning',message=>'look'}]}};
- PGAutomation::write_json_atomic(PGAutomation::run_dir($id).'/run.json',{id=>$id,token=>'s',status=>'complete',items=>[$fat]});
- PGAutomation::write_json_atomic("$dir/post/greyscale-21.json",{type=>'greyscale',points=>21,status=>'complete',steps=>[map {{ire=>$_*5}} 0..20],readings=>[map {{Y=>$_,X=>$_,Z=>$_,ire=>$_*5}} 0..20],
-  signal_mode=>'hdr10',target_gamma=>'st2084',report_key=>'greyscale-21',automation_worker_id=>'w',worker_pid=>1,worker_start_ticks=>2,full_autocal_run_id=>$id});
- PGAutomation::write_json_atomic("$dir/calibration/grey-state.json",{status=>'complete',readings=>[map {{Y=>$_,ire=>$_*4}} 0..25],steps=>[map {{ire=>$_*4}} 0..25],signal_mode=>'hdr10',target_gamma=>'st2084',
-  calibration_target_context=>{signal_mode=>'hdr10'},lg_autocal_26_best_known=>{'10'=>{reading=>{Y=>1}}},
-  hdr20_1d_dpg_anchor_history=>[map {{pass=>$_,anchors=>[(0.5)x300]}} 1..40],hdr20_1d_dpg_data=>[(0.123456)x3072],activity_events=>[map {{t=>$_,m=>'e'x80}} 1..100],token=>'must-not-leak'});
- PGAutomation::write_json_atomic("$dir/calibration/3d-state.json",{status=>'complete',readings=>[{Y=>1}],steps=>[{name=>'red'}],method=>'matrix',
-  automation_processing_checks=>[map {{key=>"k$_",reason=>'r'x200}} 1..300],upload=>{payload=>'u'x50000}});
+ PGAutomation::write_json_atomic(PGAutomation::run_dir($id).'/run.json',{id=>$id,token=>'s',status=>'complete',
+  items=>[$fat,{%$fat,name=>'Readiness failed',status=>'failed',failure=>{stage=>'job-readiness',message=>'The TV could not select the picture mode'}},{%$fat,name=>'Real rows'}]});
+ my $snapshots=sub {
+  my ($dir)=@_;
+  make_path("$dir/post","$dir/calibration");
+  PGAutomation::write_json_atomic("$dir/post/greyscale-21.json",{type=>'greyscale',points=>21,status=>'complete',steps=>[map {{ire=>$_*5}} 0..20],readings=>[map {{Y=>$_,X=>$_,Z=>$_,ire=>$_*5}} 0..20],
+   signal_mode=>'hdr10',target_gamma=>'st2084',report_key=>'greyscale-21',automation_worker_id=>'w',worker_pid=>1,worker_start_ticks=>2,full_autocal_run_id=>$id});
+  PGAutomation::write_json_atomic("$dir/calibration/grey-state.json",{status=>'running',readings=>[map {{Y=>$_,ire=>$_*4}} 0..25],steps=>[map {{ire=>$_*4}} 0..25],signal_mode=>'hdr10',target_gamma=>'st2084',
+   calibration_target_context=>{signal_mode=>'hdr10'},lg_autocal_26_best_known=>{'10'=>{reading=>{Y=>1}}},current_name=>'Auto Cal 10%',current_ddc_target_ire=>10,current_ire=>10,current_step_ire=>10,patch_ire=>10,current_stimulus=>10,active_stimulus=>10,paired_current_name=>'10%',
+   hdr20_1d_dpg_anchor_history=>[map {{pass=>$_,anchors=>[(0.5)x300]}} 1..40],hdr20_1d_dpg_data=>[(0.123456)x3072],activity_events=>[map {{t=>$_,m=>'e'x80}} 1..100],token=>'must-not-leak'});
+  PGAutomation::write_json_atomic("$dir/calibration/3d-state.json",{status=>'complete',readings=>[{Y=>1}],steps=>[{name=>'red'}],method=>'matrix',
+   automation_processing_checks=>[map {{key=>"k$_",reason=>'r'x200}} 1..300],upload=>{payload=>'u'x50000}});
+ };
+ $snapshots->($dir);
  open(my $fh,'>>',"$dir/settings-checks.ndjson") or die $!;
  print {$fh} PGAutomation::encode_json({key=>"setting$_",category=>'picture',expected=>50,observed=>50,verified=>JSON::PP::true(),result=>'verified',reason=>'TV readback matches the requested value',error_code=>'',
   checkpoint=>'c1',timestamp=>1789749261.9+$_,operation=>'readback',capability_profile_hash=>'8'x64,capability_profile_id=>'lg/effective/W23O/series/2026.09.18.1'})."\n" for 1..300;
@@ -95,7 +101,8 @@ my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],
  }
  is_deeply($detail->{item}{checkpoints}[0],{name=>'cp1',status=>'done',verified=>1,completed_at=>1001,duration_seconds=>5},'checkpoints keep their name, state and times, not their evidence');
  is(scalar(@{$detail->{item}{checkpoints}}),12,'and all of them');
- is_deeply($detail->{item}{readiness},{passed=>3,checks=>[{ok=>0,level=>'warning',message=>'look'}]},'readiness keeps the failing checks and the count of passing ones');
+ is_deeply($detail->{item}{readiness},{passed=>3,checks=>[]},'readiness keeps the count of passing checks; the failing ones travel once, as readiness issues');
+ is_deeply(main::webui_automation_job_detail($id,1)->{item}{readiness},{passed=>3,checks=>[{ok=>0,level=>'warning',message=>'look'}]},'a job that failed its own readiness stage keeps its failing checks, the one case the view reads them from the item');
  is(scalar(@{$detail->{checks}}),300,'every check row is kept: the view lists and counts them all');
  is_deeply([sort keys %{$detail->{checks}[0]}],[qw(category checkpoint error_code expected key observed reason result timestamp verified)],'each row is trimmed to what the view reads');
  my %snap=map {($_->{phase}.'/'.$_->{key}=>$_->{snapshot})} @{$detail->{snapshots}};
@@ -108,6 +115,39 @@ my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],
  ok(!exists $snap{'calibration/3d'}{automation_processing_checks} && !exists $snap{'calibration/3d'}{upload},'processing checks and the upload payload are not');
  is_deeply([sort keys %{$snap{'post/greyscale-21'}}],[qw(points readings signal_mode status steps target_gamma type)],'a series snapshot keeps its chart fields only');
  is_deeply([map {$_->{message}} @{$detail->{readiness_issues}}],[],'readiness issues are still scoped by job number');
+ is_deeply([map {$snap{'calibration/grey'}{$_}} qw(current_name current_ddc_target_ire current_ire current_step_ire patch_ire current_stimulus active_stimulus paired_current_name)],['Auto Cal 10%',10,10,10,10,10,10,'10%'],
+  'a state saved while running keeps the fields that name the patch in progress, so the chart hides its stale reading');
+ # The view is built by selecting from the cached record, never by cloning
+ # the item and deleting most of it afterwards.
+ my $cloned=0;my $real_clone=\&PGAutomation::clone;
+ {
+  no warnings 'redefine';
+  local *PGAutomation::clone=sub { $cloned++ if(ref($_[0]) eq 'HASH' && (exists $_[0]{setting_contracts} || exists $_[0]{checkpoints})); $real_clone->(@_) };
+  main::webui_automation_job_detail($id,0);
+ }
+ is($cloned,0,'the view item is built from the cached record without cloning the evidence it drops');
+ # The job that carried 781 rows on 18 Sep 2026 (its file also held the whole
+ # queue's mode checks) measured 222 KB with every row kept; rows shaped like
+ # its own are the honest bound, not the short synthetic ones above.
+ my $real=PGAutomation::item_dir($id,2);$snapshots->($real);
+ my @keys=qw(pictureMode brightness contrast color sharpness colorTemperature gamma colorGamut peakBrightness dynamicContrast superResolution noiseReduction mpegNoiseReduction smoothGradation realCinema truMotionMode blackLevel hdrDynamicToneMapping energySaving screenSaver autoPowerOff);
+ my @points=qw(queue-preflight-mode job-start-mode c1 c4-mode c4 c5 c6 c6-confirm c7 c8 c8-stable c9 c10);
+ my @reasons=('TV readback matches the requested value','Readback could not be verified for this control in this picture mode; the TV does not expose it through the API',
+  'The verified 3D LUT controls gamut; the requested menu value is retained as the pre-calibration setup','TV-reported value differs from the requested value after the write was acknowledged');
+ open(my $rows,'>>',"$real/settings-checks.ndjson") or die $!;
+ for my $n (1..781) {
+  my $verified=$n%7?1:0;
+  print {$rows} PGAutomation::encode_json({capability_profile_hash=>'8cd6a98767c8689772609f0114d5e5066eb3954d8a4c6404c893852b03cec3e2',capability_profile_id=>'lg/effective/W23O/series/2026.09.18.1',
+   category=>'picture',checkpoint=>$points[$n%@points],error_code=>$verified?'':'readback-mismatch',expected=>$n%3?'auto':50,key=>$keys[$n%@keys],observed=>$verified?($n%3?'auto':50):($n%3?'wide':55),
+   operation=>$n%5?'readback':'write',reason=>$reasons[$n%@reasons],result=>$verified?'verified':'mismatch',timestamp=>1789749261.93441+$n*7.3,verified=>$verified?JSON::PP::true():JSON::PP::false()})."\n";
+ }
+ close($rows);
+ my $heavy=main::webui_automation_job_detail($id,2);
+ is(scalar(@{$heavy->{checks}}),781,'every one of the 781 rows is kept');
+ my ($total,$rows_bytes,$raw)=(length(PGAutomation::encode_json($heavy)),length(PGAutomation::encode_json($heavy->{checks})),-s "$real/settings-checks.ndjson");
+ cmp_ok($rows_bytes,'<',$raw*0.8,"the trimmed rows are at least a fifth smaller than the saved lines ($rows_bytes of $raw)");
+ cmp_ok($total,'<',250000,"a 781-row job is under 250 KB with every row kept ($total)");
+ cmp_ok($total-$rows_bytes,'<',20000,'and everything but the rows is under 20 KB');
 }
 ok(!main::webui_automation_job_detail($id,99),'invalid job rejected');
 ok(!main::webui_automation_job_detail('../no',0),'invalid run rejected');

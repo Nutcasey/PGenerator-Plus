@@ -13842,10 +13842,13 @@ sub webui_automation_job_checks_read (@) {
 }
 
 # What the graphs read of a series or calibration snapshot, whether saved
-# with the job or live from the worker. A worker's saved state also holds
-# its 1D curve, anchor history, processing evidence and upload payloads:
-# evidence for the artifact download, and 300 KB of every job-detail poll.
-our @WEBUI_AUTOMATION_SNAPSHOT_KEYS=qw(type points status steps readings white_reading black_reading signal_mode target_gamma target_gamut delta_e_formula target_white calibration_target_context max_luma dv_map_mode color_format max_bpc signal_range pattern_signal_range transport_signal_range transport_context_inferred sdr_1d_dpg_peak_ire lg_autocal_26_best_known method current_name current_step current_delta_e current_luminance luminance_error_pct message measurement_retry);
+# with the job or live from the worker: the readings, steps and targets, the
+# best-known readings the chart overlays, and the fields that name the patch
+# in progress so its stale reading is hidden while the state says running.
+# A worker's saved state also holds its 1D curve, anchor history, processing
+# evidence and upload payloads: evidence for the artifact download, and
+# 300 KB of every job-detail poll.
+our @WEBUI_AUTOMATION_SNAPSHOT_KEYS=qw(type points status steps readings white_reading black_reading signal_mode target_gamma target_gamut delta_e_formula target_white calibration_target_context max_luma dv_map_mode color_format max_bpc signal_range pattern_signal_range transport_signal_range transport_context_inferred sdr_1d_dpg_peak_ire lg_autocal_26_best_known method current_name current_step current_delta_e current_luminance luminance_error_pct message measurement_retry current_ddc_target_ire current_ddc_array_ire current_ire current_step_ire patch_ire current_stimulus active_stimulus paired_current_name);
 sub webui_automation_graph_snapshot (@) {
  my ($state)=@_;
  return undef if(ref($state) ne "HASH");
@@ -13859,18 +13862,23 @@ sub webui_automation_graph_snapshot (@) {
 # The TV capability profile, setting contracts, checkpoint evidence and the
 # passing checks belong to the manifest and the artifact download.
 our @WEBUI_AUTOMATION_JOB_EVIDENCE_KEYS=qw(setting_contracts generation_profile capability_profile preflight_contract best_available_settings best_available_write_ack tv_input hazards hazard_capabilities hazard_restore device_identity supported_picture_keys calibration_settings_recipe);
+my %WEBUI_AUTOMATION_JOB_EVIDENCE=map { ($_=>1) } @WEBUI_AUTOMATION_JOB_EVIDENCE_KEYS;
 sub webui_automation_job_view_item (@) {
- my ($item)=@_;
- return $item if(ref($item) ne "HASH");
- delete @{$item}{@WEBUI_AUTOMATION_JOB_EVIDENCE_KEYS};
- $item->{checkpoints}=[map { my $c=$_; ref($c) eq "HASH" ? {map { exists($c->{$_}) ? ($_=>$c->{$_}) : () } qw(name status verified completed_at duration_seconds)} : () } @{$item->{checkpoints}}]
-  if(ref($item->{checkpoints}) eq "ARRAY");
- if(ref($item->{readiness}) eq "HASH" && ref($item->{readiness}{checks}) eq "ARRAY") {
-  my @checks=grep { ref($_) eq "HASH" } @{$item->{readiness}{checks}};
-  $item->{readiness}{passed}=0+(($item->{readiness}{passed}||0)+scalar(grep { $_->{ok} } @checks));
-  $item->{readiness}{checks}=[grep { !$_->{ok} } @checks];
+ my ($record)=@_;
+ return {} if(ref($record) ne "HASH");
+ # Select from the record rather than copy and delete: the caller's record is
+ # its own copy, and the checkpoints alone were 67 KB of the 92 KB item.
+ my %item=map { ($_=>$record->{$_}) } grep { !$WEBUI_AUTOMATION_JOB_EVIDENCE{$_} && $_ ne "checkpoints" && $_ ne "readiness" } keys %$record;
+ $item{checkpoints}=[map { my $c=$_; ref($c) eq "HASH" ? {map { exists($c->{$_}) ? ($_=>$c->{$_}) : () } qw(name status verified completed_at duration_seconds)} : () } @{$record->{checkpoints}}]
+  if(ref($record->{checkpoints}) eq "ARRAY");
+ if(ref($record->{readiness}) eq "HASH") {
+  my @checks=ref($record->{readiness}{checks}) eq "ARRAY" ? grep { ref($_) eq "HASH" } @{$record->{readiness}{checks}} : ();
+  # The failing checks travel as readiness_issues; the view reads them from
+  # the item only for a job that failed its own readiness stage.
+  my $failed_readiness=ref($record->{failure}) eq "HASH" && ($record->{failure}{stage}||"") eq "job-readiness";
+  $item{readiness}={passed=>0+(($record->{readiness}{passed}||0)+scalar(grep { $_->{ok} } @checks)),checks=>[$failed_readiness ? grep { !$_->{ok} } @checks : ()]};
  }
- return $item;
+ return \%item;
 }
 
 sub webui_automation_job_detail (@) {
@@ -13879,7 +13887,11 @@ sub webui_automation_job_detail (@) {
  # per change, not once per poll.
  my $run=&webui_automation_read_run_cached($id);
  return undef if(ref($run) ne "HASH" || $index !~ /^\d+$/ || $index >= scalar(@{$run->{items}||[]}));
- my $item=PGAutomation::clone($run->{items}[$index]);
+ # The cached manifest is this worker's own deep copy, so the view is built
+ # by selecting from the record: a JSON round trip of the whole 92 KB item
+ # before dropping 86 KB of it cost 37 ms per poll on a desktop.
+ my $record=ref($run->{items}[$index]) eq "HASH" ? $run->{items}[$index] : {};
+ my $item=&webui_automation_job_view_item($record);
  my $dir=PGAutomation::item_dir($run->{id},$index);
  # 18 Sep 2026: with the manifest cached, this call still cost 2.2-2.5 s on
  # the G3 per poll: 106 KB of settings checks decoded line by line and up to
@@ -13921,9 +13933,9 @@ sub webui_automation_job_detail (@) {
   }
  }
  &webui_automation_scrub_credentials($item);
- my $job_checks=ref($item->{readiness}) eq "HASH" ? $item->{readiness}{checks} : $run->{readiness}{checks};
+ my $job_checks=ref($record->{readiness}) eq "HASH" ? $record->{readiness}{checks} : $run->{readiness}{checks};
  my @issues=grep { ref($_) eq "HASH" && !$_->{ok} && defined($_->{item_number}) && $_->{item_number} == $index } @{$job_checks||[]};
- &webui_automation_job_view_item($item);
+ &webui_automation_scrub_credentials(\@issues);
  return {status=>"ok",run_id=>$run->{id},item_number=>0+$index,item=>$item,checks=>\@checks,snapshots=>\@snapshots,live=>$live,
   readiness_issues=>\@issues,
   run_status=>$run->{status},active_stage=>$stage,stage_started_at=>$run->{stage_started_at},fetched_at=>PGAutomation::now()};
