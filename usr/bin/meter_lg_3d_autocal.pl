@@ -4310,14 +4310,29 @@ sub hdr20_postcal_prefix_shelf {
  return \@out;
 }
 
+# Matrix key for one TV: generation series plus model name (a seed
+# measured on another panel of the same series must not fire here).
+# Empty when either is missing.
+sub hdr20_postcal_matrix_key {
+ my ($lg_generation)=@_;
+ return "" if(ref($lg_generation) ne "HASH");
+ my $series=lc($lg_generation->{"series"}||"");
+ $series=~s/[^a-z0-9]+//g;
+ my $model=lc($lg_generation->{"model_name"}||"");
+ $model=~s/[^a-z0-9]+//g;
+ return "" if($series eq "" || $model eq "");
+ return $series.$model;
+}
+
 # Load the per-TV seed matrix from disk. Returns the seed magnitude in
-# DPG counts (>= 0). Keys the file by both lg_generation series (preferred
-# when present) and a model string (fallback). Falls back to the
-# configured _seed_counts when no entry matches. No-op when the file is
+# DPG counts (>= 0). Keys the file by generation series plus model name
+# (preferred when present) and by the run's signal mode (legacy
+# fallback, never TV-specific). Falls back to the configured
+# _seed_counts when no entry matches. No-op when the file is
 # missing/unreadable -- the caller treats "no seed" as 0, which still
 # allows the loop to converge from the live read alone.
 sub hdr20_postcal_load_matrix {
- my ($path,$lg_generation,$model,$seed_counts)=@_;
+ my ($path,$lg_generation,$signal_mode,$seed_counts)=@_;
  $path="" if(!defined($path));
  $path="/etc/PGenerator/hdr20_postcal_shadow_matrix.json" if($path eq "");
  $seed_counts=0 if(!defined($seed_counts) || $seed_counts+0 < 0);
@@ -4329,20 +4344,16 @@ sub hdr20_postcal_load_matrix {
  return $seed_counts if(!defined($data) || ref($data) ne "HASH");
  my $hdr=$data->{"hdr20"};
  return $seed_counts if(ref($hdr) ne "HASH");
- my $series="";
- if(ref($lg_generation) eq "HASH") {
-  $series=lc($lg_generation->{"series"}||"");
-  $series=~s/[^a-z0-9]+//g;
+ my $tv_key=hdr20_postcal_matrix_key($lg_generation);
+ my $mode_key="";
+ if(defined($signal_mode)) {
+  $mode_key=lc($signal_mode);
+  $mode_key=~s/[^a-z0-9]+//g;
  }
- my $model_str="";
- if(defined($model)) {
-  $model_str=lc($model);
-  $model_str=~s/[^a-z0-9]+//g;
- }
- # Lookup order: series key first, then model string key, then the
- # explicit _seed_counts fallback. Unknown TV falls through to seed_counts
- # so the loop still converges from the live read.
- foreach my $key ($series,$model_str) {
+ # Lookup order: series+model key first, then the signal-mode key, then
+ # the explicit _seed_counts fallback. Unknown TV falls through to
+ # seed_counts so the loop still converges from the live read.
+ foreach my $key ($tv_key,$mode_key) {
   next if($key eq "");
   if(ref($hdr->{$key}) eq "HASH" && defined($hdr->{$key}->{"seed_counts"})) {
    my $entry_seed=$hdr->{$key}->{"seed_counts"}+0;
@@ -4361,7 +4372,7 @@ sub hdr20_postcal_load_matrix {
 # is best-effort: a failure is logged but never fatal -- the seed is a
 # performance optimization, not a correctness requirement.
 sub hdr20_postcal_save_matrix {
- my ($path,$lg_generation,$model,$m_counts,$band_top,$taper_top,$picture_mode)=@_;
+ my ($path,$lg_generation,$signal_mode,$m_counts,$band_top,$taper_top,$picture_mode)=@_;
  $path="/etc/PGenerator/hdr20_postcal_shadow_matrix.json" if(!defined($path) || $path eq "");
  $m_counts=0 if(!defined($m_counts));
  $m_counts=$m_counts+0;
@@ -4369,13 +4380,11 @@ sub hdr20_postcal_save_matrix {
  $band_top=$band_top+0;
  $taper_top=30 if(!defined($taper_top) || $taper_top+0 <= 0);
  $taper_top=$taper_top+0;
- my $key="";
- if(ref($lg_generation) eq "HASH") {
-  $key=lc($lg_generation->{"series"}||"");
-  $key=~s/[^a-z0-9]+//g;
- }
- if($key eq "" && defined($model)) {
-  $key=lc($model);
+ # Series plus model name; the signal-mode key is the legacy fallback
+ # for a run with no generation (never applied on load).
+ my $key=hdr20_postcal_matrix_key($lg_generation);
+ if($key eq "" && defined($signal_mode)) {
+  $key=lc($signal_mode);
   $key=~s/[^a-z0-9]+//g;
  }
  return 0 if($key eq "");
@@ -4656,27 +4665,31 @@ sub run_hdr20_postcal_shadow_correction {
  my $lg_generation=(ref($config->{"lg_generation"}) eq "HASH") ? $config->{"lg_generation"} : undef;
  my $model_str=(ref($state) eq "HASH") ? ($state->{"signal_mode"}||"hdr10") : "hdr10";
  my ($M,$seed_entry,$seed_key)=hdr20_postcal_load_matrix($matrix_path,$lg_generation,$model_str,$seed_counts_cfg);
- # The persisted seed is applied to the 5% anchor's first correction
- # (the pass-2 counts) only when the matrix entry was found under this
- # TV's generation series and records the same picture mode; pass 1
- # must stay at zero counts because it is the baseline the self-gate
- # and revert-if-worse compare against.
+ # The seed is applied to the 5% anchor's first correction (the pass-2
+ # counts) when it is the operator's configured seed_counts, or a
+ # matrix entry found under this TV's series+model key that records
+ # the same picture mode. Pass 1 must stay at zero counts because it is
+ # the baseline the self-gate and revert-if-worse compare against; the
+ # pass-1 read also decides whether the seed fires at all (only when
+ # the anchor is lifted) and caps it at the gain step plus 60.
  my $seed_apply=0;
+ my $seed_src="";
  my $seed_why="";
  if($M > 0) {
-  my $series_key=(ref($lg_generation) eq "HASH") ? lc($lg_generation->{"series"}||"") : "";
-  $series_key=~s/[^a-z0-9]+//g;
+  my $tv_key=hdr20_postcal_matrix_key($lg_generation);
   my $run_pm=$config->{"picture_mode"}||"";
   if(ref($seed_entry) ne "HASH") {
-   $seed_why="seed ".int($M+0.5)." is the configured fallback, not a matrix entry for this TV";
-  } elsif($series_key eq "" || $seed_key ne $series_key) {
-   $seed_why="matrix entry was matched by the fallback key '".$seed_key."', not this TV's generation series";
+   $seed_apply=1;
+   $seed_src="configured seed_counts";
+  } elsif($tv_key eq "" || $seed_key ne $tv_key) {
+   $seed_why="matrix entry was matched by the fallback key '".$seed_key."', not this TV's series and model";
   } elsif(($seed_entry->{"picture_mode"}||"") eq "") {
    $seed_why="matrix entry for ".$seed_key." records no picture mode";
   } elsif(lc($seed_entry->{"picture_mode"}) ne lc($run_pm)) {
    $seed_why="matrix entry for ".$seed_key." is for picture mode '".$seed_entry->{"picture_mode"}."', this run is '".$run_pm."'";
   } else {
    $seed_apply=1;
+   $seed_src="matrix entry ".$seed_key;
   }
  }
 
@@ -5332,17 +5345,27 @@ sub run_hdr20_postcal_shadow_correction {
     my $next;
     if(defined($slope)) {
      $next=$counts{$idx} + ($target_lift-$lift)/$slope;
-    } elsif($pass == 1 && $ai == 0 && $seed_apply && $M > 0) {
-     # First correction of the 5% anchor: start from the persisted
-     # seed (last converged count for this TV and picture mode)
-     # instead of the coarse gain step.
-     $next=$M;
+    } elsif($pass == 1 && $ai == 0 && $seed_apply && $M > 0 && $lift > $target_lift) {
+     # First correction of a lifted 5% anchor: start from the seed
+     # (last converged count for this TV and picture mode, or the
+     # configured value) instead of the coarse gain step, but never
+     # more than the gain step plus the 60-count move cap, so a stale
+     # seed cannot be bound uncapped.
+     my $gain_step=$counts{$idx} + $gain*($lift-$target_lift);
+     my $seed_cap=$gain_step+60;
+     $next=($M > $seed_cap) ? $seed_cap : $M;
      $slope_src{$idx}="seed";
-     log_line("HDR20 post-cal shadow correction: 5% anchor seeded at ".int($M+0.5)." counts from the shadow matrix (".$seed_key.", picture mode '".($config->{"picture_mode"}||"")."')");
+     log_line("HDR20 post-cal shadow correction: 5% anchor seeded at ".sprintf("%.1f",$next)." counts from the ".$seed_src
+      .(($M > $seed_cap) ? " (seed ".int($M+0.5)." clamped to the gain step plus 60)" : "")
+      ." (picture mode '".($config->{"picture_mode"}||"")."')");
     } else {
      $next=$counts{$idx} + $gain*($lift-$target_lift);
-     if($pass == 1 && $ai == 0 && $M > 0 && !$seed_apply) {
-      log_line("HDR20 post-cal shadow correction: matrix seed not applied: ".$seed_why."; 5% anchor takes the gain step");
+     if($pass == 1 && $ai == 0 && $M > 0) {
+      if($seed_apply) {
+       log_line("HDR20 post-cal shadow correction: seed not applied: pass-1 lift ".sprintf("%.3f",$lift)." is not above target ".sprintf("%.3f",$target_lift)."; 5% anchor takes the floored gain step");
+      } else {
+       log_line("HDR20 post-cal shadow correction: matrix seed not applied: ".$seed_why."; 5% anchor takes the gain step");
+      }
      }
     }
     # Cap the secant move per pass; the pass-1 gain step stays uncapped
@@ -5408,13 +5431,15 @@ sub run_hdr20_postcal_shadow_correction {
    for my $idx (@anchor_idx) { push @best_anchor_list, [$idx,$best_counts{$idx}]; }
    $corrected=hdr20_postcal_apply_profile($dpg_base,\@best_anchor_list);
    $corrected=hdr20_postcal_monotone_clamp($corrected);
+   my $best_status=hdr20_postcal_best_status($improved,$best_worst,$baseline_worst,$tol);
+   $status->{"status"}=$best_status;
+   # Persist the 5% count as next time's seed only when this run
+   # converged; a best-effort count is not a trustworthy start.
    my $seed=$best_counts{$anchor_idx[0]};
-   if(defined($seed) && $seed+0 > 0) {
+   if(defined($seed) && $seed+0 > 0 && $best_status eq "converged") {
     my $saved=hdr20_postcal_save_matrix($matrix_path,$lg_generation,$model_str,$seed,$band_top_ire,$taper_top_ire,$config->{"picture_mode"}||"");
     $state->{"postcal_shadow_matrix_saved"}=$saved ? json_true() : json_false();
    }
-   my $best_status=hdr20_postcal_best_status($improved,$best_worst,$baseline_worst,$tol);
-   $status->{"status"}=$best_status;
    if($best_status eq "converged") {
     $status->{"note"}=($status->{"note"}||"")."converged within tolerance (worst ".sprintf("%.3f",$best_worst).", tolerance ".sprintf("%.3f",$tol).", baseline ".sprintf("%.3f",$baseline_worst).").";
    } else {

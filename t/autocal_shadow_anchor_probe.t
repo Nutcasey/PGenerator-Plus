@@ -236,6 +236,7 @@ sub pass_series {
  diag(sprintf("strong 10%% lift: probed zones %s worst %.3f (%s); stacked zones %s worst %.3f (%s)",
   $probed->{zone_probe},$probed->{best_worst},$probed->{status},join("/",@stacked_zones),$stacked->{best_worst},$stacked->{status}));
  is(join("/",@stacked_zones), '26/51/53/70/95/116', 'static scales reproduce the stacked pre-fix zones');
+ is($panel{matrix_saves}, 0, 'best effort does not persist a seed');
  is($probed->{status}, 'converged', 'probed zones converge with the stronger 10% lift');
  cmp_ok($stacked->{best_worst}, '>', $stacked->{tolerance}, 'stacked zones stay outside tolerance');
  cmp_ok($stacked->{best_worst}, '>', 2*$probed->{best_worst}, 'stacked zones give a clearly worse worst anchor');
@@ -366,26 +367,55 @@ sub pass_series {
  }
 }
 
-# (12) The persisted seed is applied to the 5% anchor's first
-# correction when the matrix entry matches this TV's generation series
-# and picture mode, and left alone (with the reason logged) otherwise.
+# (12) The seed is applied to the 5% anchor's first correction when the
+# matrix entry matches this TV's series+model key and picture mode (or
+# the operator configured seed_counts), only when the anchor is lifted,
+# and never above the gain step plus 60; otherwise the gain step is
+# kept and the reason logged.
 {
- my $entry=sub { { hdr20=>{ g3=>{ seed_counts=>57, picture_mode=>$_[0], band_top_ire=>25, taper_top_ire=>30, tol=>0.15 } } } };
- my ($status,$state)=run_panel(matrix=>$entry->("cinema"), config=>{ lg_generation=>{ series=>"G3" }, lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
+ my $gen={ series=>"G3", model_name=>"OLED55G36LA" };
+ my $entry=sub { my ($pm,$seed)=@_; $seed=57 if(!defined($seed)); { hdr20=>{ g3oled55g36la=>{ seed_counts=>$seed, picture_mode=>$pm, band_top_ire=>25, taper_top_ire=>30, tol=>0.15 } } } };
+ my $gain_step=180*(1.299-1);
+ my ($status,$state)=run_panel(matrix=>$entry->("cinema"), config=>{ lg_generation=>$gen, lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
  my %z=zones_of($status);
  is($state->{postcal_shadow_pass_2_counts}{$z{5}}+0, 57, 'matching seed sets the 5% anchor first correction');
  is(slope_src_of($state,1,$z{5}), 'seed', 'seed is recorded as the pass-1 source');
- ok(scalar(grep { /5% anchor seeded at 57 counts from the shadow matrix \(g3, picture mode 'cinema'\)/ } @{$panel{log}}), 'seed application is logged');
- ($status,$state)=run_panel(matrix=>$entry->("filmmaker"), config=>{ lg_generation=>{ series=>"G3" }, lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
+ ok(scalar(grep { /5% anchor seeded at 57\.0 counts from the matrix entry g3oled55g36la \(picture mode 'cinema'\)/ } @{$panel{log}}), 'seed application is logged');
+ ($status,$state)=run_panel(matrix=>$entry->("filmmaker"), config=>{ lg_generation=>$gen, lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
  %z=zones_of($status);
- ok(abs($state->{postcal_shadow_pass_2_counts}{$z{5}}-180*(1.299-1)) < 0.5, 'mismatched picture mode leaves the gain step');
- ok(scalar(grep { /matrix seed not applied: matrix entry for g3 is for picture mode 'filmmaker', this run is 'cinema'/ } @{$panel{log}}), 'seed rejection says why');
+ ok(abs($state->{postcal_shadow_pass_2_counts}{$z{5}}-$gain_step) < 0.5, 'mismatched picture mode leaves the gain step');
+ ok(scalar(grep { /matrix seed not applied: matrix entry for g3oled55g36la is for picture mode 'filmmaker', this run is 'cinema'/ } @{$panel{log}}), 'seed rejection says why');
+ # A seed recorded on another panel of the same series (series-only
+ # key) is not found for this TV.
+ ($status,$state)=run_panel(matrix=>{ hdr20=>{ g3=>{ seed_counts=>57, picture_mode=>"cinema" } } }, config=>{ lg_generation=>$gen, lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
+ %z=zones_of($status);
+ ok(abs($state->{postcal_shadow_pass_2_counts}{$z{5}}-$gain_step) < 0.5, 'series-only entry from another panel does not fire');
+ ok(!grep({ /anchor seeded/ } @{$panel{log}}), 'no seed is logged for a series-only entry');
  # No generation in the config: the lookup falls back to the signal-mode
  # key, which is not TV-specific, so an entry found that way is ignored.
  ($status,$state)=run_panel(matrix=>{ hdr20=>{ hdr10=>{ seed_counts=>57, picture_mode=>"cinema" } } }, config=>{ lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
  %z=zones_of($status);
- ok(scalar(grep { /matrix seed not applied: matrix entry was matched by the fallback key 'hdr10'/ } @{$panel{log}}), 'seed found by the fallback key is not applied');
- ok(abs($state->{postcal_shadow_pass_2_counts}{$z{5}}-180*(1.299-1)) < 0.5, 'fallback-key seed leaves the gain step');
+ ok(scalar(grep { /matrix seed not applied: matrix entry was matched by the fallback key 'hdr10', not this TV's series and model/ } @{$panel{log}}), 'seed found by the fallback key is not applied');
+ ok(abs($state->{postcal_shadow_pass_2_counts}{$z{5}}-$gain_step) < 0.5, 'fallback-key seed leaves the gain step');
+ # The operator's configured seed_counts is honoured when no entry matches.
+ ($status,$state)=run_panel(config=>{ lg_generation=>$gen, lg_autocal_hdr20_postcal_shadow_seed_counts=>40, lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
+ %z=zones_of($status);
+ is($state->{postcal_shadow_pass_2_counts}{$z{5}}+0, 40, 'configured seed_counts is applied when no matrix entry matches');
+ ok(scalar(grep { /5% anchor seeded at 40\.0 counts from the configured seed_counts/ } @{$panel{log}}), 'configured seed is logged as such');
+ # A stale seed of 300 against a panel needing 54 is clamped to the gain
+ # step plus 60 and the run still converges.
+ ($status,$state)=run_panel(matrix=>$entry->("cinema",300), config=>{ lg_generation=>$gen });
+ %z=zones_of($status);
+ diag("stale seed run: ".pass_series($state,$z{5},5).sprintf(" (%s, best worst %.3f)",$status->{status},$status->{best_worst}));
+ ok(abs($state->{postcal_shadow_pass_2_counts}{$z{5}}-($gain_step+60)) < 0.5, 'stale seed is clamped to the gain step plus 60');
+ ok(scalar(grep { /seed 300 clamped to the gain step plus 60/ } @{$panel{log}}), 'clamp is logged');
+ is($status->{status}, 'converged', 'clamped stale seed still converges');
+ # A 5% anchor that starts dark takes the floored gain step, not the seed.
+ ($status,$state)=run_panel(matrix=>$entry->("cinema"), baseline=>{ %job1_baseline, 5=>0.93 }, config=>{ lg_generation=>$gen, lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
+ %z=zones_of($status);
+ is($state->{postcal_shadow_pass_2_counts}{$z{5}}+0, 0, 'dark 5% anchor takes the floored gain step');
+ isnt(slope_src_of($state,1,$z{5}), 'seed', 'dark anchor is not seeded');
+ ok(scalar(grep { /seed not applied: pass-1 lift 0\.930 is not above target 1\.000/ } @{$panel{log}}), 'dark-anchor seed refusal is logged');
 }
 
 # (13) When the 4-index spacing moves an anchor above its measured
