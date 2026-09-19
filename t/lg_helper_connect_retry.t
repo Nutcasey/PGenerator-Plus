@@ -12,6 +12,9 @@ local $ENV{PGEN_AUTOMATION_DIR}=tempdir(CLEANUP=>1);
 my $refusal='{"status":"error","message":"Unable to connect to LG WebOS TV at 192.168.50.28 on ws://3000 or wss://3001","connect_attempts":2}';
 my $ok='{"status":"ok","calibration_mode":0}';
 my (@execs,$paused,@replies);
+my @diagnostics;
+local $PGCalibrationLog::SINK=sub {push @diagnostics,$_[0];1};
+local $PGCalibrationLog::CONTEXT={run=>'trace-test',job=>1,stage=>'greyscale-done',op=>'worker-request'};
 local *main::lg_helper_path=sub {$^X};
 local *main::lg_helper_exec=sub {push @execs,$_[0];my $r=shift @replies;return ($r,0);};
 local *main::lg_helper_connect_pause=sub {$paused++};
@@ -21,6 +24,15 @@ is($result->{status},'ok','a single connect refusal is retried and the second an
 is(scalar(@execs),2,'exactly one extra helper invocation');
 is($paused,1,'the retry waits for the TV first');
 ok($result->{connect_retried},'the reply records that it was a retry');
+my ($encoded)=$execs[0]=~/PGEN_LG_REQUEST_B64='([^']+)'/;
+my $request=JSON::PP::decode_json(MIME::Base64::decode_base64($encoded));
+is($request->{calibration_trace}{run},'trace-test','private helper request carries the run');
+is($request->{calibration_trace}{parent},'worker-request','helper is linked to the caller operation');
+is_deeply([map {$_->{event}} @diagnostics],[qw(helper-queued helper-start helper-retry helper-end)],
+ 'helper records queue, lock acquisition, retry and result');
+ok($diagnostics[1]{gate_wait_ms}>=0,'time waiting for the TV gate is visible');
+is($request->{calibration_trace}{op},$diagnostics[0]{op},'helper and daemon share an operation identity');
+is($PGCalibrationLog::CONTEXT->{op},'worker-request','helper scope restores caller context');
 @replies=($refusal,$refusal);@execs=();$paused=0;
 $result=main::lg_helper_run({action=>'picture_get',keys=>['brightness']});
 is($result->{status},'error','a TV that keeps refusing still fails');

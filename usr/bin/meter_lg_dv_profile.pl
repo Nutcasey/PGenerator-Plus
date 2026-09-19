@@ -17,6 +17,7 @@ BEGIN {
  unshift @INC,"$script_dir/../share/PGenerator";
 }
 use PGAutomation ();
+use PGCalibrationLog ();
 use PGSignalCode qw(signal_code_policy signal_percent_to_code);
 use PGLGCapabilities qw(lg_scoped_request_payload);
 
@@ -38,6 +39,10 @@ sub read_file {
 
 sub write_state {
  my (%state)=@_;
+ my $message=$state{message}||$state{status}||'unknown';
+ $message=~s/[\r\n]+/ /g;
+ print STDERR '['.PGCalibrationLog::timestamp()."] $message\n";
+ PGCalibrationLog::event('Dolby Vision','state',{status=>$state{status},message=>$message},PGCalibrationLog::from_config($config));
  PGAutomation::stamp_worker_state(\%state,$config);
  # Automation reads this file directly. Retain ownership and the measured
  # phase's context rather than requiring the standalone status endpoint to
@@ -63,6 +68,12 @@ sub write_state {
 sub cancelled { return -e $stop_file; }
 
 sub api_json {
+ my @args=@_;
+ return PGCalibrationLog::api_call('Dolby Vision',PGCalibrationLog::from_config($config),$args[0]||'GET',$args[1],$args[2],$args[3]||30,
+  sub {api_json_impl(@args)});
+}
+
+sub api_json_impl {
  my ($method,$path,$payload,$timeout)=@_;
  $method||="GET";
  $timeout||=30;
@@ -84,6 +95,7 @@ sub api_json {
  return {status=>"error",message=>"Web UI API is unavailable"} if(!$socket);
  $socket->autoflush(1);
  my $request="$method $path HTTP/1.1\r\nHost: $api_host\r\nConnection: close\r\nAccept: application/json\r\n";
+ $request .= PGCalibrationLog::header_line();
  if($method ne "GET") {
   $request.="Content-Type: application/json\r\nContent-Length: ".length($body)."\r\n\r\n".$body;
  } else {
@@ -293,6 +305,12 @@ sub fixture_reading_for_patch {
 # failure message, so the caller can report a clean "stopped" state instead
 # of a generic error.
 sub read_patch {
+ my @args=@_;
+ return PGCalibrationLog::measurement('Dolby Vision',PGCalibrationLog::from_config($args[1]),$args[0],undef,
+  sub {read_patch_impl(@args)});
+}
+
+sub read_patch_impl {
  my ($patch,$config)=@_;
  my $fixture=fixture_reading_for_patch($patch,$config);
  return ($fixture,undef) if($fixture);
@@ -396,7 +414,8 @@ for my $patch (@patches) {
  my $step={ name=>$patch->{"name"}, kind=>$patch->{"kind"}, x=>$reading->{"x"}, y=>$reading->{"y"}, luminance=>$reading->{"luminance"} };
  push(@steps,$step);
  $by_kind{$patch->{"kind"}}=$step;
- write_state(status=>"running",message=>"Measured ".$patch->{"name"},steps=>\@steps);
+ my $summary=sprintf('Measured %s | x %.5f; y %.5f | Y %.4f cd/m2',$patch->{name},$reading->{x}||0,$reading->{y}||0,$reading->{luminance}||0);
+ write_state(status=>"running",message=>$summary,steps=>\@steps);
 }
 
 my $measured_white_luminance=$by_kind{"white"}{"luminance"}+0;

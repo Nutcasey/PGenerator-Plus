@@ -24,6 +24,7 @@ use PGCalibrationMath qw(
 );
 use PGMeterReading qw(reading_xyz);
 use PGAutomation ();
+use PGCalibrationLog ();
 use PGSignalCode qw(signal_code_policy signal_percent_to_code);
 use PGLGCapabilities qw(lg_recipe lg_setting_values_agree lg_scoped_request_payload lg_setting_write_accepted);
 
@@ -81,8 +82,7 @@ $SIG{INT} = sub { $cancelled = 1; };
 sub log_line {
  my ($message)=@_;
  $message="" if(!defined($message));
- my @lt=localtime();
- my $stamp=sprintf("%02d:%02d:%02d",$lt[2],$lt[1],$lt[0]);
+ my $stamp=PGCalibrationLog::timestamp();
  print STDERR "[$stamp] $message\n";
 }
 
@@ -244,6 +244,12 @@ sub decode_json_safe {
 }
 
 sub api_json {
+ my @args=@_;
+ return PGCalibrationLog::api_call('Greyscale',PGCalibrationLog::from_config($LG_AUTOCAL_CONFIG),$args[0]||'GET',$args[1],$args[2],$args[3]||30,
+  sub {api_json_impl(@args)});
+}
+
+sub api_json_impl {
  my ($method,$path,$payload,$timeout)=@_;
  $method ||= "GET";
  $timeout ||= 30;
@@ -267,6 +273,7 @@ sub api_json {
  return { status=>"error", message=>"Web UI API is unavailable" } if(!$socket);
  $socket->autoflush(1);
  my $request = "$method $path HTTP/1.1\r\nHost: $api_host\r\nConnection: close\r\nAccept: application/json\r\n";
+ $request .= PGCalibrationLog::header_line();
  if($method ne "GET") {
   $request .= "Content-Type: application/json\r\nContent-Length: ".length($body)."\r\n\r\n".$body;
  } else {
@@ -22013,6 +22020,12 @@ sub autocal_ddc_reset_diag_log (@) {
 }
 
 sub read_step_once {
+ my @args=@_;
+ return PGCalibrationLog::measurement('Greyscale',PGCalibrationLog::from_config($args[0]),$args[1],$args[2],
+  sub {read_step_once_impl(@args)});
+}
+
+sub read_step_once_impl {
 		 my ($config,$step,$attempt,$opts)=@_;
 		 my $pattern_range=$config->{"pattern_signal_range"}||$config->{"signal_range"}||"";
 		 my $ire=defined($step->{"ire"}) ? ($step->{"ire"}+0) : 100;

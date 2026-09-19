@@ -29,6 +29,7 @@ use Fcntl qw(O_NONBLOCK O_WRONLY LOCK_EX LOCK_UN);
 use File::Path qw(make_path);
 use JSON::PP ();
 use PGAutomation ();
+use PGCalibrationLog ();
 use PGAutomationETA ();
 use Digest::SHA ();
 use PGAutomationLaunch ();
@@ -1374,6 +1375,7 @@ sub webui_http_worker (@) {
 ###############################################
 # The request body below is the former accept-loop body, moved verbatim.
 sub webui_handle_request (@) {
+ local $PGCalibrationLog::CONTEXT = {};
  my $client=shift;
   {
    # Per-socket read/write timeout (thread-safe, unlike alarm/SIGALRM which is process-wide).
@@ -1461,6 +1463,12 @@ sub webui_handle_request (@) {
     # Only the pairing endpoints use this -- it lets the approval prompt show
     # which machine on the network is asking, alongside its name and code.
     my $request_peer_ip=eval { $client->peerhost() } || "";
+    # Only local workers supply trace headers. They carry identifiers, never
+    # authorization, and cannot change a request's execution ownership.
+    if($request_peer_ip eq '127.0.0.1' || $request_peer_ip eq '::1') {
+     my ($trace)=$req=~/^X-PGenerator-Trace:[ \t]*([^\r\n]+)/mi;
+     $PGCalibrationLog::CONTEXT=PGCalibrationLog::from_header($trace);
+    }
     &log("WebUI: $method $path");
 
    # CORS headers for API

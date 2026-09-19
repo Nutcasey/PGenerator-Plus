@@ -27,6 +27,7 @@ use PGCalibrationMath qw(
 );
 use PGMeterReading qw(reading_xyz);
 use PGAutomation ();
+use PGCalibrationLog ();
 use PGSignalCode qw(signal_code_policy signal_percent_to_code);
 use PGAutomationProcessing ();
 use PGLGCapabilities qw(resolve_lg_capabilities lg_scoped_request_payload);
@@ -148,8 +149,7 @@ describe_and_exit() if($config_file eq "--describe");
 sub log_line {
  my ($message)=@_;
  $message="" if(!defined($message));
- my @lt=localtime();
- print STDERR sprintf("[%02d:%02d:%02d] %s\n",$lt[2],$lt[1],$lt[0],$message);
+ print STDERR "[".PGCalibrationLog::timestamp()."] $message\n";
 }
 
 sub read_file {
@@ -228,6 +228,12 @@ sub cancelled {
 }
 
 sub api_json {
+ my @args=@_;
+ return PGCalibrationLog::api_call('3D LUT',PGCalibrationLog::from_config($LG_3D_REQUEST_CONTEXT),$args[0]||'GET',$args[1],$args[2],$args[3]||30,
+  sub {api_json_impl(@args)});
+}
+
+sub api_json_impl {
  my ($method,$path,$payload,$timeout)=@_;
  $method ||= "GET";
  # Recheck processing once after a calibration write, not once per patch.
@@ -247,6 +253,7 @@ sub api_json {
  return { status=>"error", message=>"Web UI API is unavailable" } if(!$socket);
  $socket->autoflush(1);
  my $request="$method $path HTTP/1.1\r\nHost: $api_host\r\nConnection: close\r\nAccept: application/json\r\n";
+ $request .= PGCalibrationLog::header_line();
  if($method ne "GET") {
   $request.="Content-Type: application/json\r\nContent-Length: ".length($body)."\r\n\r\n".$body;
  } else {
@@ -3430,6 +3437,12 @@ sub apply_pattern_insert_before_read {
 # ---------------------------------------------------------------------
 
 sub read_step_once {
+ my @args=@_;
+ return PGCalibrationLog::measurement('3D LUT',PGCalibrationLog::from_config($args[0]),$args[1],$args[2],
+  sub {read_step_once_impl(@args)});
+}
+
+sub read_step_once_impl {
  my ($config,$step)=@_;
  my $delay_ms=int($config->{"delay_ms"}||1000);
  # Settle-delay floor, signal-mode aware -- mirrors the greyscale 1D autocal

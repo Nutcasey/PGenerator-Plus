@@ -32,7 +32,7 @@ for my $w (['grey','meter_lg_autocal.pl','$main::LG_AUTOCAL_CONFIG={automation_w
   open my $f,'<',"$WT/usr/bin/meter_lg_dv_profile.pl" or die;my $src=do{local $/;<$f>};close $f;
   my ($sub)=$src=~/^(sub write_state \{.*?^\})/ms or die 'write_state not found';
   my $state="$dir/dv.json";
-  my ($rc,$out)=run_perl(qq{use lib "$WT/usr/share/PGenerator"; use PGAutomation (); use JSON::PP ();
+  my ($rc,$out)=run_perl(qq{use lib "$WT/usr/share/PGenerator"; use PGAutomation (); use PGCalibrationLog (); use JSON::PP ();
     our \$config={automation_worker_id=>"$id",full_autocal_run_id=>"fa-9"}; our \$state_file="$state"; our \$json=JSON::PP->new;
     $sub
     write_state(status=>"running",message=>"x",steps=>[]) or die "write failed";print "OK\\n";});

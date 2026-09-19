@@ -17,6 +17,7 @@ BEGIN {
  my $shared="$directory/../share/PGenerator";
  unshift @INC,$shared if(-d $shared);
 }
+use PGCalibrationLog ();
 use PGMath qw(matrix3_inverse matrix3_multiply);
 use PGCalibrationMath qw(calibration_rgb_to_xyz_matrix);
 use PGLGCapabilities qw(
@@ -1034,8 +1035,13 @@ sub lg_request (@) {
  my ($session,$id,$uri,$payload,$timeout)=@_;
  $payload={} if(ref($payload) ne "HASH");
  my $message={ id => $id, type => "request", uri => "ssap://$uri", payload => $payload };
- return undef if(!&websocket_send_json($session,$message));
- return &websocket_recv_json($session,$timeout,$id);
+ my $started=PGCalibrationLog::monotonic();
+ my $sent=&websocket_send_json($session,$message);
+ my $response=$sent ? &websocket_recv_json($session,$timeout,$id) : undef;
+ my ($failed,$reason)=ref($response) eq 'HASH' ? &response_is_app_failure($response) : (1,$sent?'no response':'send failed');
+ PGCalibrationLog::event('TV','request',{request=>$id,route=>'ssap',uri=>$uri,elapsed_ms=>PGCalibrationLog::elapsed_ms($started),
+  timeout_s=>$timeout,status=>$failed?'failed':'response',($failed?(reason=>$reason):())});
+ return $response;
 }
 
 # Send a request straight to an internal service-bus URI. "ssap://" only
@@ -1048,8 +1054,13 @@ sub lg_palm_request (@) {
  my ($session,$id,$service_uri,$payload,$timeout)=@_;
  $payload={} if(ref($payload) ne "HASH");
  my $message={ id => $id, type => "request", uri => "palm://$service_uri", payload => $payload };
- return undef if(!&websocket_send_json($session,$message));
- return &websocket_recv_json($session,$timeout,$id);
+ my $started=PGCalibrationLog::monotonic();
+ my $sent=&websocket_send_json($session,$message);
+ my $response=$sent ? &websocket_recv_json($session,$timeout,$id) : undef;
+ my ($failed,$reason)=ref($response) eq 'HASH' ? &response_is_app_failure($response) : (1,$sent?'no response':'send failed');
+ PGCalibrationLog::event('TV','request',{request=>$id,route=>'palm',uri=>$service_uri,elapsed_ms=>PGCalibrationLog::elapsed_ms($started),
+  timeout_s=>$timeout,status=>$failed?'failed':'response',($failed?(reason=>$reason):())});
+ return $response;
 }
 
 # Read one picture setting over the palm:// transport. Returns "" when the
@@ -2734,13 +2745,19 @@ $WRITABLE_PICTURE_MODES_RE='^(expert1|expert2|isfexpert1|isfexpert2|technicolore
 
 sub diag_log_append (@) {
  my ($label,$data)=@_;
+ PGCalibrationLog::event('TV',$label,$data);
+ &diag_log_local($label,$data);
+}
+
+sub diag_log_local (@) {
+ my ($label,$data)=@_;
+ $data=PGCalibrationLog::compact($data);
  my $dir=$DIAG_LOG_PATH;
  $dir =~ s{/[^/]+$}{};
  if($dir ne "" && !-d $dir) {
   eval { make_path($dir); 1; };
  }
- my @t=localtime(time());
- my $stamp=sprintf("%04d-%02d-%02dT%02d:%02d:%02d",$t[5]+1900,$t[4]+1,$t[3],$t[2],$t[1],$t[0]);
+ my $stamp=PGCalibrationLog::timestamp();
  my $body=eval { JSON::PP->new->canonical(1)->utf8(1)->encode($data); } || "<encode-failed>";
  my $line="[$stamp] $label $body\n";
  if(-f $DIAG_LOG_PATH && (stat($DIAG_LOG_PATH))[7] > $DIAG_LOG_MAX_BYTES) {
@@ -8609,6 +8626,10 @@ sub lg_connect_workflow (@) {
 ###############################################
 sub main (@) {
  my $request=&request_from_env();
+ local $PGCalibrationLog::CONTEXT=PGCalibrationLog::context($request->{calibration_trace});
+ # The daemon captures stderr with the JSON reply. Keep diagnostic failures
+ # in the local log so a full archive cannot corrupt a successful TV reply.
+ local $PGCalibrationLog::WARN_SINK=sub { &diag_log_local('diagnostics-unavailable',{message=>$_[0]}); };
  my $action=$request->{"action"}||"connect";
  my $ip=$request->{"ip"}||"";
  my $client_key=$request->{"client_key"}||"";

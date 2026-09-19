@@ -25,6 +25,7 @@ set -o pipefail
 SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
 [[ "$SCRIPT_DIR" == "${BASH_SOURCE[0]}" ]] && SCRIPT_DIR="."
 source "$SCRIPT_DIR/pgen_meter_pattern.sh" || exit 1
+source "$SCRIPT_DIR/pgen_meter_timing.sh" || exit 1
 PGEN_PYTHON3="${PGEN_PYTHON3:-/usr/bin/python3}"
 PGEN_METER_RESULT_HELPER="${PGEN_METER_RESULT_HELPER:-$SCRIPT_DIR/pgen_meter_result.py}"
 
@@ -111,7 +112,7 @@ COMPANION_ACK_FILE="/tmp/pgen_icc_companion.ack.json"
 COMPANION_SEQUENCE=0
 SETUP_STEP_ID=0
 
-log() { echo "[$(date +%H:%M:%S)] $*" >> "$LOG_FILE"; }
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG_FILE"; }
 startup_marker() { log "startup marker: $*"; }
 
 signal_startup_ready() {
@@ -1205,21 +1206,28 @@ while read -t "$IDLE_TIMEOUT" -u 4 line; do
   # read, so this long-lived worker cannot safely infer the current display
   # from its last READ command. This also makes repeated reads of one patch
   # behave the same for the local renderer and Patch Companion.
+  meter_timing_start
+  log "Read $REQUEST_ID | $NAME | Pattern started; settle ${SETTLE_MS} ms"
 	  if ! post_patch "$R" "$G" "$B" "$PSIZE" "$SIGNAL_MODE" "$MAX_LUMA" "$SIGNAL_RANGE" "$TRANSPORT_SIGNAL_RANGE" "$INPUT_MAX"; then
 	   log "pattern provider failed for $NAME"
 	   continue
 	  fi
 
+  meter_clock_ms; METER_PATTERN_DONE_MS=$METER_CLOCK_MS
   if (( SETTLE_MS > 0 )); then
    SETTLE_SEC=$(awk "BEGIN{printf \"%.3f\", $SETTLE_MS/1000.0}")
    sleep "$SETTLE_SEC"
   fi
 
+  meter_clock_ms; METER_SETTLE_DONE_MS=$METER_CLOCK_MS
+  log "Read $REQUEST_ID | Meter started; pattern $((METER_PATTERN_DONE_MS-METER_READ_STARTED_MS)) ms; settle $((METER_SETTLE_DONE_MS-METER_PATTERN_DONE_MS)) ms"
+
    # Absolute black on emissive displays (OLED/QD-OLED/CRT/plasma) often
    # returns no measurable response. Report a valid 0.0 reading immediately.
 	   if [[ "$DISPLAY_TYPE" == "c" && "$R" == "$G" && "$G" == "$B" ]] && ire_le "$IRE" 0; then
     TS=$(date +%s)
-	    write_state "{\"status\":\"complete\",\"request_id\":\"$REQUEST_ID\",\"readings\":[{\"X\":0,\"Y\":0,\"Z\":0,\"x\":0,\"y\":0,\"luminance\":0.0,\"cct\":0,\"timestamp\":$TS,\"ire\":$IRE,\"name\":\"$NAME\",\"r_code\":$R,\"g_code\":$G,\"b_code\":$B,\"request_id\":\"$REQUEST_ID\",\"sample_count\":0,\"requested_sample_count\":$REQUESTED_SAMPLE_COUNT,\"average_mode\":\"$CMD_LOW_LIGHT_MODE\",\"synthetic_black\":true}],\"count\":1}"
+    meter_timing_finish
+	    write_state "{\"status\":\"complete\",\"request_id\":\"$REQUEST_ID\",\"readings\":[{\"X\":0,\"Y\":0,\"Z\":0,\"x\":0,\"y\":0,\"luminance\":0.0,\"cct\":0,\"timestamp\":$TS,\"ire\":$IRE,\"name\":\"$NAME\",\"r_code\":$R,\"g_code\":$G,\"b_code\":$B,\"request_id\":\"$REQUEST_ID\",\"sample_count\":0,\"requested_sample_count\":$REQUESTED_SAMPLE_COUNT,\"average_mode\":\"$CMD_LOW_LIGHT_MODE\",\"synthetic_black\":true,\"timing_ms\":$METER_TIMING_JSON}],\"count\":1}"
     continue
    fi
 
@@ -1415,7 +1423,9 @@ while read -t "$IDLE_TIMEOUT" -u 4 line; do
 	     # Wrap as a complete reading record (matches spotread_wrapper.sh shape).
 	     # Pass parsed JSON via environment variables so Python 2 shells on older
 	     # Pi images do not choke on inline quoting.
-	     OUT=$(PARSED_JSON="$PARSED" READ_IRE="$IRE" READ_NAME="$NAME" READ_R="$R" READ_G="$G" READ_B="$B" READ_REQUEST_ID="$REQUEST_ID" READ_NULL_FLAG="$NULL_READ_FLAGGED" READ_NULL_RETRIES="$NULL_READ_DISCARDS" READ_AVERAGE_MODE="$CMD_LOW_LIGHT_MODE" READ_REQUESTED_SAMPLES="$REQUESTED_SAMPLE_COUNT" python -c "
+	     meter_timing_finish
+	     log "Read $REQUEST_ID | Complete | timings_ms=$METER_TIMING_JSON"
+	     OUT=$(READ_TIMING_JSON="$METER_TIMING_JSON" PARSED_JSON="$PARSED" READ_IRE="$IRE" READ_NAME="$NAME" READ_R="$R" READ_G="$G" READ_B="$B" READ_REQUEST_ID="$REQUEST_ID" READ_NULL_FLAG="$NULL_READ_FLAGGED" READ_NULL_RETRIES="$NULL_READ_DISCARDS" READ_AVERAGE_MODE="$CMD_LOW_LIGHT_MODE" READ_REQUESTED_SAMPLES="$REQUESTED_SAMPLE_COUNT" python -c "
 import json, os
 r=json.loads(os.environ.get('PARSED_JSON','{}'))
 try:
@@ -1430,6 +1440,7 @@ r['r_code']=int(os.environ.get('READ_R','0') or 0)
 r['g_code']=int(os.environ.get('READ_G','0') or 0)
 r['b_code']=int(os.environ.get('READ_B','0') or 0)
 r['request_id']=os.environ.get('READ_REQUEST_ID','')
+r['timing_ms']=json.loads(os.environ.get('READ_TIMING_JSON','{}'))
 r['observer']=os.environ.get('OBSERVER','1931_2')
 r['average_mode']=os.environ.get('READ_AVERAGE_MODE','off')
 try:

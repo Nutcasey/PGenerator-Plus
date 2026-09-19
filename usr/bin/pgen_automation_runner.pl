@@ -20,6 +20,7 @@ use JSON::PP ();
 use POSIX qw(strftime);
 use Time::HiRes qw(time);
 use PGAutomation ();
+use PGCalibrationLog ();
 use PGAutomationETA ();
 use PGAutomationLaunch ();
 use PGAutomationPlan ();
@@ -377,13 +378,26 @@ sub _sleep_controlled {
     return 1;
 }
 
+sub _trace_context {
+    my $number=_active_item_number();
+    return {run=>$RUN_ID,stage=>$ACTIVE_STAGE,worker=>$ACTIVE_WORKER_ID,
+        (defined($number)?(job=>$number+1):()),%{PGCalibrationLog::context($PGCalibrationLog::CONTEXT)}};
+}
+
 sub _api_once {
+    my @args=@_;
+    return PGCalibrationLog::api_call('Runner',_trace_context(),$args[0],$args[1],$args[2],undef,
+        sub {_api_once_impl(@args)});
+}
+
+sub _api_once_impl {
     my ($method, $path, $payload, $allow_stop) = @_;
     $payload=lg_scoped_request_payload($path,$payload,$ACTIVE_ITEM);
     my $url = 'http://127.0.0.1' . $path;
     my %options = (
         headers => {
             Accept => 'application/json',
+            'X-PGenerator-Trace' => PGCalibrationLog::header_value(),
         },
     );
     if ($method eq 'POST') {
@@ -1154,7 +1168,7 @@ sub _clear_active_worker {
 sub _start_worker {
     my ($path, $status_path, $payload) = @_;
     $ACTIVE_WORKER_ID=$RUN_ID.'-'.(_active_item_number()//0).'-'.PGAutomation::new_id();
-    $payload={%$payload,automation_worker_id=>$ACTIVE_WORKER_ID};
+    $payload={%$payload,automation_worker_id=>$ACTIVE_WORKER_ID,calibration_trace=>_trace_context()};
     my $result;
     for my $attempt (1..6) {
         $result = _api('POST', $path, $payload, 0, 0);
@@ -3552,6 +3566,24 @@ sub _stage_label {
 }
 
 sub _stage {
+    my ($number,$item,$name,$callback)=@_;
+    local $PGCalibrationLog::CONTEXT=PGCalibrationLog::child_context({run=>$RUN_ID,job=>$number+1,stage=>$name});
+    if (_checkpoint_exists($item,$name)) {
+        PGCalibrationLog::event('Runner','stage-skipped',{reason=>'saved checkpoint',stage=>$name});
+        return 1;
+    }
+    my $started=PGCalibrationLog::monotonic();
+    PGCalibrationLog::event('Runner','stage-start',{stage=>$name});
+    my $ok=eval {_stage_impl(@_)}; my $error=$@;
+    my $ms=PGCalibrationLog::elapsed_ms($started);
+    PGCalibrationLog::event('Runner','stage-end',{elapsed_ms=>$ms,status=>$ok?'complete':$STOP_REQUESTED?'stopped':'failed',
+        ($error || !$ok ? (reason=>$error||$::LAST_ERROR||'stage did not complete') : ())});
+    _log('Job '.($number+1).' | '._stage_label($name).' complete | '.sprintf('%.1f s',$ms/1000)) if $ok;
+    die $error if $error;
+    return $ok;
+}
+
+sub _stage_impl {
     my ($item_number, $item, $name, $callback) = @_;
     return 1 if _checkpoint_exists($item, $name);
     _refresh_control();

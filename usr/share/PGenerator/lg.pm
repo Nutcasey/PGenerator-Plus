@@ -4,6 +4,7 @@
 
 use JSON::PP ();
 use PGAutomation ();
+use PGCalibrationLog ();
 use File::Path qw(make_path remove_tree);
 use Fcntl qw(:flock);
 use IO::Select ();
@@ -1209,6 +1210,21 @@ sub lg_target_ip (@) {
 }
 
 sub lg_helper_run (@) {
+ my @args=@_;
+ local $PGCalibrationLog::CONTEXT=PGCalibrationLog::child_context($PGCalibrationLog::CONTEXT);
+ my $action=ref($args[0]) eq 'HASH' ? $args[0]{action}||'unknown' : 'unknown';
+ my $started=PGCalibrationLog::monotonic();
+ PGCalibrationLog::event('Daemon','helper-queued',{action=>$action});
+ my $result=eval { &lg_helper_run_impl(@args) }; my $error=$@;
+ PGCalibrationLog::event('Daemon','helper-end',{action=>$action,elapsed_ms=>PGCalibrationLog::elapsed_ms($started),
+  status=>$error?'exception':ref($result) eq 'HASH'?$result->{status}||'unknown':'invalid-response',
+  ($error?(error=>$error):())});
+ die $error if $error;
+ return $result;
+}
+
+sub lg_helper_run_impl (@) {
+ my $gate_started=PGCalibrationLog::monotonic();
  # Single-flight gate for synchronous TV helper conversations. With the
  # per-device WebUI lanes, lg_* subs can be reached from more than one worker
  # thread (the tv lane, plus direct calls such as the autocal-start CEC
@@ -1217,12 +1233,14 @@ sub lg_helper_run (@) {
  # without affecting anything that does not talk to the TV. It is a no-op in
  # single-threaded loaders of this file.
  lock($_lg_helper_gate);
+ my $gate_ms=PGCalibrationLog::elapsed_ms($gate_started);
  my $request=shift;
  $request={} if(ref($request) ne "HASH");
  my $helper=&lg_helper_path();
  return { status => "error", message => "LG WebOS helper is not installed" } if(!-x $helper);
  my $timeout=&lg_helper_timeout($request);
- $request->{"helper_timeout"}=$timeout;
+ $request={%$request,helper_timeout=>$timeout,calibration_trace=>PGCalibrationLog::context($PGCalibrationLog::CONTEXT)};
+ PGCalibrationLog::event('Daemon','helper-start',{action=>$request->{action},gate_wait_ms=>$gate_ms,timeout_s=>$timeout});
  my $payload=MIME::Base64::encode_base64(&lg_encode_json($request),"");
  my $cmd="timeout ${timeout}s env PGEN_LG_REQUEST_B64=".&lg_shell_quote($payload)." ".&lg_shell_quote($helper)." 2>&1";
  my ($raw,$exit_status)=&lg_helper_exec($cmd);
@@ -1235,6 +1253,7 @@ sub lg_helper_run (@) {
  if(ref($result) eq "HASH" && ($result->{"status"}||"") eq "error"
     && ($result->{"message"}||"") =~ /Unable to connect to LG WebOS TV/
     && ($request->{"action"}||"") !~ /pair|register/i && !$request->{"no_connect_retry"}) {
+  PGCalibrationLog::event('Daemon','helper-retry',{action=>$request->{action},attempt=>2,reason=>'connection refused',delay_s=>3});
   &lg_helper_connect_pause();
   ($raw,$exit_status)=&lg_helper_exec($cmd);
   my $retried=&lg_decode_json($raw);
@@ -1259,8 +1278,11 @@ sub lg_helper_run (@) {
 
 sub lg_helper_exec (@) {
  my ($cmd)=@_;
+ my $started=PGCalibrationLog::monotonic();
  my $raw=`$cmd`;
- return ($raw,$? >> 8);
+ my $exit=$? >> 8;
+ PGCalibrationLog::event('Daemon','helper-process',{elapsed_ms=>PGCalibrationLog::elapsed_ms($started),exit_code=>$exit});
+ return ($raw,$exit);
 }
 
 sub lg_helper_connect_pause (@) { sleep(3); }

@@ -133,7 +133,7 @@ for my $w (
  open my $f,'<',"$WT/usr/bin/meter_lg_dv_profile.pl" or die;my $src=do{local $/;<$f>};close $f;
  my ($sub)=$src=~/^(sub write_state \{.*?^\})/ms or die 'write_state not found';
  my $state="$dir/dv.json";
- my ($rc,$out)=run_perl(qq{use lib "$WT/usr/share/PGenerator"; use PGAutomation (); use JSON::PP ();
+ my ($rc,$out)=run_perl(qq{use lib "$WT/usr/share/PGenerator"; use PGAutomation (); use PGCalibrationLog (); use JSON::PP ();
    our \$config={automation_worker_id=>"$id",full_autocal_run_id=>"fa-9"}; our \$state_file="$state"; our \$json=JSON::PP->new;
    $sub
    write_state(status=>"running",message=>"x",current_step=>2,total_steps=>5,steps=>[{name=>"white"}]) or die "write failed";print "OK\\n";});
@@ -147,7 +147,7 @@ for my $w (
  my @st=stat($state);my @ss=stat("$state.summary");
  ok($ss[9]>=$st[9],'dv: sidecar is not older than the state file');
  mkdir "$dir/dv-blocked.json.summary" or die;
- ($rc,$out)=run_perl(qq{use lib "$WT/usr/share/PGenerator"; use PGAutomation (); use JSON::PP ();
+ ($rc,$out)=run_perl(qq{use lib "$WT/usr/share/PGenerator"; use PGAutomation (); use PGCalibrationLog (); use JSON::PP ();
    our \$config={automation_worker_id=>"$id"}; our \$state_file="$dir/dv-blocked.json"; our \$json=JSON::PP->new;
    $sub
    write_state(status=>"running",message=>"blocked") or die "write failed";print "OK\\n";});
