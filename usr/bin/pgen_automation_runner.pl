@@ -3016,6 +3016,16 @@ sub _calibration_volume_stage {
         ? JSON::PP::true : 'unverifiable', terminal_commit_verified => $three_d->{terminal_commit_verified}};
 }
 
+# 1 when the committed 1D result carries the 3072-value curve the baseline
+# restore re-uploads (Dolby Vision jobs have no 3D baseline to restore).
+sub _profile_baseline_data_ok {
+    my ($number,$item)=@_;
+    return 1 if _signal($item) eq 'dv';
+    my $grey=PGAutomation::read_json_file(PGAutomation::item_dir($RUN_ID,$number).'/calibration/grey-state.json');
+    my $dpg=ref($grey) eq 'HASH' ? $grey->{_signal($item) eq 'hdr10'?'hdr20_1d_dpg_data':'sdr_1d_dpg_data'} : undef;
+    return ref($dpg) eq 'ARRAY' && @$dpg==3072 ? 1 : 0;
+}
+
 sub _restore_profile_baseline {
     my ($number,$item)=@_;
     return 1 if _signal($item) eq 'dv';
@@ -3384,6 +3394,18 @@ sub _skip_stage {
         if !ref(_checkpoint_record($item_number, $item, $name, 'unverifiable', { skipped => JSON::PP::true }, 'skipped'));
 }
 
+sub _stage_label {
+    my ($name) = @_;
+    return {
+        'item-started'=>'Job readiness', 'tv-setup-verified'=>'TV setup',
+        'pre-readings-done'=>'Before measurements', 'reset-and-reapply-verified'=>'Calibration reset and settings reapply',
+        'panel-light-settled'=>'Panel brightness setup', 'greyscale-done'=>'1D LUT calibration',
+        'greyscale-settings-verified'=>'Post-1D TV settings check', 'volume-done'=>'Color calibration',
+        'volume-settings-verified'=>'Post-color TV settings check', 'session-closed'=>'Calibration-mode exit',
+        'apply-all-done'=>'Apply to All Inputs', 'post-readings-done'=>'After measurements',
+    }->{$name || ''} || $name || '';
+}
+
 sub _stage {
     my ($item_number, $item, $name, $callback) = @_;
     return 1 if _checkpoint_exists($item, $name);
@@ -3395,15 +3417,7 @@ sub _stage {
     $ACTIVE_STAGE = $name;
     $item->{active_stage} = $name;
     $item->{stage_started_at} = time();
-    my $stage_label={
-        'item-started'=>'Job readiness', 'tv-setup-verified'=>'TV setup',
-        'pre-readings-done'=>'Before measurements', 'reset-and-reapply-verified'=>'Calibration reset and settings reapply',
-        'panel-light-settled'=>'Panel brightness setup', 'greyscale-done'=>'1D LUT calibration',
-        'greyscale-settings-verified'=>'Post-1D TV settings check', 'volume-done'=>'Color calibration',
-        'volume-settings-verified'=>'Post-color TV settings check', 'session-closed'=>'Calibration-mode exit',
-        'apply-all-done'=>'Apply to All Inputs', 'post-readings-done'=>'After measurements',
-    }->{$name} || $name;
-    _log('Job '.($item_number+1).' | '.$stage_label.' started');
+    _log('Job '.($item_number+1).' | '._stage_label($name).' started');
     _update_item_snapshot($item_number, $item);
     _update_run(sub {
         my ($run) = @_;
@@ -3922,11 +3936,26 @@ sub _prepare_resume {
     if (!$item->{drift_recovery_pending} && $failure_stage =~ /^(?:volume-done|session-closed)$/
         && _checkpoint_exists($item, 'greyscale-done')
         && _resume_calibration_artifacts_ok($item_number, $item, 'grey')) {
-        _drop_resume_checkpoints($item, { map { $_ => 1 } qw(greyscale-settings-verified volume-done session-closed apply-all-done post-readings-done item-complete) });
-        $item->{profile_baseline_needs_restore}=1 if _signal($item) ne 'dv';
-        _log_action('Resuming after a failure in the '.$failure_stage.' stage: retaining the verified 1D result; its settings are rechecked'
-            .(_signal($item) ne 'dv' ? ' and the unity 3D baseline restored' : '').' before profiling');
-        return;
+        my $label = _stage_label($failure_stage);
+        # A session that failed to close after a verified profile keeps the
+        # profile as well: only the exit and what follows are repeated.
+        if ($failure_stage eq 'session-closed' && _checkpoint_exists($item, 'volume-done')
+            && _resume_calibration_artifacts_ok($item_number, $item, 'volume')) {
+            _drop_resume_checkpoints($item, { map { $_ => 1 } qw(session-closed apply-all-done post-readings-done item-complete) });
+            _log_action('Resuming after a failure in '.$label.': retaining the verified 1D and profile results');
+            return;
+        }
+        # The baseline restore re-uploads the saved 1D curve. Without it the
+        # restore would fail at job readiness on every later resume, so a
+        # result that lacks it takes the full reset instead.
+        if (_profile_baseline_data_ok($item_number, $item)) {
+            _drop_resume_checkpoints($item, { map { $_ => 1 } qw(greyscale-settings-verified volume-done session-closed apply-all-done post-readings-done item-complete) });
+            $item->{profile_baseline_needs_restore}=1 if _signal($item) ne 'dv';
+            _log_action('Resuming after a failure in '.$label.': retaining the verified 1D result; its settings are rechecked'
+                .(_signal($item) ne 'dv' ? ' and the unity 3D baseline restored' : '').' before profiling');
+            return;
+        }
+        _log_action('Resuming after a failure in '.$label.': the saved 1D curve is missing, so the calibration restarts from its reset');
     }
     if ($item->{drift_recovery_pending} || $failure_stage =~ /^(?:reset-and-reapply-verified|panel-light-settled|greyscale-done|volume-done|session-closed)$/) {
         _drop_resume_checkpoints($item, { map { $_ => 1 } qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete) });
@@ -4829,9 +4858,11 @@ sub _run_item {
     my $prepared=eval {
         _prepare_job_context($item_number,$item);
         _prepare_resume($item_number,$item,1) if $has_prior_checkpoint;
-        _restore_profile_baseline($item_number,$item) if $item->{profile_baseline_needs_restore};
+        my $baseline_restored = $item->{profile_baseline_needs_restore} ? _restore_profile_baseline($item_number,$item) : 0;
         if ($has_prior_checkpoint && (_run()->{pause_context_released} || _run()->{stop_cleanup})) {
-            my $verified = _apply_and_verify($item_number,$item,'resume-setup',1);
+            # The baseline restore has just applied and verified every queued
+            # control; a second full pass would only repeat it.
+            my $verified = $baseline_restored ? 1 : _apply_and_verify($item_number,$item,'resume-setup',1);
             die($::LAST_ERROR||'Unable to restore paused settings') if !$verified && $verified ne 'unverifiable';
             die 'Unable to restore paused panel protection context' if !_panel_protection_disable($item_number,$item);
             die 'Unable to save resumed device context' if !ref(_update_run(sub {delete $_[0]{pause_context_released};}));

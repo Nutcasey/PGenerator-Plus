@@ -43,14 +43,46 @@ sub grey_state {
 
 # A verified 1D result survives a profile-stage failure.
 {
- grey_state(0,{status=>'complete',ddc_upload_verified=>JSON::PP::true});
+ grey_state(0,{status=>'complete',ddc_upload_verified=>JSON::PP::true,hdr20_1d_dpg_data=>[(0) x 3072]});
  my $item=item(failure=>{stage=>'volume-done',message=>'Processing settings check: failed to restore smoothGradation',at=>2});
  @actions=();
  main::_prepare_resume(0,$item,1);
  is_deeply(names($item),[qw(item-started tv-setup-verified reset-and-reapply-verified panel-light-settled greyscale-done)],
   'volume-done failure keeps the reset, panel light and greyscale checkpoints');
  is($item->{profile_baseline_needs_restore},1,'the unity 3D baseline is restored before profiling');
- like(join("\n",@actions),qr/retaining the verified 1D result/,'the resume says the 1D result is kept');
+ like(join("\n",@actions),qr/failure in Color calibration: retaining the verified 1D result/,'the resume names the stage and says the 1D result is kept');
+}
+
+# A session that failed to close after a verified profile keeps the profile.
+{
+ my $number=6;
+ grey_state($number,{status=>'complete',ddc_upload_verified=>JSON::PP::true,hdr20_1d_dpg_data=>[(0) x 3072]});
+ my $dir=PGAutomation::item_dir('resume-test',$number).'/calibration';
+ for my $name (qw(profile.cube profile.bin)) { open(my $fh,'>',"$dir/$name") or die $!; print {$fh} 'x'; close($fh); }
+ open(my $fh,'>',"$dir/3d-state.json") or die $!;
+ print {$fh} JSON::PP->new->encode({status=>'complete',upload_verified=>JSON::PP::true,
+  export=>{cube_path=>'/var/lib/PGenerator/lg/luts/profile.cube',payload_path=>'/var/lib/PGenerator/lg/luts/profile.bin'}});
+ close($fh);
+ my $item=item(failure=>{stage=>'session-closed',message=>'x',at=>2});
+ push(@{$item->{checkpoints}},{name=>'volume-done',status=>'done',at=>3},{name=>'volume-settings-verified',status=>'done',at=>3});
+ @actions=();
+ main::_prepare_resume($number,$item,1);
+ is_deeply(names($item),[qw(item-started tv-setup-verified reset-and-reapply-verified panel-light-settled greyscale-done greyscale-settings-verified volume-done volume-settings-verified)],
+  'session-closed failure with a verified profile keeps the profile checkpoints');
+ ok(!$item->{profile_baseline_needs_restore},'no baseline restore when the profile is kept');
+ like(join("\n",@actions),qr/failure in Calibration-mode exit: retaining the verified 1D and profile results/,'the resume says both results are kept');
+}
+
+# Without the saved 1D curve the baseline cannot be restored, so the old full
+# reset applies rather than a resume that would fail at job readiness.
+{
+ grey_state(7,{status=>'complete',ddc_upload_verified=>JSON::PP::true});
+ my $item=item(failure=>{stage=>'volume-done',message=>'x',at=>2});
+ @actions=();
+ main::_prepare_resume(7,$item,1);
+ is_deeply(names($item),[qw(item-started tv-setup-verified)],'a verified 1D result without its curve resets from the calibration start');
+ ok(!$item->{profile_baseline_needs_restore},'and arms no baseline restore');
+ like(join("\n",@actions),qr/saved 1D curve is missing/,'the resume says why');
 }
 
 # A session-close failure on a Dolby Vision job keeps the 1D result too, and
