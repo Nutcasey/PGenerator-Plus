@@ -39,7 +39,8 @@ ok(ref($first->{preflight}) eq 'HASH' && $first->{preflight}{rev},'the first pol
 ok($first->{activity}{cursor} && !$first->{activity}{partial},'and the complete activity feed with a cursor');
 ok(!exists($first->{preflight_unchanged}) && !exists($first->{activity_reset}),'a poll without a revision or cursor is the reply as before');
 cmp_ok(length(PGAutomation::encode_json($first)),'>',100000,'the full reply is over 100 KB');
-is(scalar(@{$first->{activity}{entries}}),2*scalar(@checks)+20+300,'job checks, startup events, startup checks and the newest 300 log lines');
+is(scalar(@{$first->{activity}{entries}}),scalar(grep {!$_->{ok}} @checks)+20+scalar(@checks)+300,'failing job checks, startup events, startup checks and the newest 300 log lines');
+is($first->{run}{items}[0]{signal_format},'sdr','a live job row names its signal, which the page uses to explain that job\'s failure');
 
 my $second=$poll->($query->($first));
 ok($second->{preflight_unchanged},'a poll naming the revision it holds is told the check list is unchanged');

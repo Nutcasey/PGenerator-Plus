@@ -13353,6 +13353,8 @@ sub webui_automation_item_summary (@) {
   name=>defined($item->{name}) && $item->{name} ne "" ? $item->{name} : ($item->{picture_mode}||"Item"),
   status=>$item->{status}||"queued",
  };
+ # The page names a job's signal when it explains that job's failure.
+ $summary->{signal_format}=$item->{signal_format} if(defined($item->{signal_format}) && !ref($item->{signal_format}));
  $summary->{failure}=PGAutomation::clone($item->{failure}) if(ref($item->{failure}) eq "HASH");
  # Only the checks that need a look travel with every poll; a job's passing
  # checks are in its own record for the job detail.
@@ -13540,8 +13542,17 @@ sub webui_automation_activity_digest (@) {
 # cap, or a log that cannot be opened), so the caller falls back to that.
 sub webui_automation_activity_tail (@) {
  my ($run,$path,$start,$size)=@_;
- return {entries=>[],end=>$start} if($size==$start);
+ return {entries=>[],end=>0} if($size==0 && $start==0);
  return undef if(!open(my $fh,"<:raw",$path));
+ # A cursor names a line boundary. Served from any other offset, a fragment
+ # of a line would carry a fragment of the run token that the redaction
+ # cannot recognise, and the route answers any origin; so it is the full feed.
+ if($start>0) {
+  seek($fh,$start-1,0);
+  my $byte="";read($fh,$byte,1);
+  if($byte ne "\n") { close($fh); return undef; }
+ }
+ if($size==$start) { close($fh); return {entries=>[],end=>$start}; }
  seek($fh,$start,0);
  my $text="";read($fh,$text,$WEBUI_ACTIVITY_LOG_WINDOW);close($fh);
  my $read=length($text);
@@ -13568,9 +13579,13 @@ sub webui_automation_activity (@) {
  my $truncated=0;
  my $source=ref($run) eq "HASH" ? $run->{readiness} : $preflight;
  if(ref($run) eq "HASH") {
+  # Only the checks that need a look: the live view (status.json) keeps just
+  # those of a job's checks, the manifest all of them, and the poll reads
+  # whichever is newer. The feed, and so the cursor's digest of it, must be
+  # the same from either.
   my $items=$run->{items}||[];
   for(my $i=0;$i<@$items;$i++) {
-   foreach my $check (@{$items->[$i]{readiness}{checks}||[]}) {
+   foreach my $check (grep { ref($_) eq "HASH" && !$_->{ok} } @{$items->[$i]{readiness}{checks}||[]}) {
     push @entries,{time=>$check->{time},level=>&webui_automation_check_level($check),message=>$check->{message}||$check->{name}||"",item_number=>$i,source=>"Job check"};
    }
   }
@@ -13628,10 +13643,11 @@ sub webui_automation_activity (@) {
  return $feed->(\@entries,$truncated,$log_end);
 }
 
-# A revision of the saved startup check as the page reads it: every value
-# the card shows is a top-level scalar, or a list whose length moves with it,
-# and every writer stamps updated_at. update_age is derived per request and
-# stays out; elapsed_seconds is in, so a check still running is resent.
+# A revision of the saved startup check as the page reads it: every
+# top-level scalar, and of each check, job, issue and event its state and
+# words, so a rewrite that keeps the counts still changes it. update_age is
+# derived per request and stays out; elapsed_seconds is in, so a check still
+# running is resent.
 sub webui_automation_preflight_rev (@) {
  my ($state)=@_;
  return "" if(ref($state) ne "HASH");
@@ -13640,7 +13656,7 @@ sub webui_automation_preflight_rev (@) {
   next if($key eq "update_age" || $key eq "rev");
   my $value=$state->{$key};
   if(ref($value) eq "ARRAY") {
-   push @parts,"$key=[".join(",",scalar(@$value),map { ref($_) eq "HASH" ? join("/",map { defined($_) ? $_ : "" } @{$_}{qw(status ok level)}) : () } @$value)."]";
+   push @parts,"$key=[".join("\x1e",scalar(@$value),map { ref($_) eq "HASH" ? join("/",map { defined($_) ? $_ : "" } @{$_}{qw(status ok level name message item_number)}) : (defined($_) && !ref($_) ? $_ : "") } @$value)."]";
   } elsif(ref($value) eq "HASH") {
    push @parts,"$key={".scalar(keys %$value)."}";
   } else {
@@ -13955,43 +13971,26 @@ sub webui_automation_job_detail (@) {
   run_status=>$run->{status},active_stage=>$stage,stage_started_at=>$run->{stage_started_at},fetched_at=>PGAutomation::now()};
 }
 
-# One History row per job: what the row and its failure line can show. The
-# check list, warnings and checkpoints wait for the run to be opened; with
-# them, 72 runs listed as 588 KB.
-sub webui_automation_listing_item (@) {
- my ($item)=@_;
- $item={} if(ref($item) ne "HASH");
- my $row={
-  name=>defined($item->{name}) && $item->{name} ne "" ? $item->{name} : ($item->{picture_mode}||"Item"),
-  status=>$item->{status}||"queued",
- };
- $row->{signal_format}=$item->{signal_format} if(defined($item->{signal_format}) && !ref($item->{signal_format}));
- $row->{failure}={stage=>$item->{failure}{stage}||"",message=>$item->{failure}{message}||""} if(ref($item->{failure}) eq "HASH");
- if(ref($item->{readiness}) eq "HASH" && ref($item->{readiness}{checks}) eq "ARRAY") {
-  my @checks=grep { ref($_) eq "HASH" } @{$item->{readiness}{checks}};
-  $row->{checks_passed}=0+(($item->{readiness}{passed}||0)+scalar(grep { $_->{ok} } @checks));
-  $row->{checks_failed}=0+scalar(grep { !$_->{ok} } @checks);
- }
- $row->{warnings}=0+scalar(@{$item->{warnings}}) if(ref($item->{warnings}) eq "ARRAY");
- return $row;
-}
-
+# One History row per run: the queue name, when it ran, its state and its
+# failure, which is all the row renders. Opening a run fetches the run. The
+# jobs, with their checks, warnings and checkpoints, used to ride along: 72
+# runs listed as 588 KB.
+our @WEBUI_LISTING_ROW_KEYS=qw(id queue_name status created_at created_at_iso completed_at failure);
 sub webui_automation_listing_run (@) {
  my ($run)=@_;
  return undef if(ref($run) ne "HASH");
- my $summary=&webui_automation_public_run($run);
- my $raw_items=ref($run->{items}) eq "ARRAY" ? $run->{items} : [];
- $raw_items=$run->{queue_snapshot}{items} if(!@$raw_items && ref($run->{queue_snapshot}) eq "HASH" && ref($run->{queue_snapshot}{items}) eq "ARRAY");
- return {
-  id=>$summary->{id},
-  queue_name=>$summary->{queue_name},
-  status=>$summary->{status},
-  created_at=>$summary->{created_at},
-  created_at_iso=>$summary->{created_at_iso},
-  completed_at=>$summary->{completed_at},
-  failure=>$summary->{failure},
-  items=>[map { &webui_automation_listing_item($_) } @$raw_items],
+ my $queue_snapshot=ref($run->{queue_snapshot}) eq "HASH" ? $run->{queue_snapshot} : {};
+ my $row={
+  id=>$run->{id}||"",
+  queue_name=>$run->{queue_name}||$queue_snapshot->{name}||"Automation queue",
+  status=>$run->{status}||"idle",
  };
+ foreach my $key (qw(created_at created_at_iso completed_at)) { $row->{$key}=$run->{$key} if(exists($run->{$key})); }
+ if(ref($run->{failure}) eq "HASH") {
+  $row->{failure}={stage=>$run->{failure}{stage}||"",message=>$run->{failure}{message}||""};
+  $row->{failure}{error_code}=$run->{failure}{error_code} if($run->{failure}{error_code});
+ }
+ return $row;
 }
 
 # The format of the summary kept beside each manifest. A summary without
@@ -14002,11 +14001,7 @@ our $WEBUI_LISTING_CACHE_VERSION=2;
 sub webui_automation_listing_upgrade (@) {
  my ($old)=@_;
  return undef if(ref($old) ne "HASH");
- my $items=ref($old->{items}) eq "ARRAY" ? $old->{items} : [];
- return {
-  (map { ($_=>$old->{$_}) } grep { exists($old->{$_}) } qw(id queue_name status created_at created_at_iso completed_at failure)),
-  items=>[map { &webui_automation_listing_item($_) } @$items],
- };
+ return {map { ($_=>$old->{$_}) } grep { exists($old->{$_}) } @WEBUI_LISTING_ROW_KEYS};
 }
 
 # The History list used to decode every run manifest (52 runs, up to 0.5 MB
@@ -14050,8 +14045,8 @@ sub webui_automation_list_runs (@) {
   my $summary;
   if(ref($cached) eq "HASH" && !$cached->{version} && ($cached->{key}||"") eq $key && ref($cached->{summary}) eq "HASH") {
    # A summary in the first format for this same manifest holds every row
-   # field but the signal format. Trim it in place rather than decode the
-   # manifest again: 72 of them on the appliance would take minutes.
+   # field. Trim it in place rather than decode the manifest again: 72 of
+   # them on the appliance would take minutes.
    $summary=&webui_automation_listing_upgrade($cached->{summary});
   } else {
    my $run=&webui_automation_read_run($id);

@@ -147,5 +147,35 @@ for my $case (@severity){is(main::webui_automation_log_level($case->[0]),$case->
  ok(!main::webui_automation_activity(undef,{checks=>[{ok=>0,message=>'Failed'}]},$pre->{cursor})->{partial},'until the checks change');
  my $unlogged=main::webui_automation_activity({id=>'no-log-yet',items=>[]},undef);
  ok(main::webui_automation_activity({id=>'no-log-yet',items=>[]},undef,$unlogged->{cursor})->{partial},'a run whose log is not written yet gets a partial feed, not a reset');
+ # A cursor names a line boundary. The route answers any origin, so a page
+ # walking offsets must never be handed a fragment of a line: a fragment of
+ # the run token is not the token, and the redaction would not know it.
+ my $probe={id=>'probe',token=>'SUPERSECRETTOKEN',items=>[]};
+ my $probe_log=PGAutomation::run_dir('probe').'/runner.log';
+ PGAutomation::append_line_locked($probe_log,"[2026-09-18T10:00:00Z] token SUPERSECRETTOKEN ok\n[2026-09-18T10:00:01Z] next line\n");
+ my $whole=main::webui_automation_activity($probe,undef);
+ is($whole->{entries}[0]{message},'token [redacted] ok','the full feed redacts the token');
+ my (undef,$boundary,$probe_digest)=split(/:/,$whole->{cursor},3);
+ my $served=0;
+ for my $offset (1..$boundary) {
+  my $reply=main::webui_automation_activity($probe,undef,join(':',$probe->{id},$offset,$probe_digest));
+  my $text=PGAutomation::encode_json($reply);
+  $served++ if($reply->{partial});
+  ok(0,"offset $offset served part of the token") if($text=~/SECRET|TOKEN/);
+  ok(0,"offset $offset served a fragment: $reply->{entries}[0]{message}") if($reply->{partial} && @{$reply->{entries}} && $reply->{entries}[0]{message} ne 'next line');
+ }
+ my $first_line=length("[2026-09-18T10:00:00Z] token SUPERSECRETTOKEN ok\n");
+ is($served,2,'only the two line boundaries (after each line) are served as partial feeds; every other offset gets the full, redacted feed');
+ ok(main::webui_automation_activity($probe,undef,join(':',$probe->{id},$first_line,$probe_digest))->{partial},'the boundary after the first line is one of them');
+ # The live view keeps only a job's failing checks; the manifest keeps all.
+ # The poll reads whichever is newer, so the feed, and the cursor's digest of
+ # its head, must come out the same from either.
+ my $manifest={id=>'both-views',items=>[{name=>'A',readiness=>{checks=>[{time=>1,ok=>1,message=>'Meter idle'},{time=>2,ok=>0,level=>'warning',message=>'TruMotion: verify Off'}]}}],readiness=>{checks=>[{time=>3,ok=>1,message=>'Queue accepted'}]}};
+ my $from_manifest=main::webui_automation_activity($manifest,undef);
+ my $from_live=main::webui_automation_activity(PGAutomation::compact_run($manifest),undef);
+ is_deeply($from_live->{entries},$from_manifest->{entries},'the feed is the same from the live view and the manifest');
+ is($from_live->{cursor},$from_manifest->{cursor},'and so is the cursor');
+ ok(main::webui_automation_activity(PGAutomation::compact_run($manifest),undef,$from_manifest->{cursor})->{partial},'so a daemon-side manifest write does not reset the feed');
+ is_deeply([map {$_->{message}} grep {$_->{source} eq 'Job check'} @{$from_manifest->{entries}}],['TruMotion: verify Off'],'job checks in the feed are those that need a look');
 }
 done_testing();
