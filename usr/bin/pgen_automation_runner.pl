@@ -534,12 +534,20 @@ sub _lg_connection_failure {
 # kept in the manifest so a resumed run starts from what its TV measured,
 # not from the floor that ran out on 18-19 Sep 2026.
 my @LG_CONTROL_SAMPLES;
+# The 30 s session allowance in every budget is not a per-control cost, and
+# a sample never exceeds what the 300 s ceiling allows the largest group the
+# runner writes (18 controls), so consecutive timeouts converge there rather
+# than growing by half each time.
+my $LG_CONTROL_SESSION_SECONDS = 30;
+my $LG_CONTROL_SAMPLE_CAP = 15;
+my $LG_CONTROL_STAMP_WARNED = 0;
 sub _lg_control_seconds {
     my $slowest = 0;
     foreach my $sample (@LG_CONTROL_SAMPLES) { $slowest = $sample if $sample > $slowest; }
     return $slowest;
 }
 sub _reset_lg_control_seconds {
+    $LG_CONTROL_STAMP_WARNED = 0;
     @LG_CONTROL_SAMPLES = grep { defined($_) && !ref($_) && $_ =~ /^\d+(?:\.\d+)?$/ && $_ > 0 } @_;
     shift @LG_CONTROL_SAMPLES while @LG_CONTROL_SAMPLES > 3;
     return scalar(@LG_CONTROL_SAMPLES);
@@ -548,11 +556,25 @@ sub _note_lg_control_seconds {
     my ($count, $elapsed, $budget) = @_;
     return if !$count || $count < 2 || !defined($elapsed) || $elapsed <= 0;
     $elapsed = $budget if defined($budget) && $budget > 0 && $elapsed > $budget;
-    push @LG_CONTROL_SAMPLES, 1.5 * $elapsed / $count;
+    my $per_control = ($elapsed - $LG_CONTROL_SESSION_SECONDS) / $count;
+    $per_control = 0 if $per_control < 0;
+    my $sample = 1.5 * $per_control;
+    $sample = $LG_CONTROL_SAMPLE_CAP if $sample > $LG_CONTROL_SAMPLE_CAP;
+    push @LG_CONTROL_SAMPLES, $sample;
     shift @LG_CONTROL_SAMPLES while @LG_CONTROL_SAMPLES > 3;
     my @samples = @LG_CONTROL_SAMPLES;
-    eval { _update_run(sub { $_[0]{lg_control_samples} = [@samples]; }); };
+    my $stamped = eval { ref(_update_run(sub { $_[0]{lg_control_samples} = [@samples]; })) ? 1 : 0 };
+    if (!$stamped && !$LG_CONTROL_STAMP_WARNED++) {
+        my $why = $@ || $::LAST_ERROR || '';
+        $why =~ s/[\r\n]+/ /g;
+        _log('Unable to record the measured control write time in the manifest; a resumed run starts from the default budget'.($why ne '' ? ": $why" : ''));
+    }
     return _lg_control_seconds();
+}
+sub _seed_lg_control_seconds {
+    my ($run) = @_;
+    return 0 if ref($run) ne 'HASH' || ref($run->{lg_control_samples}) ne 'ARRAY';
+    return _reset_lg_control_seconds(@{$run->{lg_control_samples}});
 }
 
 # Helper timeouts the runner asks the daemon for. Only paths whose daemon
@@ -3920,6 +3942,10 @@ sub _prepare_resume {
     die($::LAST_ERROR || 'Unable to restore the queued signal format') if !$context_ready && !_apply_signal($item);
     my $last = _last_checkpoint($item);
     return if !ref($last);
+    # Only this resume's decision arms the baseline restore; a flag left by an
+    # earlier attempt that then failed at job readiness must not stall every
+    # later resume on the same missing curve.
+    delete $item->{profile_baseline_needs_restore};
     if (ref($item->{settings_recovery}) eq 'HASH') {
         my $from = $item->{settings_recovery}{resume_from} || '';
         if (_gamut_warning_only_recovery($item_number, $item)) {
@@ -3935,6 +3961,10 @@ sub _prepare_resume {
         } elsif ($from =~ /^(?:volume-settings-verified|session-closed)$/
             && !_resume_calibration_artifacts_ok($item_number, $item, 'volume')) {
             $from = 'volume-done';
+        }
+        # Reusing the 1D result means restoring its curve before profiling.
+        if ($from =~ /^(?:greyscale-settings-verified|volume-done)$/ && !_profile_baseline_data_ok($item_number, $item)) {
+            $from = 'greyscale-done';
         }
         # Recheck before reusing a completed 1D stage, even if its prior menu
         # proof survived the interruption. A reboot/cleanup can change settings.
@@ -4002,7 +4032,8 @@ sub _prepare_resume {
         _drop_resume_checkpoints($item, { map { $_ => 1 } qw(pre-readings-done reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete) });
         return;
     }
-    if ($name =~ /^(?:greyscale-done|greyscale-settings-verified)$/ && !_resume_calibration_artifacts_ok($item_number, $item, 'grey')) {
+    if ($name =~ /^(?:greyscale-done|greyscale-settings-verified)$/
+        && (!_resume_calibration_artifacts_ok($item_number, $item, 'grey') || !_profile_baseline_data_ok($item_number, $item))) {
         _drop_resume_checkpoints($item, { map { $_ => 1 } qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete) });
         return;
     }
@@ -5133,7 +5164,7 @@ sub _main {
     return if ($run->{status} || '') eq 'paused';
     return if ($run->{status} || '') =~ /^(?:complete(?:-with-warnings)?|failed|stopped)$/;
     $ETA_HISTORY=eval {PGAutomationETA::history($RUN_ID)} || [];
-    _reset_lg_control_seconds(@{$run->{lg_control_samples}}) if ref($run->{lg_control_samples}) eq 'ARRAY';
+    _seed_lg_control_seconds($run);
     _heartbeat(1);
     _log_action('Automation runner started');
     if (_control()->{request} eq 'stop') {

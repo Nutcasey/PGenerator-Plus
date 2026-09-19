@@ -131,4 +131,42 @@ sub grey_state {
  is_deeply(names($item),[qw(item-started tv-setup-verified)],'drift recovery resets from the calibration start');
 }
 
+# A flag left by an earlier attempt is not carried into a full reset.
+{
+ grey_state(8,{status=>'complete',ddc_upload_verified=>JSON::PP::true});
+ my $item=item(failure=>{stage=>'volume-done',message=>'x',at=>2},profile_baseline_needs_restore=>1);
+ main::_prepare_resume(8,$item,1);
+ is_deeply(names($item),[qw(item-started tv-setup-verified)],'the reset applies');
+ ok(!$item->{profile_baseline_needs_restore},'and the stale baseline flag is cleared');
+}
+
+# A pause after the greyscale on a result without its curve resets rather
+# than arming a restore that would fail at job readiness.
+{
+ grey_state(9,{status=>'complete',ddc_upload_verified=>JSON::PP::true});
+ my $item=item();
+ main::_prepare_resume(9,$item,1);
+ is_deeply(names($item),[qw(item-started tv-setup-verified)],'a greyscale pause without the curve resets from the calibration start');
+ ok(!$item->{profile_baseline_needs_restore},'no baseline restore without the curve');
+ grey_state(10,{status=>'complete',ddc_upload_verified=>JSON::PP::true,hdr20_1d_dpg_data=>[(0) x 3072]});
+ my $kept=item();
+ main::_prepare_resume(10,$kept,1);
+ is_deeply(names($kept),[qw(item-started tv-setup-verified reset-and-reapply-verified panel-light-settled greyscale-done)],'with the curve the greyscale is kept and rechecked');
+ is($kept->{profile_baseline_needs_restore},1,'and the baseline restore is armed');
+}
+
+# A saved settings-recovery plan needs the curve too.
+{
+ grey_state(11,{status=>'complete',ddc_upload_verified=>JSON::PP::true});
+ my $item=item(settings_recovery=>{resume_from=>'volume-done',point=>'c7'});
+ main::_prepare_resume(11,$item,1);
+ is_deeply(names($item),[qw(item-started tv-setup-verified)],'a recovery plan without the curve resets from the calibration start');
+ ok(!$item->{profile_baseline_needs_restore},'and arms no restore');
+ grey_state(12,{status=>'complete',ddc_upload_verified=>JSON::PP::true,hdr20_1d_dpg_data=>[(0) x 3072]});
+ my $kept=item(settings_recovery=>{resume_from=>'volume-done',point=>'c7'});
+ main::_prepare_resume(12,$kept,1);
+ is_deeply(names($kept),[qw(item-started tv-setup-verified reset-and-reapply-verified panel-light-settled greyscale-done)],'with the curve the plan resumes at the profile stage');
+ is($kept->{profile_baseline_needs_restore},1,'and arms the restore');
+}
+
 done_testing();
