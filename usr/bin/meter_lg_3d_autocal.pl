@@ -4325,9 +4325,9 @@ sub hdr20_postcal_matrix_key {
 }
 
 # Load the per-TV seed matrix from disk. Returns the seed magnitude in
-# DPG counts (>= 0). Keys the file by generation series plus model name
-# (preferred when present) and by the run's signal mode (legacy
-# fallback, never TV-specific). Falls back to the configured
+# DPG counts (>= 0). Looks up the generation series plus model name;
+# legacy signal-mode entries are not TV-specific and are ignored.
+# Falls back to the configured
 # _seed_counts when no entry matches. No-op when the file is
 # missing/unreadable -- the caller treats "no seed" as 0, which still
 # allows the loop to converge from the live read alone.
@@ -4345,21 +4345,19 @@ sub hdr20_postcal_load_matrix {
  my $hdr=$data->{"hdr20"};
  return $seed_counts if(ref($hdr) ne "HASH");
  my $tv_key=hdr20_postcal_matrix_key($lg_generation);
- my $mode_key="";
- if(defined($signal_mode)) {
-  $mode_key=lc($signal_mode);
-  $mode_key=~s/[^a-z0-9]+//g;
- }
- # Lookup order: series+model key first, then the signal-mode key, then
- # the explicit _seed_counts fallback. Unknown TV falls through to
- # seed_counts so the loop still converges from the live read.
- foreach my $key ($tv_key,$mode_key) {
+ # Lookup order: the series+model key, then the explicit _seed_counts
+ # fallback. A legacy entry under the signal-mode key (written by a run
+ # whose generation record lacked series or model) is never applied: it
+ # would shadow the configured knob for every later run sharing the file.
+ # Unknown TV falls through to seed_counts so the loop still converges
+ # from the live read.
+ foreach my $key ($tv_key) {
   next if($key eq "");
   if(ref($hdr->{$key}) eq "HASH" && defined($hdr->{$key}->{"seed_counts"})) {
    my $entry_seed=$hdr->{$key}->{"seed_counts"}+0;
    # List context also returns the matching entry and the key it was
    # found under, so the caller can check the entry's picture mode and
-   # whether the match was the generation series or the fallback key.
+   # TV identity before using it.
    return (wantarray ? ($entry_seed,$hdr->{$key},$key) : $entry_seed) if($entry_seed >= 0);
   }
  }

@@ -1302,7 +1302,7 @@ sub _wait_worker {
                 my $saved = _worker_state_file_read($status_path);
                 if (_worker_state_file_usable($status, $saved)) {
                     $status = $saved;
-                    _log("$kind finished but its full status could not be read; using the worker's state file")
+                    _log("$kind finished but its full status could not be read; using the worker's state file as written, without the daemon's terminal fix-ups")
                         if !$full_read_warned++;
                 } elsif (!$full_read_warned++) {
                     _log("$kind finished but its full status could not be read and its state file is not this attempt's finished state; keeping the summary, so the archived evidence is a projection");

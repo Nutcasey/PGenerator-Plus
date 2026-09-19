@@ -391,17 +391,23 @@ sub pass_series {
  %z=zones_of($status);
  ok(abs($state->{postcal_shadow_pass_2_counts}{$z{5}}-$gain_step) < 0.5, 'series-only entry from another panel does not fire');
  ok(!grep({ /anchor seeded/ } @{$panel{log}}), 'no seed is logged for a series-only entry');
- # No generation in the config: the lookup falls back to the signal-mode
- # key, which is not TV-specific, so an entry found that way is ignored.
+ # A legacy signal-mode entry is ignored even without generation data.
  ($status,$state)=run_panel(matrix=>{ hdr20=>{ hdr10=>{ seed_counts=>57, picture_mode=>"cinema" } } }, config=>{ lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
  %z=zones_of($status);
- ok(scalar(grep { /matrix seed not applied: matrix entry was matched by the fallback key 'hdr10', not this TV's series and model/ } @{$panel{log}}), 'seed found by the fallback key is not applied');
+ ok(!grep({ /anchor seeded/ } @{$panel{log}}), 'legacy signal-mode entry is not applied');
  ok(abs($state->{postcal_shadow_pass_2_counts}{$z{5}}-$gain_step) < 0.5, 'fallback-key seed leaves the gain step');
  # The operator's configured seed_counts is honoured when no entry matches.
  ($status,$state)=run_panel(config=>{ lg_generation=>$gen, lg_autocal_hdr20_postcal_shadow_seed_counts=>40, lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
  %z=zones_of($status);
  is($state->{postcal_shadow_pass_2_counts}{$z{5}}+0, 40, 'configured seed_counts is applied when no matrix entry matches');
  ok(scalar(grep { /5% anchor seeded at 40\.0 counts from the configured seed_counts/ } @{$panel{log}}), 'configured seed is logged as such');
+ # Legacy entries must not hide the explicit knob on known or unknown TVs.
+ for my $generation ($gen, {}) {
+  ($status,$state)=run_panel(matrix=>{ hdr20=>{ hdr10=>{ seed_counts=>57, picture_mode=>"cinema" } } }, config=>{ lg_generation=>$generation, lg_autocal_hdr20_postcal_shadow_seed_counts=>40, lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
+  %z=zones_of($status);
+  is($state->{postcal_shadow_pass_2_counts}{$z{5}}+0, 40, 'legacy entry does not shadow the configured seed');
+  ok(scalar(grep { /5% anchor seeded at 40\.0 counts from the configured seed_counts/ } @{$panel{log}}), 'configured seed source survives a legacy entry');
+ }
  # A stale seed of 300 against a panel needing 54 is clamped to the gain
  # step plus 60 and the run still converges.
  ($status,$state)=run_panel(matrix=>$entry->("cinema",300), config=>{ lg_generation=>$gen });

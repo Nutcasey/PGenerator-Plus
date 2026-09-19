@@ -186,6 +186,8 @@
   <div class="auto-toolbar">
    <div class="field"><label for="pgAutomationSavedQueueSelect">Selected queue</label><select id="pgAutomationSavedQueueSelect" onchange="pgAutomationQueueSelectionChanged(true)"></select></div>
    <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationNewQueue()">+ New queue</button>
+   <!-- Delete sits beside the picker it acts on; buried in Queue options it went unfound. -->
+   <button class="btn btn-sm btn-secondary" id="pgAutomationDeleteQueueButton" type="button" onclick="pgAutomationDeleteQueue()">Delete queue</button>
   </div>
   <div class="field"><label for="pgAutomationFinishPolicy">When the batch finishes</label><select id="pgAutomationFinishPolicy" onchange="pgAutomationFinishPolicyChanged()"><option value="restore-original">Restore original signal and picture mode where readable</option><option value="keep-last">Leave the final calibrated mode selected</option></select><small>Temporary protection settings are restored in both cases. An unreadable original picture mode is never guessed.</small></div>
   <div class="auto-toolbar auto-run-actions">
@@ -204,7 +206,6 @@
      <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationNameQueue('rename')">Rename</button>
      <button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationNameQueue('copy')">Save a copy</button>
      <button class="btn btn-sm btn-secondary" id="pgAutomationReloadQueueButton" type="button" onclick="pgAutomationLoadQueue()">Discard changes</button>
-     <button class="btn btn-sm btn-secondary" id="pgAutomationDeleteQueueButton" type="button" onclick="pgAutomationDeleteQueue()">Delete queue</button>
     </div></details>
    </div>
   </div>
