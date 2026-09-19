@@ -1481,14 +1481,16 @@ sub lg_picture_get_workflow (@) {
   return ({},{}) if(!@{$keys_to_read});
   my %settings=();
   my %unsupported=();
-  my @bulk_keys=grep {
-   my $contract=$setting_contracts->{$_}||{};
-   (($contract->{"read"}{"access"}||"") ne "individual") && ($contract->{"read_state"}||"") =~ /^(?:inventory|observed)$/
-  } @{$keys_to_read};
-  my @individual_keys=grep {
-   my $contract=$setting_contracts->{$_}||{};
-   (($contract->{"read"}{"access"}||"") eq "individual") || ($contract->{"read_state"}||"") !~ /^(?:inventory|observed)$/
-  } @{$keys_to_read};
+  # Read every requested key in one grouped call first, then read one at a
+  # time only the keys the grouped reply omitted. Reading contract-flagged
+  # keys individually up front cost a TV round trip per key: 26-60 s per
+  # 19-key readback on the G3 (18 Sep 2026) against 1-2 s for the grouped
+  # read that the six-job batch of 14 Sep 2026 ran on. The omission retry
+  # below still covers firmware that drops context-sensitive keys from a
+  # grouped reply, and a grouped call that fails outright still falls back
+  # to reading each key on its own.
+  my @bulk_keys=@{$keys_to_read};
+  my @individual_keys=();
   my $response={};
   my %scope=($category eq "picture" && $requested_picture_mode ne "")
    ? (dimension=>{pictureMode=>$requested_picture_mode,($tv_input ne "" ? (input=>$tv_input,"_3dStatus"=>"2d") : ())}) : ();

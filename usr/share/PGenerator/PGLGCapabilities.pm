@@ -5,6 +5,7 @@ use warnings;
 use Digest::SHA qw(sha256_hex);
 use Exporter qw(import);
 use File::Basename ();
+use File::Find ();
 use File::Path qw(make_path);
 use File::Spec ();
 use Fcntl qw(:flock);
@@ -39,13 +40,85 @@ our @EXPORT_OK = qw(
 # clones scalar leaves as well as objects and arrays.
 my $JSON = JSON::PP->new->utf8->canonical(1)->allow_nonref(1);
 my %CACHE;
+# Resolving a profile merges, expands and hashes the whole catalogue: 2.0-2.6 s
+# of CPU on the appliance for the G3, and the TV helper is a fresh process per
+# TV conversation that resolved it several times per call. That was the
+# readback regression behind the 18 Sep 2026 batch failure (1-2 s readbacks
+# became 26-60 s). A process resolves each identity once (%RESOLVED) and a
+# fresh process reads the resolved profile back from a file keyed by the
+# identity and the catalogue's file signature, so a catalogue edit or a new
+# deploy invalidates it without any bookkeeping.
+my %RESOLVED;
+our $LAST_RESOLVE_SOURCE='';
+our $RESOLVED_CACHE_SCHEMA=1;
+our $RESOLVED_CACHE_KEEP_SECONDS=7*86400;
 
 sub _default_root {
  return $ENV{'PGENERATOR_TV_PROFILE_ROOT'}
   || File::Spec->catdir(File::Basename::dirname(__FILE__),'tv');
 }
 
-sub clear_lg_capability_cache { %CACHE=(); return 1; }
+sub clear_lg_capability_cache { %CACHE=(); %RESOLVED=(); return 1; }
+
+# Every file under the library root with its size and sub-second mtime. A
+# resolved profile is reused only while this is unchanged.
+sub _library_signature {
+ my ($root)=@_;
+ return '' if(!defined($root) || $root eq '' || !-d $root);
+ my @rows;
+ File::Find::find({no_chdir=>1,wanted=>sub {
+  return if(!-f $_);
+  my @st=Time::HiRes::stat($_);
+  push(@rows,join(':',substr($_,length($root)),$st[7],$st[9]));
+ }},$root);
+ return join("\n",sort @rows);
+}
+
+sub _resolved_cache_path {
+ my ($root,$normalized,$signature,%options)=@_;
+ my $key=sha256_hex($JSON->encode({schema=>$RESOLVED_CACHE_SCHEMA,root=>$root,identity=>$normalized,signature=>$signature}));
+ return File::Spec->catfile(_observation_root(%options),'resolved',$key.'.json');
+}
+
+sub _read_resolved_cache {
+ my ($path,$signature)=@_;
+ return undef if($signature eq '' || !-f $path);
+ my @errors;
+ my $document=_read_json($path,\@errors);
+ return undef if(@errors || ref($document) ne 'HASH'
+  || ($document->{'schema_version'}||0) != $RESOLVED_CACHE_SCHEMA
+  || ($document->{'signature'}||'') ne $signature
+  || ref($document->{'profile'}) ne 'HASH'
+  || ($document->{'profile'}{'capability_profile_hash'}||'') eq '');
+ return $document->{'profile'};
+}
+
+# Best effort: an unwritable store only costs the next process a resolve.
+sub _write_resolved_cache {
+ my ($path,$signature,$profile)=@_;
+ return 0 if($signature eq '' || ref($profile) ne 'HASH');
+ my $dir=File::Basename::dirname($path);
+ eval { make_path($dir); 1 } if(!-d $dir);
+ return 0 if(!-d $dir);
+ my $tmp=$path.'.'.$$.'.tmp';
+ open(my $fh,'>',$tmp) or return 0;
+ my $ok=print {$fh} $JSON->encode({schema_version=>$RESOLVED_CACHE_SCHEMA,signature=>$signature,written_at=>time(),profile=>$profile});
+ $ok=close($fh) && $ok;
+ if(!$ok || !rename($tmp,$path)) { unlink($tmp); return 0; }
+ chmod(0644,$path);
+ # Superseded profiles (older catalogue, other identities) age out here.
+ if(opendir(my $dh,$dir)) {
+  my $now=time();
+  foreach my $name (readdir($dh)) {
+   next if($name !~ /\.json$/ || $name eq File::Basename::basename($path));
+   my $other=File::Spec->catfile($dir,$name);
+   my $mtime=(stat($other))[9];
+   unlink($other) if(defined($mtime) && $now-$mtime > $RESOLVED_CACHE_KEEP_SECONDS);
+  }
+  closedir($dh);
+ }
+ return 1;
+}
 
 sub _clone {
  my ($value)=@_;
@@ -430,8 +503,33 @@ sub _expand_key_sets {
 
 sub resolve_lg_capabilities {
  my ($identity,%options)=@_;
- my $library=load_lg_library($options{'root'});
+ my $root=(defined($options{'root'}) && $options{'root'} ne '') ? $options{'root'} : _default_root();
  my $normalized=_normalized_identity($identity);
+ my $memo_key=join("\0",$root,$JSON->encode($normalized));
+ if(ref($RESOLVED{$memo_key}) eq 'HASH') {
+  $LAST_RESOLVE_SOURCE='memo';
+  return $RESOLVED{$memo_key};
+ }
+ my $signature=_library_signature($root);
+ my $cache_path=_resolved_cache_path($root,$normalized,$signature,%options);
+ my $cached=_read_resolved_cache($cache_path,$signature);
+ if(ref($cached) eq 'HASH') {
+  $RESOLVED{$memo_key}=$cached;
+  $LAST_RESOLVE_SOURCE='cache';
+  return $cached;
+ }
+ my $resolved=_compute_lg_capabilities($root,$normalized);
+ _write_resolved_cache($cache_path,$signature,$resolved);
+ $RESOLVED{$memo_key}=$resolved;
+ $LAST_RESOLVE_SOURCE='computed';
+ return $resolved;
+}
+
+# Callers read the returned profile and clone what they keep; the memo hands
+# every caller in a process the same structure.
+sub _compute_lg_capabilities {
+ my ($root,$normalized)=@_;
+ my $library=load_lg_library($root);
  my $effective=_clone($library->{'base'});
  my @applied=($library->{'base_profile_id'});
  my @evidence;
