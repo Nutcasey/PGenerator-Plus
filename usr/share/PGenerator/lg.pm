@@ -2956,6 +2956,9 @@ sub webui_meter_lg_dv_profile_status (@) {
  # webui_worker_status_read in webui.pm); nothing below writes the file.
  my ($json)=&webui_worker_status_read($file,$query);
  return '{"status":"idle","message":"No Dolby Vision profile measurement has run yet","steps":[]}' if($json eq "");
+ # Keep the fix-ups below off the keys inside activity events.
+ my $events;
+ ($json,$events)=&webui_worker_status_detach_events($json);
  # The worker is a short, one-shot ~5-patch run -- a single liveness check is
  # enough to catch a killed/crashed process. The long-running greyscale/3D
  # workers need a multi-poll debounce to ride out meter-session bounces
@@ -2980,7 +2983,7 @@ sub webui_meter_lg_dv_profile_status (@) {
    $json=~s/^\s*\{/{"full_autocal_run_id":"$run",/;
   }
  }
- return $json;
+ return &webui_worker_status_attach_events($json,$events);
 }
 
 sub webui_meter_lg_dv_profile_stop (@) {

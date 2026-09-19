@@ -20,12 +20,14 @@ my $encoder=JSON::PP->new->canonical(1);
 sub write_text { my ($path,$text)=@_; open my $fh,'>',$path or die "$path: $!"; print {$fh} $text; close $fh; }
 sub read_text { my ($path)=@_; open my $fh,'<',$path or return ''; local $/; my $t=<$fh>; close $fh; return $t; }
 sub decode { my ($text)=@_; my $v=eval { JSON::PP->new->utf8(1)->decode($text) }; return ref($v) eq 'HASH' ? $v : {}; }
-my @summary_keys=qw(status current_name current_step total_steps current_delta_e message error_code debug phase
- automation_worker_id worker_pid worker_start_ticks activity_sequence activity_events started_at completed_at
- elapsed_ms autocal calibration_mode full_workflow full_autocal_run_id full_autocal_phase);
+my @summary_keys=@PGAutomation::WORKER_STATUS_SUMMARY_KEYS;
+ok(scalar(@summary_keys)>20,'the shared summary key list is exported by PGAutomation');
 sub summary_of { my ($state)=@_; my %s; $s{$_}=$state->{$_} for grep { exists $state->{$_} } @summary_keys; return \%s; }
+sub expected_keys { my ($state)=@_; return [sort grep { exists $state->{$_} } @summary_keys]; }
 
-my @events=map {{seq=>$_,time=>100+$_,message=>"event $_"}} 1..5;
+# Event 3 carries a bracket, escaped quotes and a backslash so the text
+# splice around the fix-ups is proved on the awkward cases.
+my @events=map {{seq=>$_,time=>100+$_,message=>$_==3 ? '7% | codes [1,2] "quoted" \\ back' : "event $_"}} 1..5;
 sub full_state {
  my (%over)=@_;
  return {
@@ -48,6 +50,18 @@ is(main::webui_worker_status_summary_after('view=summary&after=12'),12,'the curs
 is(main::webui_worker_status_summary_after('after=7&view=summary'),7,'parameter order does not matter');
 is(main::webui_worker_status_summary_after('view=summary&after=x'),0,'a malformed cursor keeps every event');
 
+# The text splice that keeps the fix-ups off event keys.
+{
+ my $text=$encoder->encode({activity_events=>[@events],message=>'top',status=>'running'});
+ my ($detached,$fragment)=main::webui_worker_status_detach_events($text);
+ like($detached,qr/^\{"activity_events":\[\],"message":"top"/,'events are emptied in place');
+ like($fragment,qr/^"activity_events":\[\{.*"seq":5.*\]$/s,'the fragment holds the whole array');
+ is(main::webui_worker_status_attach_events($detached,$fragment),$text,'attaching restores the text byte for byte');
+ my ($same,$none)=main::webui_worker_status_detach_events('{"message":"top"}');
+ is($same,'{"message":"top"}','a text without events is untouched');
+ is(main::webui_worker_status_attach_events($same,$none),'{"message":"top"}','and attaches nothing');
+}
+
 my $running=1;
 local *main::webui_meter_lg_autocal_running=sub {$running};
 local *main::webui_meter_lg_3d_autocal_running=sub {$running};
@@ -55,6 +69,7 @@ local *main::webui_meter_lg_dv_profile_running=sub {$running};
 
 # ---- greyscale worker
 my $grey="$dir/meter_lg_autocal.json";
+unlink("$grey.stop");
 my $state=full_state();
 write_text($grey,$encoder->encode($state));
 my $full_text=read_text($grey);
@@ -69,6 +84,7 @@ is(main::webui_meter_lg_autocal_status('summary=1',$grey),$full_text,'only view=
 my $text=main::webui_meter_lg_autocal_status('view=summary&after=0',$grey);
 ok(length($text)<4000,'summary view is small') or diag(length($text));
 my $summary=decode($text);
+is_deeply([sort keys %$summary],expected_keys($state),'the summary is exactly the shared key list present in the state');
 is($summary->{status},'running','summary carries the status');
 is($summary->{current_step},34,'summary carries the patch counter');
 is($summary->{automation_worker_id},'run-1-abc','summary carries the attempt identity');
@@ -77,6 +93,7 @@ is($summary->{worker_start_ticks},'12345','summary carries the worker start tick
 ok(!exists $summary->{hdr20_1d_dpg_anchor_history},'anchor history is not in the summary');
 ok(!exists $summary->{readings},'readings are not in the summary');
 is(scalar @{$summary->{activity_events}},5,'after=0 keeps every event');
+is($summary->{activity_events}[2]{message},'7% | codes [1,2] "quoted" \\ back','awkward event text survives the round trip');
 ok($summary->{autocal} && $summary->{calibration_mode},'busy flags pass through while the worker runs');
 
 $summary=decode(main::webui_meter_lg_autocal_status('view=summary&after=3',$grey));
@@ -99,7 +116,7 @@ is(read_text($grey),$full_text,'the fallback does not touch the state file');
 unlink("$grey.summary");
 $summary=decode(main::webui_meter_lg_autocal_status('view=summary',$grey));
 is($summary->{current_name},'Auto Cal 7%','a missing sidecar falls back to the full state');
-ok(!exists $summary->{steps},'and still leaves the bulk keys out');
+is_deeply([sort keys %$summary],expected_keys($state),'the fallback projects exactly the shared key list');
 
 # Undecodable state with no sidecar is served whole rather than hidden.
 write_text($grey,'{"status":"running","current_name":"torn"');
@@ -112,20 +129,46 @@ $full_text=read_text($grey);
 write_text("$grey.summary",$encoder->encode(summary_of($state)));
 $running=0;
 write_text("$grey.misses",int(time()*1000)-20000);
-# The handler's stop file is a fixed path, so on a machine where one is left
-# over the flip reads cancelled instead of error; both views must agree.
 $summary=decode(main::webui_meter_lg_autocal_status('view=summary&after=0',$grey));
-like($summary->{status},qr/^(?:error|cancelled)$/,'summary view still flips a dead running worker to a terminal status');
-like($summary->{current_name},qr/^Auto Cal (?:process died|cancelled)$/,'the flip rewrites the current name as the plain view does');
+is($summary->{status},'error','summary view still flips a dead running worker to error');
+is($summary->{current_name},'Auto Cal process died','the flip rewrites the current name as the plain view does');
+is($summary->{message},'Reading 7% sample 1/1','a real worker message survives the flip');
 is(read_text($grey),$full_text,'summary mode never writes the flipped text back');
 ok(-f "$grey.misses",'summary mode keeps the first-miss marker for the full read');
 my $plain=main::webui_meter_lg_autocal_status(undef,$grey);
-is(decode($plain)->{status},$summary->{status},'the full read that follows applies the same flip');
-is(decode($plain)->{current_name},$summary->{current_name},'with the same wording');
+is(decode($plain)->{status},'error','the full read that follows applies the same flip');
+is(decode($plain)->{current_name},'Auto Cal process died','with the same wording');
 is(read_text($grey),$plain,'the plain view saves the flipped state');
 ok(!-f "$grey.misses",'the plain view clears the first-miss marker');
 my $later=decode(main::webui_meter_lg_autocal_status('view=summary&after=0',$grey));
-is($later->{status},$summary->{status},'a later summary poll reads the saved outcome through the stale-sidecar fallback');
+is($later->{status},'error','a later summary poll reads the saved outcome through the stale-sidecar fallback');
+
+# The fix-ups must rewrite the top-level message, not the first event's:
+# canonical order puts activity_events first, and a summary polled with a
+# cursor usually has no events left. Compare the views for both flips.
+{
+ my $placeholder=full_state(message=>'Starting',activity_sequence=>2,
+  activity_events=>[{seq=>1,time=>101,message=>'Starting the meter'},{seq=>2,time=>102,message=>'event 2'}]);
+ for my $case (['dead process',0,'LG Auto Cal stopped unexpectedly','Auto Cal process died'],
+               ['stop file',1,'Auto Cal stopped','Auto Cal cancelled']) {
+  my ($name,$stop,$message,$current_name)=@$case;
+  write_text($grey,$encoder->encode($placeholder));
+  write_text("$grey.summary",$encoder->encode(summary_of($placeholder)));
+  write_text("$grey.misses",int(time()*1000)-20000);
+  if($stop) { write_text("$grey.stop",'stop'); } else { unlink("$grey.stop"); }
+  my $s=decode(main::webui_meter_lg_autocal_status('view=summary&after=2',$grey));
+  is($s->{message},$message,"$name: the summary rewrites the top-level message");
+  is($s->{current_name},$current_name,"$name: the summary rewrites the current name");
+  is_deeply($s->{activity_events},[],"$name: the summary has no events left after the cursor");
+  my $p=decode(main::webui_meter_lg_autocal_status(undef,$grey));
+  is($p->{message},$s->{message},"$name: the plain view rewrites the same message");
+  is($p->{current_name},$s->{current_name},"$name: and the same current name");
+  is($p->{activity_events}[0]{message},'Starting the meter',"$name: the first event's message is untouched");
+  is(scalar @{$p->{activity_events}},2,"$name: the plain view keeps every event");
+  like(read_text($grey),qr/"message":"\Q$message\E"/,"$name: the saved state carries the rewritten top-level message");
+  unlink("$grey.stop");
+ }
+}
 
 # Within the grace window both views report running and persist the first miss.
 write_text($grey,$encoder->encode($state));
@@ -148,17 +191,18 @@ is(read_text($grey),$done_text,'clearing flags in summary mode does not rewrite 
 main::webui_meter_lg_autocal_status(undef,$grey);
 isnt(read_text($grey),$done_text,'the plain view still saves the cleared flags');
 like(read_text($grey),qr/"autocal":false/,'with autocal false');
+is(scalar @{decode(read_text($grey))->{activity_events}},5,'the saved state keeps its events');
 
 # ---- 3D LUT worker
 $running=1;
 my $three="$dir/meter_lg_3d_autocal.json";
-my $three_state={status=>'running',current_name=>'3D LUT 12/33',current_step=>12,total_steps=>33,message=>'Measuring',
- automation_worker_id=>'run-1-3d',worker_pid=>4343,upload_verified=>JSON::PP::false,
+my $three_state={status=>'running',current_name=>'3D LUT 12/33',current_step=>12,total_steps=>33,message=>'Starting',
+ automation_worker_id=>'run-1-3d',worker_pid=>4343,upload_verified=>JSON::PP::false,activity_sequence=>1,
+ activity_events=>[{seq=>1,time=>1,message=>'Starting 3D'}],
  hdr20_postcal_shadow_dpg_data=>[map {$_/3072} 0..3071],data=>('x' x 5000)};
 write_text($three,$encoder->encode($three_state));
 my $three_text=read_text($three);
-write_text("$three.summary",$encoder->encode({status=>'running',current_name=>'3D LUT 12/33',current_step=>12,total_steps=>33,
- message=>'Measuring',automation_worker_id=>'run-1-3d',worker_pid=>4343,upload_verified=>JSON::PP::false}));
+write_text("$three.summary",$encoder->encode(summary_of($three_state)));
 like(main::webui_meter_lg_3d_autocal_status(undef,$three),qr/omitted from status/,'plain 3D view still elides the large payloads');
 $text=main::webui_meter_lg_3d_autocal_status('view=summary',$three);
 ok(length($text)<1000,'3D summary view is small');
@@ -167,13 +211,16 @@ is($summary->{current_step},12,'3D summary view serves the sidecar');
 ok(!exists $summary->{hdr20_postcal_shadow_dpg_data},'3D summary omits the shadow data');
 $running=0;
 write_text("$three.misses",int(time()*1000)-20000);
-$summary=decode(main::webui_meter_lg_3d_autocal_status('view=summary',$three));
+$summary=decode(main::webui_meter_lg_3d_autocal_status('view=summary&after=1',$three));
 is($summary->{status},'error','3D summary view flips a dead worker to error');
 is($summary->{current_name},'3D LUT AutoCal process died','with the plain view wording');
+is($summary->{message},'LG 3D LUT AutoCal stopped unexpectedly','3D summary rewrites the top-level message');
 is(read_text($three),$three_text,'3D summary mode never writes back');
 ok(-f "$three.misses",'3D summary mode keeps the first-miss marker');
-$plain=main::webui_meter_lg_3d_autocal_status(undef,$three);
-is(decode($plain)->{status},'error','3D plain view applies the same flip');
+$plain=decode(main::webui_meter_lg_3d_autocal_status(undef,$three));
+is($plain->{status},'error','3D plain view applies the same flip');
+is($plain->{message},$summary->{message},'3D plain view rewrites the same message');
+is($plain->{activity_events}[0]{message},'Starting 3D','3D plain view leaves the event message alone');
 isnt(read_text($three),$three_text,'3D plain view saves it');
 ok(!-f "$three.misses",'3D plain view clears the first-miss marker');
 
@@ -181,21 +228,24 @@ ok(!-f "$three.misses",'3D plain view clears the first-miss marker');
 $running=1;
 my $dv="$dir/meter_lg_dv_profile.json";
 my $dv_state={status=>'running',current_name=>'White',current_step=>2,total_steps=>5,message=>'Reading white',
- automation_worker_id=>'run-1-dv',worker_pid=>4444,full_autocal_run_id=>'run-1',
+ automation_worker_id=>'run-1-dv',worker_pid=>4444,full_autocal_run_id=>'run-1',activity_sequence=>1,
+ activity_events=>[{seq=>1,time=>1,message=>'Starting DV'}],
  steps=>[map {{name=>"s$_",xyz=>[1,2,3]}} 1..5],readings=>[1..500]};
 write_text($dv,$encoder->encode($dv_state));
 my $dv_text=read_text($dv);
-write_text("$dv.summary",$encoder->encode({status=>'running',current_name=>'White',current_step=>2,total_steps=>5,
- message=>'Reading white',automation_worker_id=>'run-1-dv',worker_pid=>4444,full_autocal_run_id=>'run-1'}));
+write_text("$dv.summary",$encoder->encode(summary_of($dv_state)));
 is(main::webui_meter_lg_dv_profile_status(undef,$dv),$dv_text,'plain DV view serves the full state');
 $summary=decode(main::webui_meter_lg_dv_profile_status('view=summary&after=0',$dv));
 is($summary->{current_name},'White','DV summary view serves the sidecar');
 is($summary->{full_autocal_run_id},'run-1','DV summary keeps the run id the adoption probe checks');
 ok(!exists $summary->{steps},'DV summary omits the step detail');
 $running=0;
-$summary=decode(main::webui_meter_lg_dv_profile_status('view=summary',$dv));
+$summary=decode(main::webui_meter_lg_dv_profile_status('view=summary&after=1',$dv));
 is($summary->{status},'error','DV summary view flips a dead worker');
 like($summary->{message},qr/ended unexpectedly/,'with the plain view message');
 is(read_text($dv),$dv_text,'DV state file untouched');
+$plain=decode(main::webui_meter_lg_dv_profile_status(undef,$dv));
+is($plain->{message},$summary->{message},'DV plain view rewrites the same message');
+is($plain->{activity_events}[0]{message},'Starting DV','DV plain view leaves the event message alone');
 like(main::webui_meter_lg_dv_profile_status('view=summary',"$dir/absent-dv.json"),qr/"status":"idle"/,'no DV state file is idle in the summary view');
 done_testing();

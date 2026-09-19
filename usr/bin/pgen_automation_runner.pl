@@ -1223,6 +1223,17 @@ sub _worker_status_poll_path {
     return $status_path . '?view=summary&after=' . $after;
 }
 
+# After a terminal summary the full state is read once. A read that fails or
+# disagrees with the summary is not this worker's result, so the caller keeps
+# the summary rather than turning a finished stage into a transport failure.
+sub _worker_full_status_usable {
+    my ($summary, $full) = @_;
+    return 0 if ref($full) ne 'HASH' || $full->{_transport_error};
+    return 0 if ($full->{error_code} || '') =~ /^(?:daemon-unreachable|invalid-daemon-response|stopped)$/;
+    return 0 if !_status_terminal($full->{status} || '');
+    return PGAutomation::worker_id($full) eq PGAutomation::worker_id($summary) ? 1 : 0;
+}
+
 sub _wait_worker {
     my ($status_path, $kind, $item) = @_;
     my $started = time();
@@ -1230,6 +1241,7 @@ sub _wait_worker {
     my $last_log_progress = '';
     my $last_activity_sequence = 0;
     my $summary_view = $WORKER_SUMMARY_STATUS_PATHS{$status_path} ? 1 : 0;
+    my $full_read_warned = 0;
     my ($timing_started,$timing_base,$timing_last)=($started,0,0);
     my $point_started=$started;
     my @point_seconds;
@@ -1246,11 +1258,17 @@ sub _wait_worker {
         }
         my $status = _api('GET', _worker_status_poll_path($status_path, $last_activity_sequence), undef);
         return $status if $status->{error_code} && $status->{error_code} eq 'daemon-unreachable';
-        if ($summary_view && _status_terminal($status->{status} || '')) {
+        if ($summary_view && _status_terminal($status->{status} || '')
+            && !(($status->{status} || '') eq 'idle' && PGAutomation::worker_id($status) eq '')) {
             # The summary is a projection; callers and the archive need the
             # full state, so read it once now the worker has reached an end.
-            $status = _api('GET', $status_path, undef);
-            return $status if $status->{error_code} && $status->{error_code} eq 'daemon-unreachable';
+            # An unstamped idle is a transient poll, not worth the request.
+            my $full = _api('GET', $status_path, undef);
+            if (_worker_full_status_usable($status, $full)) {
+                $status = $full;
+            } elsif (!$full_read_warned++) {
+                _log("$kind finished but its full status could not be read; keeping the summary");
+            }
         }
         my $state = $status->{status} || '';
         my $status_id = PGAutomation::worker_id($status);

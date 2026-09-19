@@ -6732,17 +6732,9 @@ my $_ac_target_gamma="bt1886";
 # projection instead: the worker's .summary sidecar when it is at least as new
 # as the state file, otherwise the same keys extracted from the full state.
 # ?after=N drops activity events the poller has already seen. The projection
-# keeps every key the status fix-ups below read, so they apply to it
-# unchanged; the handlers must never write a summary back to the state file.
-my @_worker_status_summary_keys=qw(
- status current_name current_step total_steps current_delta_e message error_code debug phase
- automation_worker_id worker_pid worker_start_ticks activity_sequence activity_events
- started_at completed_at elapsed_ms autocal calibration_mode
- full_workflow full_autocal_run_id full_autocal_phase
- final_1d_lut_uploaded final_1d_lut_upload_verified
- upload_verified terminal_commit_verified tone_map_upload_status tone_map_upload_error_code
-);
-my $_worker_status_summary_events=60;
+# (PGAutomation::WORKER_STATUS_SUMMARY_KEYS) keeps every key the status
+# fix-ups below read, so they apply to it unchanged; the handlers must never
+# write a summary back to the state file.
 
 # Returns undef when the query does not ask for the summary view, otherwise
 # the activity sequence to filter after (0 keeps every event).
@@ -6781,16 +6773,32 @@ sub webui_worker_status_read (@) {
   return ("",1) if($json eq "");
   my $full=eval { JSON::PP->new->utf8(1)->decode($json) };
   return ($json,1) if(ref($full) ne "HASH");
-  $state={};
-  foreach my $key (@_worker_status_summary_keys) { $state->{$key}=$full->{$key} if(exists($full->{$key})); }
-  if(ref($state->{activity_events}) eq "ARRAY" && @{$state->{activity_events}}>$_worker_status_summary_events) {
-   $state->{activity_events}=[ @{$state->{activity_events}}[-$_worker_status_summary_events..-1] ];
-  }
+  $state=PGAutomation::worker_status_summary($full);
  }
  if($after>0 && ref($state->{activity_events}) eq "ARRAY") {
   $state->{activity_events}=[ grep { ref($_) eq "HASH" && defined($_->{seq}) && !ref($_->{seq}) && $_->{seq}=~/^\d+$/ && $_->{seq}>$after } @{$state->{activity_events}} ];
  }
  return (JSON::PP->new->canonical(1)->utf8(1)->encode($state),1);
+}
+
+# The status fix-ups below rewrite the first "message", "current_name" or
+# "phase" in the text, and canonical order puts activity_events (whose
+# entries carry a message) ahead of those keys. Empty the array while the
+# fix-ups run and put the events back before the text is served or saved,
+# in both views. Events are flat objects, so the first bare ] closes the
+# array; a text without the key round-trips unchanged.
+sub webui_worker_status_detach_events (@) {
+ my ($json)=@_;
+ my $events="";
+ $events=$1 if(defined($json) && $json=~s/("activity_events"\s*:\s*\[(?:"(?:[^"\\]|\\.)*"|[^"\]])*\])/"activity_events":[]/);
+ return ($json,$events);
+}
+
+sub webui_worker_status_attach_events (@) {
+ my ($json,$events)=@_;
+ return $json if(!defined($json) || !defined($events) || $events eq "");
+ $json=~s/"activity_events":\[\]/$events/;
+ return $json;
 }
 
 sub webui_meter_lg_autocal_status (@) {
@@ -6799,6 +6807,8 @@ sub webui_meter_lg_autocal_status (@) {
  $file=$_meter_lg_autocal_file if(!defined($file) || $file eq "");
  if(-f $file) {
   my ($json,$summary)=&webui_worker_status_read($file,$query);
+  my $events;
+  ($json,$events)=&webui_worker_status_detach_events($json);
 	  if($json ne "") {
 	   # When the autocal worker has finished (status=complete or cancelled)
 	   # and isn't actually running anymore, the persisted state can still
@@ -6850,7 +6860,7 @@ sub webui_meter_lg_autocal_status (@) {
 		    # and the standalone-greyscale completion path. That clears
 		     # the keys exactly once, after the whole workflow (or the
 		     # standalone greyscale run) is truly done.
-		    if($changed && !$summary && open(my $wf,">",$file)) { print $wf $json; close($wf); chmod(0666,$file); }
+		    if($changed && !$summary && open(my $wf,">",$file)) { print $wf &webui_worker_status_attach_events($json,$events); close($wf); chmod(0666,$file); }
 	   }
 	   if($json=~/"status"\s*:\s*"running"/) {
 	    # Debounce "process died". webui_meter_lg_autocal_running() is a single
@@ -6870,7 +6880,7 @@ sub webui_meter_lg_autocal_status (@) {
 	     $_first_miss=$_now if($_first_miss<=0 || $_first_miss>$_now);
 	     if(($_now-$_first_miss) < 15000) {
 	      if(open(my $mf,">",$_dmf)) { print $mf $_first_miss; close($mf); chmod(0666,$_dmf); }
-	      return $json;
+	      return &webui_worker_status_attach_events($json,$events);
 	     }
 	     # The summary view reports the death but leaves the first-miss
 	     # marker and the state file alone; the full read that follows
@@ -6879,8 +6889,10 @@ sub webui_meter_lg_autocal_status (@) {
 	     # Explicit Stop (stop-file present) always wins over the
 	     # final-1D "looks complete" promotion. Otherwise a kill during
 	     # end-of-run upload leaves status=complete and the next page
-	     # refresh opens the success popup for a cancelled cal.
-	     if(-f $_meter_lg_autocal_stop_file) {
+	     # refresh opens the success popup for a cancelled cal. Tests run
+	     # with their own state file and a stop file beside it.
+	     my $stop_file=($file eq $_meter_lg_autocal_file) ? $_meter_lg_autocal_stop_file : "$file.stop";
+	     if(-f $stop_file) {
 	      $json=~s/"status"\s*:\s*"running"/"status":"cancelled"/;
 	      if($json=~/"current_name"\s*:\s*"[^"]*"/) {
 	       $json=~s/"current_name"\s*:\s*"[^"]*"/"current_name":"Auto Cal cancelled"/;
@@ -6953,14 +6965,14 @@ sub webui_meter_lg_autocal_status (@) {
 	       $json=~s/"message"\s*:\s*"[^"]*"/"message":"LG Auto Cal stopped unexpectedly"/;
 	      }
 	     }
-	     if(!$summary && open(my $wf,">",$file)) { print $wf $json; close($wf); chmod(0666,$file); }
+	     if(!$summary && open(my $wf,">",$file)) { print $wf &webui_worker_status_attach_events($json,$events); close($wf); chmod(0666,$file); }
 	    } else {
 	     unlink($_dmf);
 	    }
 	   } else {
 	    unlink("$file.misses");
 	   }
-	   return $json;
+	   return &webui_worker_status_attach_events($json,$events);
   }
  }
  return '{"status":"idle"}';
@@ -7470,6 +7482,8 @@ sub webui_meter_lg_3d_autocal_status (@) {
     # Recovery rewrites the state file, so only the full view runs it; the
     # summary poller reads the full state once it sees a terminal status.
     $json=&webui_meter_lg_3d_autocal_recover_unverified_complete($json) if(!$summary);
+    my $events;
+    ($json,$events)=&webui_worker_status_detach_events($json);
     if($json=~/"status"\s*:\s*"running"/) {
      # Debounce "process died" (see the 1D monitor for rationale): the worker
      # is momentarily out of pgrep's view during meter-session teardown/restart
@@ -7485,7 +7499,7 @@ sub webui_meter_lg_3d_autocal_status (@) {
       $_first_miss=$_now if($_first_miss<=0 || $_first_miss>$_now);
       if(($_now-$_first_miss) < 15000) {
        if(open(my $mf,">",$_dmf)) { print $mf $_first_miss; close($mf); chmod(0666,$_dmf); }
-       return &webui_meter_lg_3d_autocal_compact_status_json($json);
+       return &webui_meter_lg_3d_autocal_compact_status_json(&webui_worker_status_attach_events($json,$events));
       }
       # The summary view leaves the first-miss marker and the state file
       # alone; the full read that follows applies the same flip and saves it.
@@ -7528,14 +7542,14 @@ sub webui_meter_lg_3d_autocal_status (@) {
         $json=~s/"message"\s*:\s*"[^"]*"/"message":"LG 3D LUT AutoCal stopped unexpectedly"/;
        }
       }
-      if(!$summary && open(my $wf,">",$file)) { print $wf $json; close($wf); chmod(0666,$file); }
+      if(!$summary && open(my $wf,">",$file)) { print $wf &webui_worker_status_attach_events($json,$events); close($wf); chmod(0666,$file); }
      } else {
       unlink($_dmf);
      }
     } else {
      unlink("$file.misses");
     }
-   return &webui_meter_lg_3d_autocal_compact_status_json($json);
+   return &webui_meter_lg_3d_autocal_compact_status_json(&webui_worker_status_attach_events($json,$events));
   }
  }
  return '{"status":"idle"}';

@@ -12736,7 +12736,7 @@ sub autocal_activity_event {
  $message =~ s/[\r\n]+/ /g;
  my $events=$state->{activity_events} ||= [];
  push @$events,{seq=>++$state->{activity_sequence},time=>time(),message=>$message};
- splice(@$events,0,@$events-64) if(@$events>64);
+ splice(@$events,0,@$events-$PGAutomation::WORKER_ACTIVITY_EVENT_LIMIT) if(@$events>$PGAutomation::WORKER_ACTIVITY_EVENT_LIMIT);
  log_line($message);
  write_state($state);
 }
@@ -12771,24 +12771,13 @@ sub write_state {
  PGAutomation::stamp_worker_state($state,$LG_AUTOCAL_CONFIG);
  $state->{"autocal"}=JSON::PP::true;
  write_file($state_file,$json->encode($state));
- # Automation polls the status route every two seconds and reads only these
- # keys, so a small sidecar beside the state file serves its summary view.
- # The daemon ignores a sidecar older than the state file, so a failure here
- # only costs the poller a full decode; it must never break the state write.
- eval {
-  my %summary;
-  foreach my $key (qw(status current_name current_step total_steps current_delta_e message error_code debug phase
-   automation_worker_id worker_pid worker_start_ticks activity_sequence activity_events
-   started_at completed_at elapsed_ms autocal calibration_mode full_workflow full_autocal_run_id full_autocal_phase
-   final_1d_lut_uploaded final_1d_lut_upload_verified
-   upload_verified terminal_commit_verified tone_map_upload_status tone_map_upload_error_code)) {
-   $summary{$key}=$state->{$key} if(exists($state->{$key}));
-  }
-  $summary{activity_events}=[ @{$summary{activity_events}}[-60..-1] ]
-   if(ref($summary{activity_events}) eq "ARRAY" && @{$summary{activity_events}}>60);
-  write_file("$state_file.summary",$json->encode(\%summary));
-  1;
- } or log_line("write_state: summary sidecar not written: ".($@||"unknown error"));
+ # Automation polls the status route every two seconds and reads only the
+ # keys in PGAutomation::WORKER_STATUS_SUMMARY_KEYS, so a small sidecar beside
+ # the state file serves its summary view. The daemon ignores a sidecar older
+ # than the state file, so a failure here only costs the poller a full
+ # decode; it must never break the state write.
+ eval { write_file("$state_file.summary",$json->encode(PGAutomation::worker_status_summary($state))); 1; }
+  or log_line("write_state: summary sidecar not written: ".($@||"unknown error"));
  # Per-write trace (opt-in via PGEN_AUTOCAL_TRACE=1). Captures every
  # write_state call so a worker death between the last write_state and
  # exit can be diagnosed by replaying the trace against the state file.

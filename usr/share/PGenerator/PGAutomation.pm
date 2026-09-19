@@ -327,6 +327,31 @@ sub read_json_cached {
 }
 
 # The live view of a run: what a status poll needs and nothing that grows.
+# WORKER_STATUS_SUMMARY_KEYS are the calibration worker status fields the
+# runner reads while it waits, plus those the daemon's status fix-ups touch.
+# Each worker writes them to a .summary sidecar beside its state file and the
+# status routes serve them for ?view=summary. WORKER_ACTIVITY_EVENT_LIMIT is
+# how many activity events a worker keeps; the summary keeps the same.
+our @WORKER_STATUS_SUMMARY_KEYS = qw(
+    status current_name current_step total_steps current_delta_e message error_code debug phase
+    automation_worker_id worker_pid worker_start_ticks activity_sequence activity_events
+    started_at completed_at elapsed_ms autocal calibration_mode
+    full_workflow full_autocal_run_id full_autocal_phase
+    final_1d_lut_uploaded final_1d_lut_upload_verified
+    upload_verified terminal_commit_verified tone_map_upload_status tone_map_upload_error_code
+);
+our $WORKER_ACTIVITY_EVENT_LIMIT = 64;
+
+sub worker_status_summary {
+    my ($state) = @_;
+    return {} if ref($state) ne 'HASH';
+    my %summary = map { exists($state->{$_}) ? ($_ => $state->{$_}) : () } @WORKER_STATUS_SUMMARY_KEYS;
+    if (ref($summary{activity_events}) eq 'ARRAY' && @{$summary{activity_events}} > $WORKER_ACTIVITY_EVENT_LIMIT) {
+        $summary{activity_events} = [ @{$summary{activity_events}}[-$WORKER_ACTIVITY_EVENT_LIMIT .. -1] ];
+    }
+    return \%summary;
+}
+
 # The runner publishes it as status.json after every manifest write; the
 # daemon materialises it once for a run no runner is alive to publish for.
 # RUN_LIVE_KEYS are the fields a heartbeat or progress tick may overlay.

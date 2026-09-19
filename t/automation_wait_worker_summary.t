@@ -1,7 +1,9 @@
 # The wait loop polls the worker's summary view carrying the last activity
 # sequence it saw, and reads the full state exactly once when the summary
 # reports a terminal status, so callers and the archive still get the whole
-# result. Routes without a summary view are polled as before.
+# result. A full read that fails or disagrees with the summary leaves the
+# terminal summary as the result. Routes without a summary view are polled
+# as before.
 use strict;
 use warnings;
 no warnings qw(redefine once);
@@ -32,6 +34,16 @@ is(main::_worker_status_poll_path('/api/meter/lg-autocal/status','bad'),'/api/me
 is(main::_worker_status_poll_path('/api/meter/series/status',3),'/api/meter/series/status','routes without a summary view are polled unchanged');
 is(main::_lg_action_path('/api/lg/dv-profile/status?view=summary&after=0'),main::_lg_action_path('/api/lg/dv-profile/status'),'the query does not change LG action detection');
 is(main::_lg_retry_window('/api/lg/dv-profile/status?view=summary&after=0'),main::_lg_retry_window('/api/lg/dv-profile/status'),'nor the retry window');
+
+my $summary={status=>'complete',automation_worker_id=>'w1'};
+ok(main::_worker_full_status_usable($summary,{status=>'complete',automation_worker_id=>'w1',measurements=>[]}),'a terminal full state for the same worker replaces the summary');
+ok(main::_worker_full_status_usable($summary,{status=>'error',error_code=>'meter-read-failed',automation_worker_id=>'w1'}),'the worker\'s own failure is a usable full state');
+ok(!main::_worker_full_status_usable($summary,undef),'nothing is not a usable full state');
+ok(!main::_worker_full_status_usable($summary,{status=>'error',error_code=>'daemon-unreachable',_transport_error=>1}),'a transport failure is not');
+ok(!main::_worker_full_status_usable($summary,{status=>'error',error_code=>'invalid-daemon-response'}),'nor an undecodable reply');
+ok(!main::_worker_full_status_usable($summary,{status=>'error',error_code=>'stopped'}),'nor a stop interrupting the request');
+ok(!main::_worker_full_status_usable($summary,{status=>'running',automation_worker_id=>'w1'}),'nor a state that is not terminal');
+ok(!main::_worker_full_status_usable($summary,{status=>'complete',automation_worker_id=>'w2'}),'nor another worker\'s result');
 
 my $event=sub {my ($seq)=@_;return {seq=>$seq,time=>100+$seq,message=>"event $seq"}};
 {
@@ -64,6 +76,7 @@ my $event=sub {my ($seq)=@_;return {seq=>$seq,time=>100+$seq,message=>"event $se
  ],'every poll is a summary carrying the last seen sequence; only the end reads the full state');
  is(scalar(grep {/1D LUT \| event \d/} @lines),4,'each event is saved once across summary polls and the full read');
  is(scalar(grep {/activity gap/} @lines),0,'server-side filtering does not look like a gap');
+ is(scalar(grep {/full status could not be read/} @lines),0,'a good full read is not reported as a fallback');
 }
 {
  @lines=();
@@ -81,15 +94,44 @@ my $event=sub {my ($seq)=@_;return {seq=>$seq,time=>100+$seq,message=>"event $se
  main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{});
  is(scalar(grep {/activity gap/} @lines),1,'events that expired before collection are still reported as a gap');
 }
-{
- my @summaries=({status=>'complete',automation_worker_id=>'w1'});
+# A full read that fails or disagrees with the summary keeps the summary, so a
+# finished stage is never turned into a transport failure or an identity
+# mismatch by the second request.
+for my $case (
+ ['daemon unreachable',{status=>'error',error_code=>'daemon-unreachable',_transport_error=>1}],
+ ['invalid JSON',{status=>'error',error_code=>'invalid-daemon-response',message=>'The daemon returned invalid JSON'}],
+ ['no reply',undef],
+ ['still running for the same worker',{status=>'running',automation_worker_id=>'w1'}],
+ ['another worker',{status=>'complete',automation_worker_id=>'w2'}],
+) {
+ my ($name,$reply)=@$case;
+ @lines=();
+ my @summaries=({status=>'complete',automation_worker_id=>'w1',message=>'done',current_name=>'Auto Cal complete'});
  local *main::_api=sub {
   my ($method,$path)=@_;
   return {status=>'ok'} if $path eq '/api/lg/status';
-  return {status=>'error',error_code=>'daemon-unreachable'} if $path eq '/api/meter/lg-autocal/status';
+  return $reply if $path eq '/api/meter/lg-autocal/status';
   return shift(@summaries) || die 'polled after the terminal summary';
  };
- is(main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{})->{error_code},'daemon-unreachable','a daemon lost during the full read is reported, not polled forever');
+ my $result=main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{});
+ is($result->{status},'complete',"$name: the terminal summary stands as the result");
+ is($result->{message},'done',"$name: with the summary's own fields");
+ is(scalar(grep {/full status could not be read/} @lines),1,"$name: the fallback is logged once");
+}
+{
+ my @summaries=({status=>'idle'},{status=>'running',automation_worker_id=>'w1'},{status=>'complete',automation_worker_id=>'w1'});
+ my @seen;
+ local *main::_api=sub {
+  my ($m,$p)=@_;
+  return {status=>'ok'} if $p eq '/api/lg/status';
+  push @seen,$p;
+  return {status=>'complete',automation_worker_id=>'w1',full=>1} if $p eq '/api/meter/lg-autocal/status';
+  return shift(@summaries) || die 'extra poll';
+ };
+ local *main::_idle_worker_alive=sub {1};
+ my $result=main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{});
+ ok($result->{full},'the wait ends on the full state');
+ is_deeply(\@seen,[('/api/meter/lg-autocal/status?view=summary&after=0')x3,'/api/meter/lg-autocal/status'],'an unstamped idle summary does not cost a full read');
 }
 {
  my @statuses=({status=>'running',current_step=>1,total_steps=>2},{status=>'complete',current_step=>2,total_steps=>2});

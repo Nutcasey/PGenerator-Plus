@@ -51,24 +51,12 @@ sub write_state {
   }
  }
  my $written=PGAutomation::write_json_atomic($state_file,\%state,0666);
- # Automation polls the status route every two seconds and reads only these
- # keys, so a small sidecar beside the state file serves its summary view.
- # The daemon ignores a sidecar older than the state file, so a failure here
- # only costs the poller a full decode; it must never break the state write.
- eval {
-  my %summary;
-  foreach my $key (qw(status current_name current_step total_steps current_delta_e message error_code debug phase
-   automation_worker_id worker_pid worker_start_ticks activity_sequence activity_events
-   started_at completed_at elapsed_ms autocal calibration_mode full_workflow full_autocal_run_id full_autocal_phase
-   final_1d_lut_uploaded final_1d_lut_upload_verified
-   upload_verified terminal_commit_verified tone_map_upload_status tone_map_upload_error_code)) {
-   $summary{$key}=$state{$key} if(exists($state{$key}));
-  }
-  $summary{activity_events}=[ @{$summary{activity_events}}[-60..-1] ]
-   if(ref($summary{activity_events}) eq "ARRAY" && @{$summary{activity_events}}>60);
-  PGAutomation::write_json_atomic("$state_file.summary",\%summary,0666);
-  1;
- };
+ # Automation polls the status route every two seconds and reads only the
+ # keys in PGAutomation::WORKER_STATUS_SUMMARY_KEYS, so a small sidecar beside
+ # the state file serves its summary view. The daemon ignores a sidecar older
+ # than the state file, so a failure here only costs the poller a full
+ # decode; it must never break the state write.
+ eval { PGAutomation::write_json_atomic("$state_file.summary",PGAutomation::worker_status_summary(\%state),0666); 1; };
  return $written;
 }
 

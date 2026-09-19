@@ -8,16 +8,20 @@ no warnings qw(once redefine);
 use File::Temp qw(tempdir);
 use JSON::PP ();
 use Test::More;
+use lib "$Bin/../usr/share/PGenerator";
+use PGAutomation ();
 my $WT="$Bin/..";
 my $dir=tempdir(CLEANUP=>1);
 my $id='run-7-20260919-010203-abcdef';
 my $perl=$^X;
+my $limit=$PGAutomation::WORKER_ACTIVITY_EVENT_LIMIT;
+ok($limit>0,'the worker event limit is exported by PGAutomation');
 sub run_perl {my ($code)=@_;my $f="$dir/p$$".int(rand(1e9)).".pl";open my $h,'>',$f or die;print {$h} $code;close $h;my $out=`"$perl" "$f" 2>&1`;return ($?>>8,$out);}
 sub load_json {my ($p)=@_;open my $f,'<',$p or return undef;local $/;my $t=<$f>;close $f;return eval { JSON::PP::decode_json($t) };}
-my $events='[map {{seq=>$_,time=>$_,message=>"e$_"}} 1..70]';
+my $events='[map {{seq=>$_,time=>$_,message=>"e$_"}} 1..'.($limit+6).']';
 for my $w (
  ['grey','meter_lg_autocal.pl','$main::LG_AUTOCAL_CONFIG={automation_worker_id=>"'.$id.'"};'
-   .'main::write_state({status=>"running",message=>"x",current_step=>3,total_steps=>37,phase=>"greyscale",activity_sequence=>70,'
+   .'main::write_state({status=>"running",message=>"x",current_step=>3,total_steps=>37,phase=>"greyscale",activity_sequence=>'.($limit+6).','
    .'activity_events=>'.$events.',hdr20_1d_dpg_anchor_history=>[1..5000],readings=>[1..500]});'],
  ['3d','meter_lg_3d_autocal.pl','$main::LG_3D_REQUEST_CONTEXT={automation_worker_id=>"'.$id.'"};'
    .'main::write_state({status=>"running",message=>"x",current_step=>3,total_steps=>33,upload_verified=>JSON::PP::false,hdr20_postcal_shadow_dpg_data=>[1..3072]});'],
@@ -36,6 +40,7 @@ for my $w (
  is($sum->{worker_pid},$s->{worker_pid},"$w->[0]: sidecar carries the same pid as the state");
  is($sum->{current_step},3,"$w->[0]: sidecar carries the patch counter");
  ok(!exists $sum->{hdr20_1d_dpg_anchor_history} && !exists $sum->{readings} && !exists $sum->{hdr20_postcal_shadow_dpg_data},"$w->[0]: bulk keys stay out of the sidecar");
+ is_deeply([sort keys %$sum],[sort grep { exists $s->{$_} } @PGAutomation::WORKER_STATUS_SUMMARY_KEYS],"$w->[0]: the sidecar is exactly the shared key list present in the state");
  ok(-s "$state.summary" < -s $state,"$w->[0]: sidecar is smaller than the state");
  my @st=stat($state);my @ss=stat("$state.summary");
  ok($ss[9]>=$st[9],"$w->[0]: sidecar is not older than the state file");
@@ -43,12 +48,30 @@ for my $w (
 }
 {
  my $state="$dir/grey.json";
+ my $s=load_json($state)||{};
  my $sum=load_json("$state.summary")||{};
- is(scalar @{$sum->{activity_events}||[]},60,'grey: sidecar keeps the last 60 events');
- is($sum->{activity_events}[0]{seq},11,'grey: the oldest kept event is the eleventh');
- is($sum->{activity_events}[-1]{seq},70,'grey: the newest event is kept');
+ is(scalar @{$s->{activity_events}||[]},$limit+6,'grey: write_state itself does not trim the events it is given');
+ is(scalar @{$sum->{activity_events}||[]},$limit,"grey: sidecar keeps the last $limit events, the worker's own cap");
+ is($sum->{activity_events}[0]{seq},7,'grey: the oldest kept event is the seventh');
+ is($sum->{activity_events}[-1]{seq},$limit+6,'grey: the newest event is kept');
  ok($sum->{autocal},'grey: the autocal flag write_state sets is in the sidecar');
  is($sum->{phase},'greyscale','grey: the phase is in the sidecar');
+}
+# The worker's own event buffer uses the same cap.
+{
+ my $state="$dir/grey-events.json";
+ my ($rc,$out)=run_perl(qq{\@ARGV=("$dir/none-config.json","$state","$dir/stop");
+   local \$SIG{__WARN__}=sub{};
+   do "$WT/usr/bin/meter_lg_autocal.pl"; die \$@ if \$@;
+   \$main::LG_AUTOCAL_CONFIG={automation_worker_id=>"$id"};
+   local *main::log_line=sub {};
+   my \$state={status=>"running"};
+   main::autocal_activity_event(\$state,"event \$_") for 1..($limit+10);
+   print "OK\\n";});
+ like($out,qr/OK/,'grey: activity events recorded') or diag $out;
+ my $s=load_json($state)||{};
+ is(scalar @{$s->{activity_events}||[]},$limit,"grey: the worker keeps $limit events");
+ is(scalar @{(load_json("$state.summary")||{})->{activity_events}||[]},$limit,'grey: and the sidecar keeps every one of them');
 }
 # A sidecar path that cannot be written (a directory sits there) leaves the
 # state write intact.
@@ -74,6 +97,24 @@ for my $w (
    print main::write_state({status=>"running",message=>"blocked"}) ? "OK\\n" : "FAILED\\n";});
  like($out,qr/OK/,'3d: write_state still reports success with an unwritable sidecar') or diag $out;
  is((load_json($state)||{})->{message},'blocked','3d: the state file is still written');
+}
+# When the 3D state cannot be encoded the reduced fallback is written, and
+# the sidecar is built from that object, not the original.
+{
+ my $state="$dir/3d-fallback.json";
+ my ($rc,$out)=run_perl(qq{\@ARGV=("$dir/none-config.json","$state","$dir/stop");
+   local \$SIG{__WARN__}=sub{};
+   do "$WT/usr/bin/meter_lg_3d_autocal.pl"; die \$@ if \$@;
+   \$main::LG_3D_REQUEST_CONTEXT={automation_worker_id=>"$id"};
+   local *main::log_line=sub {};
+   print main::write_state({status=>"running",current_step=>4,message=>sub {}}) ? "OK\\n" : "FAILED\\n";});
+ like($out,qr/OK/,'3d: an unencodable state still writes') or diag $out;
+ my $s=load_json($state)||{};
+ ok($s->{state_encode_error},'3d: the reduced state records the encode error');
+ my $sum=load_json("$state.summary");
+ is(ref $sum,'HASH','3d: the sidecar is built from the reduced state that was written');
+ is($sum->{current_step},4,'3d: with the fields that survived');
+ ok(!exists $sum->{message},'3d: and without the value that could not be encoded');
 }
 # The Dolby Vision worker has no caller() guard: run its real write_state on its own.
 {

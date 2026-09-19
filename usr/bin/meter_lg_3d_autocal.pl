@@ -195,6 +195,7 @@ sub write_state {
  # die here cascades straight to process death (seen 2026-07-03: a
  # ref-to-hashref in a pass field killed a full autocal mid-shadow).
  my $encoded;
+ my $published=$state;
  eval { $encoded=$json->encode($state); 1; } or do {
   my $err=$@; $err=~s/[\r\n]+/ /g;
   log_line("write_state: state not encodable, writing minimal state: ".$err);
@@ -206,26 +207,17 @@ sub write_state {
   }
   $fallback{"state_encode_error"}=$err;
   $encoded=$json->encode(\%fallback);
+  $published=\%fallback;
  };
  my $written=write_file($state_file,$encoded,0);
- # Automation polls the status route every two seconds and reads only these
- # keys, so a small sidecar beside the state file serves its summary view.
- # The daemon ignores a sidecar older than the state file, so a failure here
- # only costs the poller a full decode; it must never break the state write.
- eval {
-  my %summary;
-  foreach my $key (qw(status current_name current_step total_steps current_delta_e message error_code debug phase
-   automation_worker_id worker_pid worker_start_ticks activity_sequence activity_events
-   started_at completed_at elapsed_ms autocal calibration_mode full_workflow full_autocal_run_id full_autocal_phase
-   final_1d_lut_uploaded final_1d_lut_upload_verified
-   upload_verified terminal_commit_verified tone_map_upload_status tone_map_upload_error_code)) {
-   $summary{$key}=$state->{$key} if(exists($state->{$key}));
-  }
-  $summary{activity_events}=[ @{$summary{activity_events}}[-60..-1] ]
-   if(ref($summary{activity_events}) eq "ARRAY" && @{$summary{activity_events}}>60);
-  write_file("$state_file.summary",$json->encode(\%summary),0);
-  1;
- } or log_line("write_state: summary sidecar not written: ".($@||"unknown error"));
+ # Automation polls the status route every two seconds and reads only the
+ # keys in PGAutomation::WORKER_STATUS_SUMMARY_KEYS, so a small sidecar beside
+ # the state file serves its summary view, built from the object actually
+ # written. The daemon ignores a sidecar older than the state file, so a
+ # failure here only costs the poller a full decode; it must never break the
+ # state write.
+ eval { write_file("$state_file.summary",$json->encode(PGAutomation::worker_status_summary($published)),0); 1; }
+  or log_line("write_state: summary sidecar not written: ".($@||"unknown error"));
  return $written;
 }
 
