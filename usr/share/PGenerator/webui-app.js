@@ -11852,14 +11852,23 @@ function meterUpdateNoiseFloorModeStatus(){
  const el=document.getElementById('meterNoiseFloorModeStatus');
  if(!el) return;
  let text='';
+ let title='';
  try{
   if(meterRgbBalanceNoiseFloorMode()==='empirical'){
    let n=0;
    meterNoiseHistoryStore().forEach(h=>{ if(h&&Array.isArray(h.vals)&&h.vals.length>=2) n++; });
-   text=n>0?('· '+n+(n===1?' point measured':' points measured')):'· no scatter yet — re-read patches';
+   // Glance text must fit the span's own 22ch cap: the first version
+   // ('no scatter yet — re-read patches') measured 151px against a
+   // 121px box, and the ellipsis ate the repair verb ("re-rea...").
+   // Short form fits (97px) and keeps state + action; the full sentence
+   // lives in the tooltip for anyone who wants it.
+   text=n>0?('· '+n+(n===1?' point measured':' points measured')):'· no scatter — re-read';
+   title=n>0?('Per-point noise floors are live for '+n+' step'+(n===1?'':'s')+' this session; points without >=2 repeat readings still use the typed floor.')
+            :'Empirical mode with no repeat readings behaves like Flat. Re-read patches (or run a series twice) to build each point\'s scatter.';
   }
  }catch(e){}
  el.textContent=text;
+ el.title=title;
  // inline-block, not the default inline: max-width and the ellipsis are
  // no-ops on inline boxes (measured live: 22ch cap declared, 150px
  // rendered). Round-2 cap only works once the box honors it.

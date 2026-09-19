@@ -1221,7 +1221,13 @@ test('empirical_mode_control_wiring', () => {
   globalThis.__noiseMode = { value: 'empirical' };
   S.meterNoiseHistoryStore().clear();
   S.meterUpdateNoiseFloorModeStatus();
-  assert(statusEl.textContent === '· no scatter yet — re-read patches', 'empty store names the repair');
+  assert(statusEl.textContent === '· no scatter — re-read', 'empty store names the repair');
+  // Glance text must fit the span's own cap — the first repair string
+  // measured 151px against the 121px box and the ellipsis ate the verb
+  // (operator saw 're-rea...'). Pin: shorter than the old overflow string.
+  assert(statusEl.textContent.length < '· no scatter yet — re-read patches'.length,
+    'repair text is shorter than the 22ch-overflowing first version');
+  assert(/re-read/i.test(statusEl.title), 'full explanation carried in the title');
   assert(statusEl.style.display === 'inline-block', 'empty-store hint is visible as inline-block (max-width applies)');
   S.meterNoiseHistoryStore().set('a', { vals: [[0, 0, 0], [0.1, 0, 0]] });
   S.meterUpdateNoiseFloorModeStatus();
