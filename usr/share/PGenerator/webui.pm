@@ -14057,10 +14057,11 @@ sub webui_automation_list_runs (@) {
    next;
   }
   my $summary;
-  if(ref($cached) eq "HASH" && ($cached->{version}||0) < $WEBUI_LISTING_CACHE_VERSION && ($cached->{key}||"") eq $key && ref($cached->{summary}) eq "HASH") {
-   # A summary in the first format for this same manifest holds every row
-   # field. Trim it in place rather than decode the manifest again: 72 of
-   # them on the appliance would take minutes.
+  if(ref($cached) eq "HASH" && ($cached->{version}||0) != $WEBUI_LISTING_CACHE_VERSION && ($cached->{key}||"") eq $key && ref($cached->{summary}) eq "HASH") {
+   # A summary in any other format for this same manifest holds every row
+   # field (the row keys are a subset of every shape written so far). Trim
+   # it in place rather than decode the manifest again: 72 of them on the
+   # appliance would take minutes.
    $summary=&webui_automation_listing_upgrade($cached->{summary});
   } else {
    my $run=&webui_automation_read_run($id);

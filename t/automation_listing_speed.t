@@ -227,6 +227,8 @@ require "$Bin/../usr/share/PGenerator/lg.pm";
 # A version-2 row (still carrying the trimmed job list) is upgraded in place
 # to the current shape without a manifest read.
 {
+ local $ENV{PGEN_AUTOMATION_DIR}=tempdir(CLEANUP=>1);
+ PGAutomation::ensure_store();
  my $dir=PGAutomation::run_dir('run-v2');
  PGAutomation::write_json_atomic("$dir/run.json",{id=>'run-v2',token=>'tv2',status=>'complete',queue_name=>'Version two',created_at=>1,items=>[{name=>'fat job',status=>'complete'}]},0644);
  my $key=main::webui_automation_listing_key("$dir/run.json");
