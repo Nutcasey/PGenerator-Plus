@@ -85,8 +85,15 @@ for my $case (
  is(check($i,'c6')->{verified},'unverifiable',$case->[0].' cannot claim an expected transition');
  is((grep {$_->{key} eq 'colorGamut'} @checks)[0]{result},'readback-warning','unknown context keeps existing warning');
 }
-for my $point (qw(c1 c4 c5 c7 c8 c9 c10 resume-profile-baseline)) {
+for my $point (qw(c1 c4 c5 c7 c8 c9 c10)) {
  is(check(after_grey_item(),$point)->{verified},'unverifiable',"$point cannot borrow 1D-only evidence for a different phase");
+}
+# The baseline restore re-uploads the verified 1D result into a held session
+# before its settings pass, the same state c6 reads after the greyscale, so
+# the same expected transition applies (review of the resume policy, 19 Sep
+# 2026); resume-setup with a kept 1D result likewise.
+for my $point (qw(resume-profile-baseline resume-setup)) {
+ is(check(after_grey_item(),$point)->{verified},1,"$point reads the restored 1D result like c6");
 }
 for my $override (
  {status=>'error',message=>'Socket failed'},

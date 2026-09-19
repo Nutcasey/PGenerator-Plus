@@ -171,4 +171,75 @@ sub grey_state {
  is($kept->{profile_baseline_needs_restore},1,'and arms the restore');
 }
 
+# A Dolby Vision profile failure keeps the 1D result unless an upload was
+# dispatched without an accepted result.
+{
+ grey_state(13,{status=>'complete',final_1d_lut_upload_verified=>JSON::PP::true});
+ my $dir=PGAutomation::item_dir('resume-test',13).'/calibration';
+ my $item=item(signal_format=>'dv',failure=>{stage=>'volume-done',message=>'x',at=>2});
+ @actions=();
+ main::_prepare_resume(13,$item,1);
+ is_deeply(names($item),[qw(item-started tv-setup-verified reset-and-reapply-verified panel-light-settled greyscale-done)],'a DV profile failure before any upload keeps the greyscale');
+ ok(!$item->{profile_baseline_needs_restore},'with no 3D baseline to restore');
+ open(my $fh,'>',"$dir/dv-profile-upload-dispatched.json") or die $!; print {$fh} '{"dispatched_at":1}'; close($fh);
+ my $dispatched=item(signal_format=>'dv',failure=>{stage=>'volume-done',message=>'x',at=>2});
+ @actions=();
+ main::_prepare_resume(13,$dispatched,1);
+ is_deeply(names($dispatched),[qw(item-started tv-setup-verified)],'a dispatched upload without an accepted result restarts from the reset');
+ like(join("\n",@actions),qr/upload was dispatched without an accepted result/,'and says why');
+ open($fh,'>',"$dir/dv-profile-upload.json") or die $!; print {$fh} '{"status":"ok"}'; close($fh);
+ my $accepted=item(signal_format=>'dv',failure=>{stage=>'volume-done',message=>'x',at=>2});
+ main::_prepare_resume(13,$accepted,1);
+ is_deeply(names($accepted),[qw(item-started tv-setup-verified reset-and-reapply-verified panel-light-settled greyscale-done)],'an accepted result written after the dispatch keeps the greyscale');
+ my $past=time()-100;
+ utime($past,$past,"$dir/dv-profile-upload.json");
+ my $stale=item(signal_format=>'dv',failure=>{stage=>'volume-done',message=>'x',at=>2});
+ main::_prepare_resume(13,$stale,1);
+ is_deeply(names($stale),[qw(item-started tv-setup-verified)],'an accepted result older than the dispatch counts for nothing');
+}
+
+# A Dolby Vision session-close failure with a verified profile keeps it.
+{
+ grey_state(14,{status=>'complete',final_1d_lut_upload_verified=>JSON::PP::true});
+ my $dir=PGAutomation::item_dir('resume-test',14).'/calibration';
+ for my $pair (['dv-profile-state.json','{"status":"complete"}'],['dv-profile-upload.json','{"status":"ok"}']) {
+  open(my $fh,'>',"$dir/$pair->[0]") or die $!; print {$fh} $pair->[1]; close($fh);
+ }
+ my $item=item(signal_format=>'dv',failure=>{stage=>'session-closed',message=>'x',at=>2});
+ push(@{$item->{checkpoints}},{name=>'volume-done',status=>'done',at=>3},{name=>'volume-settings-verified',status=>'done',at=>3});
+ main::_prepare_resume(14,$item,1);
+ is_deeply(names($item),[qw(item-started tv-setup-verified reset-and-reapply-verified panel-light-settled greyscale-done greyscale-settings-verified volume-done volume-settings-verified)],'the verified Dolby Vision profile is kept');
+}
+
+# A baseline restore that failed on the previous resume is not armed again.
+{
+ grey_state(15,{status=>'complete',ddc_upload_verified=>JSON::PP::true,hdr20_1d_dpg_data=>[(0) x 3072]});
+ my $item=item(failure=>{stage=>'job-readiness',message=>'Cannot restore profile baseline',at=>2},profile_baseline_restore_failed=>1);
+ $item->{checkpoints}=[grep { $_->{name} ne 'greyscale-settings-verified' } @{$item->{checkpoints}}];
+ @actions=();
+ main::_prepare_resume(15,$item,1);
+ is_deeply(names($item),[qw(item-started tv-setup-verified)],'a failed baseline restore sends the next resume to the reset');
+ ok(!$item->{profile_baseline_needs_restore} && !$item->{profile_baseline_restore_failed},'and clears both markers');
+ like(join("\n",@actions),qr/could not be restored on the previous resume/,'and says why');
+}
+
+# The resume-time settings passes respect LUT ownership like the post-1D
+# checkpoints, so a restored or kept LUT keeps its gamut and gamma.
+{
+ my $owned={signal_format=>'hdr10',settings=>{colorGamut=>'auto',gamma=>'2.2'},
+  checkpoints=>[map { {name=>$_,status=>'done',verified=>1} } qw(reset-and-reapply-verified greyscale-done volume-done)]};
+ is(main::_calibration_manages_setting($owned,'colorGamut','resume-setup'),main::_calibration_manages_setting($owned,'colorGamut','c7'),'resume-setup treats the gamut like c7 after a verified profile');
+ is(main::_calibration_manages_setting($owned,'colorGamut','c7'),1,'which a verified profile owns');
+ my $one_d={signal_format=>'hdr10',settings=>{colorGamut=>'auto'},
+  checkpoints=>[map { {name=>$_,status=>'done',verified=>1} } qw(reset-and-reapply-verified greyscale-done)]};
+ is(main::_expected_calibration_gamut_state($one_d,'colorGamut','resume-profile-baseline'),main::_expected_calibration_gamut_state($one_d,'colorGamut','c6'),'resume-profile-baseline treats the gamut like c6 after a verified 1D result');
+ is(main::_expected_calibration_gamut_state($one_d,'colorGamut','c6'),1,'where Auto may read as Wide');
+ my $sdr={signal_format=>'sdr',settings=>{gamma=>'2.2'},
+  checkpoints=>[map { {name=>$_,status=>'done',verified=>1} } qw(reset-and-reapply-verified greyscale-done)]};
+ is(main::_calibration_manages_setting($sdr,'gamma','resume-setup'),main::_calibration_manages_setting($sdr,'gamma','c6'),'resume-setup treats SDR gamma like c6 after a verified 1D result');
+ my $fresh={signal_format=>'hdr10',settings=>{colorGamut=>'auto'},checkpoints=>[{name=>'tv-setup-verified',status=>'done'}]};
+ is(main::_calibration_manages_setting($fresh,'colorGamut','resume-setup'),0,'with no LUT the gamut is written as usual');
+ is(main::_expected_calibration_gamut_state($fresh,'colorGamut','resume-setup'),0,'and no waiver applies');
+}
+
 done_testing();

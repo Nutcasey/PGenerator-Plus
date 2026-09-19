@@ -30,7 +30,11 @@ for my $pair (['1.9','low'],['2.2','medium'],['2.4','high1'],['bt1886','high2'],
  is($writes[0]{settings}{gamma},$pair->[1],'writes LG enum, not UI label');
 }
 ok(!main::_value_agrees('high1','high2','gamma'),'power 2.4 is not aliased to BT.1886');
-for my $point(qw(c6 c6-confirm c6-repair c6-stable c6-recovery c7 c8 c9 c10 resume-c6 resume-c8)) {
+# The resume-time passes run with the 1D LUT re-uploaded into a held session
+# (resume-profile-baseline) or kept (resume-setup), so the LUT owns the menu
+# gamma there exactly as at c6; writing it would change the TV's state away
+# from a first run's (review of the resume policy, 19 Sep 2026).
+for my $point(qw(c6 c6-confirm c6-repair c6-stable c6-recovery c7 c8 c9 c10 resume-c6 resume-c8 resume-setup resume-profile-baseline)) {
  is(check(item(),$point)->{verified},1,"$point accepts verified 1D ownership");
  my ($gamma)=grep {$_->{key} eq 'gamma'} @checks;
  is($gamma->{result},'lut-managed','raw menu value is not a false matched reading');
@@ -38,7 +42,7 @@ for my $point(qw(c6 c6-confirm c6-repair c6-stable c6-recovery c7 c8 c9 c10 resu
  like($gamma->{reason},qr/verified 1D LUT/,'explains why menu gamma does not represent the LUT target');
  like(join('\n',@logs),qr/TV Gamma controlled by the verified 1D LUT/,'logging identifies correct LUT owner');
 }
-for my $point(qw(c1 c4 c5 resume-c4 resume-profile-baseline)) {
+for my $point(qw(c1 c4 c5 resume-c4)) {
  is(check(item(),$point)->{verified},0,"$point still verifies setup gamma strictly");
 }
 for my $change (

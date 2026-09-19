@@ -1682,9 +1682,13 @@ sub _apply_one_setting {
 
 sub _calibration_manages_setting {
     my ($item, $key, $point) = @_;
+    # The resume-time passes (resume-setup, resume-profile-baseline) carry
+    # the same ownership as the post-1D points: a restored or kept LUT must
+    # not have its gamut or gamma rewritten before profiling. The checkpoint
+    # guards below decide whether a LUT actually owns the control.
     if ($key eq 'gamma') {
         return 0 if _signal($item) ne 'sdr' || !_stages($item)->{calibration}
-            || ($point || '') !~ /^(?:resume-)?c(?:6|7|8|9|10)(?:-(?:confirm|repair|stable|recovery))?$/;
+            || ($point || '') !~ /^(?:(?:resume-)?c(?:6|7|8|9|10)(?:-(?:confirm|repair|stable|recovery))?|resume-setup|resume-profile-baseline)$/;
         return 0 if (_tv_gamma_value($item->{settings}{$key}) || '') !~ /^(?:low|medium|high1|high2)$/;
         # Uploaded 1D LUT data bypasses LG's menu gamma. Only this job's
         # completed, verified upload owns it; a later reset invalidates that.
@@ -1697,7 +1701,7 @@ sub _calibration_manages_setting {
         }
         return $grey && ($grey->{status} || '') eq 'done' && ($grey->{verified} // '') eq '1' ? 1 : 0;
     }
-    return 0 if $key ne 'colorGamut' || ($point || '') !~ /^(?:resume-)?c(?:7|8|9|10)(?:-(?:confirm|repair|stable|recovery))?$/;
+    return 0 if $key ne 'colorGamut' || ($point || '') !~ /^(?:(?:resume-)?c(?:7|8|9|10)(?:-(?:confirm|repair|stable|recovery))?|resume-setup|resume-profile-baseline)$/;
     return 0 if _signal($item) !~ /^(?:sdr|hdr10)$/ || !_stages($item)->{calibration};
     return 0 if ($item->{settings}{$key} || '') !~ /^(?:auto|native|wide|extended)$/i;
     # Only a committed 3D LUT owns the post-calibration gamut control. Never
@@ -1879,7 +1883,7 @@ sub _read_and_verify_settings {
 
 sub _expected_calibration_gamut_state {
     my ($item, $key, $point) = @_;
-    return 0 if $key ne 'colorGamut' || ($point || '') !~ /^(?:resume-)?c6(?:-(?:confirm|repair|stable|recovery))?$/;
+    return 0 if $key ne 'colorGamut' || ($point || '') !~ /^(?:(?:resume-)?c6(?:-(?:confirm|repair|stable|recovery))?|resume-setup|resume-profile-baseline)$/;
     return 0 if _signal($item) !~ /^(?:sdr|hdr10)$/ || !_stages($item)->{calibration};
     return 0 if lc($item->{settings}{$key} || '') ne 'auto';
     # Our SDR/HDR reset stage includes BOTH the 1D and 3D baseline reset.
@@ -2964,6 +2968,7 @@ sub _calibration_volume_stage {
     my ($item_number, $item) = @_;
     my $signal = _signal($item);
     if ($signal eq 'dv') {
+        unlink(PGAutomation::item_dir($RUN_ID, $item_number) . '/calibration/dv-profile-upload-dispatched.json');
         return 0 if !_set_dv_map($item, '2');
         _log('launching Dolby Vision profile worker');
         $ACTIVE_WORKER = 'dv';
@@ -3005,6 +3010,8 @@ sub _calibration_volume_stage {
         my $proof = {transition=>'dv-profile-upload', verified=>$before_upload->{verified},
             values=>$before_upload->{values}, calibration_mode=>$mode->{calibration_mode} ? 1 : 0, checked_at=>time()};
         _log_action('Uploading measured Dolby Vision profile; TV calibration mode currently '.($proof->{calibration_mode} ? 'on' : 'off'));
+        return 0 if !_write_artifact(PGAutomation::item_dir($RUN_ID, $item_number) . '/calibration/dv-profile-upload-dispatched.json',
+            {dispatched_at => time(), picture_mode => _picture_mode($item)});
         my $upload = _api('POST', '/api/lg/dv-profile/upload', {
             picture_mode => _picture_mode($item),
             tv_input => $item->{tv_input}||'',
@@ -3066,6 +3073,22 @@ sub _calibration_volume_stage {
     _clear_active_worker();
     return {verified => ($three_d->{terminal_commit_verified} || $three_d->{upload_verified})
         ? JSON::PP::true : 'unverifiable', terminal_commit_verified => $three_d->{terminal_commit_verified}};
+}
+
+# 1 when a Dolby Vision profile upload was dispatched in the latest attempt
+# without an accepted result written after it: the TV may carry that profile,
+# so the 1D result is not reused without the calibration reset. The marker is
+# removed when the profile stage starts and written just before the upload.
+sub _dv_upload_unresolved {
+    my ($number,$item)=@_;
+    return 0 if _signal($item) ne 'dv';
+    my $dir=PGAutomation::item_dir($RUN_ID,$number).'/calibration';
+    my $dispatched=(stat("$dir/dv-profile-upload-dispatched.json"))[9];
+    return 0 if !defined($dispatched);
+    my $upload=PGAutomation::read_json_file("$dir/dv-profile-upload.json");
+    return 1 if ref($upload) ne 'HASH' || ($upload->{status}||'') ne 'ok';
+    my $accepted=(stat("$dir/dv-profile-upload.json"))[9];
+    return (defined($accepted) && $accepted >= $dispatched) ? 0 : 1;
 }
 
 # 1 when the committed 1D result carries the 3072-value curve the baseline
@@ -3949,6 +3972,14 @@ sub _prepare_resume {
     # earlier attempt that then failed at job readiness must not stall every
     # later resume on the same missing curve.
     delete $item->{profile_baseline_needs_restore};
+    if ($item->{profile_baseline_restore_failed}) {
+        delete $item->{profile_baseline_restore_failed};
+        _log_action('The 1D baseline could not be restored on the previous resume; the calibration restarts from its reset');
+        _drop_resume_checkpoints($item, { map { $_ => 1 } qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete) });
+        delete $item->{settings_recovery};
+        delete $item->{drift_recovery_pending};
+        return;
+    }
     my $last = _last_checkpoint($item);
     return if !ref($last);
     if (ref($item->{settings_recovery}) eq 'HASH') {
@@ -3998,9 +4029,12 @@ sub _prepare_resume {
         && _checkpoint_exists($item, 'greyscale-done')
         && _resume_calibration_artifacts_ok($item_number, $item, 'grey')) {
         my $label = _stage_label($failure_stage);
+        if (_dv_upload_unresolved($item_number, $item)) {
+            _log_action('Resuming after a failure in '.$label.': a Dolby Vision profile upload was dispatched without an accepted result, so the calibration restarts from its reset');
+        }
         # A session that failed to close after a verified profile keeps the
         # profile as well: only the exit and what follows are repeated.
-        if ($failure_stage eq 'session-closed' && _checkpoint_exists($item, 'volume-done')
+        elsif ($failure_stage eq 'session-closed' && _checkpoint_exists($item, 'volume-done')
             && _resume_calibration_artifacts_ok($item_number, $item, 'volume')) {
             _drop_resume_checkpoints($item, { map { $_ => 1 } qw(session-closed apply-all-done post-readings-done item-complete) });
             _log_action('Resuming after a failure in '.$label.': retaining the verified 1D and profile results');
@@ -4009,14 +4043,16 @@ sub _prepare_resume {
         # The baseline restore re-uploads the saved 1D curve. Without it the
         # restore would fail at job readiness on every later resume, so a
         # result that lacks it takes the full reset instead.
-        if (_profile_baseline_data_ok($item_number, $item)) {
+        elsif (_profile_baseline_data_ok($item_number, $item)) {
             _drop_resume_checkpoints($item, { map { $_ => 1 } qw(greyscale-settings-verified volume-done session-closed apply-all-done post-readings-done item-complete) });
             $item->{profile_baseline_needs_restore}=1 if _signal($item) ne 'dv';
             _log_action('Resuming after a failure in '.$label.': retaining the verified 1D result; its settings are rechecked'
                 .(_signal($item) ne 'dv' ? ' and the unity 3D baseline restored' : '').' before profiling');
             return;
         }
-        _log_action('Resuming after a failure in '.$label.': the saved 1D curve is missing, so the calibration restarts from its reset');
+        else {
+            _log_action('Resuming after a failure in '.$label.': the saved 1D curve is missing, so the calibration restarts from its reset');
+        }
     }
     if ($item->{drift_recovery_pending} || $failure_stage =~ /^(?:reset-and-reapply-verified|panel-light-settled|greyscale-done|volume-done|session-closed)$/) {
         _drop_resume_checkpoints($item, { map { $_ => 1 } qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete) });
@@ -4920,7 +4956,17 @@ sub _run_item {
     my $prepared=eval {
         _prepare_job_context($item_number,$item);
         _prepare_resume($item_number,$item,1) if $has_prior_checkpoint;
-        my $baseline_restored = $item->{profile_baseline_needs_restore} ? _restore_profile_baseline($item_number,$item) : 0;
+        my $baseline_restored = 0;
+        if ($item->{profile_baseline_needs_restore}) {
+            $baseline_restored = eval { _restore_profile_baseline($item_number,$item) } || 0;
+            if (!$baseline_restored) {
+                my $error = $@ || $::LAST_ERROR || 'Profile baseline restore failed';
+                # Recorded with the failure so the next resume takes the
+                # reset instead of arming the same restore again.
+                $item->{profile_baseline_restore_failed} = 1;
+                die $error;
+            }
+        }
         if ($has_prior_checkpoint && (_run()->{pause_context_released} || _run()->{stop_cleanup})) {
             # The baseline restore has just applied and verified every queued
             # control; a second full pass would only repeat it.

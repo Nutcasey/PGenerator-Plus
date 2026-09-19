@@ -158,7 +158,9 @@ for my $case (qw(fresh no-proof unverified-proof wrong-transition wrong-signal c
   ok(!$upload[0]{keep_calibration_mode},'DV upload explicitly closes calibration');
   is($result->{settings_before_upload}{transition},'dv-profile-upload','fresh transition proof returned for immediate boundary check');
   ok($result->{settings_before_upload}{values}{smoothGradation}{matched},'proof contains actual pre-upload control readback');
-  is(scalar @artifacts,1,'accepted upload artifact saved');
+  is(scalar @artifacts,2,'dispatch marker and accepted upload artifact saved');
+  like($artifacts[0][0],qr{/calibration/dv-profile-upload-dispatched\.json$},'the dispatch marker is written before the upload');
+  like($artifacts[1][0],qr{/calibration/dv-profile-upload\.json$},'the accepted upload artifact after it');
  }
  for my $case (qw(drift read-error missing-mode)) {
   reset_fixture();@upload=();
