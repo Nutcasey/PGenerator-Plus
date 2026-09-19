@@ -57,7 +57,7 @@ is(main::webui_worker_status_summary_after('view=summary&after=x'),0,'a malforme
  my $text=$encoder->encode({activity_events=>[@events],message=>'top',status=>'running'});
  my ($detached,$fragment)=main::webui_worker_status_detach_events($text);
  like($detached,qr/^\{"activity_events":\[\],"message":"top"/,'events are emptied in place');
- like($fragment,qr/^"activity_events":\[\{.*"seq":5.*\]$/s,'the fragment holds the whole array');
+ is_deeply(decode('{'.$fragment.'}')->{activity_events},\@events,'the fragment holds the whole array');
  is(main::webui_worker_status_attach_events($detached,$fragment),$text,'attaching restores the text byte for byte');
  my ($same,$none)=main::webui_worker_status_detach_events('{"message":"top"}');
  is($same,'{"message":"top"}','a text without events is untouched');
