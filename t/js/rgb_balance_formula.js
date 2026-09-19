@@ -757,7 +757,29 @@ test('noise_floor_inactive_hint_offers_one_tap_perceptual_switch', () => {
   globalThis.__sel = null;
   S.meterSwitchToPerceptualRgbBalance();
   assert(__noiseChangeCalls === before + 2, 'missing picker: redraw still fires');
+  // Empirical mode with an EMPTY typed field is a legitimate activation of
+  // annotation (Active() covers it) — under a non-Perceptual formula it must
+  // show the same one-tap repair hint. The old field-only gate hid it.
+  globalThis.__noiseFloor = { value: '', style: {} };
+  globalThis.__noiseMode = { value: 'empirical' };
+  S.meterUpdateNoiseFloorControlAvailability();
+  assert(hint.style.display === '', 'empirical + empty field + absolute: hint visible');
+  globalThis.__noiseMode = null;
   globalThis.__noiseHint = null;
+});
+
+test('noise_floor_mode_status_refreshed_on_prefs_restore', () => {
+  // Reload into Empirical mode: the session scatter store starts EMPTY, so
+  // the load path must refresh the coverage status or the row lies until the
+  // first new reading. Structural pin: the updater call must come after the
+  // mode setVal inside meterLoadColorPrefs.
+  const i = srcText.indexOf('function meterLoadColorPrefs');
+  if (i < 0) throw new Error('meterLoadColorPrefs not found');
+  const body = srcText.slice(i, srcText.indexOf('function ', srcText.indexOf("setVal('meterNoiseFloorMode'", i)));
+  const setMode = body.indexOf("setVal('meterNoiseFloorMode'");
+  const refresh = body.indexOf('meterUpdateNoiseFloorModeStatus()');
+  assert(setMode >= 0, 'load restores the mode select');
+  assert(refresh > setMode, 'load refreshes the mode-status row after restoring the mode');
 });
 
 test('noise_floor_inactive_hint_is_wired_in_html', () => {

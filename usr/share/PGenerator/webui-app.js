@@ -10027,7 +10027,11 @@ function meterUpdateNoiseFloorControlAvailability(){
  // the hover title says why, and touch screens never hover. Show an inline
  // hint that doubles as a one-tap switch to the formula that uses the floor.
  const hint=document.getElementById('meterRgbBalanceNoiseFloorHint');
- if(hint&&hint.style) hint.style.display=(meterRgbBalanceNoiseFloor()>0&&!applies)?'':'none';
+ // Gate on Active(), not the flat field: empirical mode with an EMPTY
+ // typed field is a legitimate way to turn annotation on, and under a
+ // non-Perceptual formula it silently does nothing — the exact state the
+ // hint exists to expose. Field-only gating hid the repair in that case.
+ if(hint&&hint.style) hint.style.display=(meterRgbBalanceNoiseFloorActive()&&!applies)?'':'none';
 }
 // One-tap repair for the inline hint: select Perceptual RGB bal and run the
 // shared change path, exactly as if the operator had used the formula picker.
@@ -11999,6 +12003,10 @@ function meterLoadColorPrefs(){
   // the committed value happens after the last restore below.
   try{ meterCommitRgbBalanceNoiseFloorInput(); }catch(e3){}
   try{ meterUpdateNoiseFloorControlAvailability(); }catch(e2){}
+  // Reload in Empirical mode: the scatter store starts EMPTY (session
+  // memory), so without this the row silently shows 'Empirical σ' with no
+  // coverage state until the first new reading records a sample.
+  try{ meterUpdateNoiseFloorModeStatus(); }catch(e4){}
   setVal('meterDeltaEForm',  meterNormalizeSavedGreyDeltaEForm(p.de_form));
   setVal('meterColorDeltaEForm', p.color_de_form);
   setChk('meterColorIncludeLumError', p.color_incl_lum);
