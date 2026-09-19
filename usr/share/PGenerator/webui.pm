@@ -13997,7 +13997,9 @@ sub webui_automation_listing_run (@) {
 # this version is replaced the first time History is listed: trimmed from
 # the old summary when that still matches the manifest, rebuilt from the
 # manifest otherwise.
-our $WEBUI_LISTING_CACHE_VERSION=2;
+# 3: the row carries no items (19 Sep 2026); 2 still carried the trimmed job
+# list; 1 and unversioned carried the whole public run.
+our $WEBUI_LISTING_CACHE_VERSION=3;
 sub webui_automation_listing_upgrade (@) {
  my ($old)=@_;
  return undef if(ref($old) ne "HASH");
@@ -14043,7 +14045,7 @@ sub webui_automation_list_runs (@) {
    next;
   }
   my $summary;
-  if(ref($cached) eq "HASH" && !$cached->{version} && ($cached->{key}||"") eq $key && ref($cached->{summary}) eq "HASH") {
+  if(ref($cached) eq "HASH" && ($cached->{version}||0) < $WEBUI_LISTING_CACHE_VERSION && ($cached->{key}||"") eq $key && ref($cached->{summary}) eq "HASH") {
    # A summary in the first format for this same manifest holds every row
    # field. Trim it in place rather than decode the manifest again: 72 of
    # them on the appliance would take minutes.

@@ -224,4 +224,24 @@ require "$Bin/../usr/share/PGenerator/lg.pm";
  is($invalid->{status},'blocked','an invalid queue still refuses the start immediately');
  is($tv,0,'and neither refusal talks to the TV');
 }
+# A version-2 row (still carrying the trimmed job list) is upgraded in place
+# to the current shape without a manifest read.
+{
+ my $dir=PGAutomation::run_dir('run-v2');
+ PGAutomation::write_json_atomic("$dir/run.json",{id=>'run-v2',token=>'tv2',status=>'complete',queue_name=>'Version two',created_at=>1,items=>[{name=>'fat job',status=>'complete'}]},0644);
+ my $key=main::webui_automation_listing_key("$dir/run.json");
+ PGAutomation::write_json_atomic("$dir/listing-cache.json",{version=>2,key=>$key,
+  summary=>{id=>'run-v2',queue_name=>'Version two',status=>'complete',created_at=>1,items=>[{name=>'fat job',status=>'complete',settings=>{brightness=>50}}]}},0644);
+ my $decoded=0;
+ no warnings 'redefine';
+ local *main::webui_automation_read_run=sub { $decoded++; return undef; };
+ my $runs=main::webui_automation_list_runs();
+ my ($row)=grep { ($_->{id}||'') eq 'run-v2' } @$runs;
+ ok($row && !exists($row->{items}),'a version-2 row loses its job list on the next listing');
+ is($row->{queue_name},'Version two','and keeps the fields the row renders');
+ is($decoded,0,'without decoding the manifest');
+ my $rewritten=PGAutomation::read_json_file("$dir/listing-cache.json");
+ is($rewritten->{version},$main::WEBUI_LISTING_CACHE_VERSION,'and the cache is rewritten at the current version');
+}
+
 done_testing();
