@@ -197,6 +197,8 @@ for my $case (qw(fresh no-proof unverified-proof wrong-transition wrong-signal c
 # Run the production stage orchestration with hardware workers replaced.
 {
  local *main::_resume_calibration_artifacts_ok=sub {1};
+ # The saved 1D curve is present whenever the real worker's state file is.
+ local *main::_profile_baseline_data_ok=sub {1};
  for my $name (qw(greyscale-done greyscale-settings-verified)) {
   my $item={signal_format=>'hdr10',checkpoints=>[{name=>$name,status=>'done',verified=>1}],failure=>{stage=>'job-readiness'}};
   main::_prepare_resume(0,$item,1);

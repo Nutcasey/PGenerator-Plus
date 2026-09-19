@@ -63,7 +63,8 @@ sub saved_checks {
  }
  open(my $fh,'>',$dir.'/settings-checks.ndjson') or die $!;print $fh @lines;close($fh);
 }
-PGAutomation::write_json_atomic($dir.'/calibration/grey-state.json',{status=>'complete',final_1d_lut_upload_verified=>JSON::PP::true},0664);
+PGAutomation::write_json_atomic($dir.'/calibration/grey-state.json',{status=>'complete',final_1d_lut_upload_verified=>JSON::PP::true,
+ hdr20_1d_dpg_data=>[(0) x 3072],sdr_1d_dpg_data=>[(0) x 3072]},0664);
 sub interrupted_item {
  return {%{item()},settings_recovery=>{point=>'c6',resume_from=>'greyscale-done'},checkpoints=>[map {{name=>$_,status=>'done',verified=>1}} qw(reset-and-reapply-verified panel-light-settled greyscale-done)]};
 }
