@@ -4879,7 +4879,7 @@ sub run_hdr20_postcal_shadow_correction {
      die "cancelled\n" if(cancelled());
      my $shelf=hdr20_postcal_prefix_shelf($dpg_base,$mid,$probe_depth);
      $shelf=hdr20_postcal_monotone_clamp($shelf) if($shelf);
-     last REFINE if(!$shelf);
+     next if(!$shelf); # this bracket keeps its ladder bracket; others may still refine
      my ($p_resp,$p_bound,$p_msg)=$bind_dpg->($shelf);
      if(!$p_bound) {
       $status->{"note"}=($status->{"note"}||"")." zone probe refinement X=$mid bind not real (".$p_msg."); refinement stopped; ";
@@ -4912,7 +4912,21 @@ sub run_hdr20_postcal_shadow_correction {
     }
    }
    if($refine_capped) {
-    log_line("HDR20 post-cal shadow zone probe: refinement cap of $refine_cap shelves reached; remaining shared brackets keep their ladder bracket");
+    # Name the shared brackets the cap left unrefined (wider than 4
+    # with more than one anchor); the lowest bracket was served first.
+    my %left;
+    for my $ai (keys %resolved) {
+     push @{$left{$bracket_lo{$ai}.":".$bracket_hi{$ai}}}, $ai;
+    }
+    my @unrefined;
+    for my $key (sort { (split(/:/,$a))[0] <=> (split(/:/,$b))[0] } keys %left) {
+     next if(scalar(@{$left{$key}}) < 2);
+     my ($lo,$hi)=split(/:/,$key);
+     next if($hi-$lo <= 4);
+     push @unrefined, ($lo+1)."..".$hi." (IRE ".join("/",map { $anchor_ire[$_] } sort { $a <=> $b } @{$left{$key}}).")";
+    }
+    log_line("HDR20 post-cal shadow zone probe: refinement cap of $refine_cap shelves reached; unrefined shared brackets: "
+     .(scalar(@unrefined) ? join(", ",@unrefined) : "none"));
    }
    $state->{"postcal_shadow_zone_probe_refine"}=join(",",@refine_shelves);
    $state->{"postcal_shadow_zone_probe_refine_capped"}=$refine_capped ? json_true() : json_false();
@@ -4976,18 +4990,23 @@ sub run_hdr20_postcal_shadow_correction {
   # Anchors whose zone estimate proved wrong for this panel (big count
   # move, no lift response) -- frozen by the dead-anchor guard below.
   my %dead_anchor;
-  # Pass-1 counts per anchor (the cumulative slope's first point), the
-  # per-anchor best pass so far (lift closest to the target) a frozen
-  # anchor is parked at, and the rejected-secant streak that has to
-  # reach 2 before an anchor is declared dead.
+  # Pass-1 counts per anchor (the cumulative slope's first point) and
+  # the per-anchor best pass so far (lift closest to the target) a
+  # frozen anchor is parked at.
   my %first_counts;
   my %anchor_best_counts;
   my %anchor_best_err;
-  my %dead_streak;
-  # Consecutive passes an anchor has been driven by its cumulative
-  # slope; capped at 2 so spillover from a neighbour cannot keep a
-  # dead anchor inflating indefinitely.
-  my %cum_streak;
+  # Hold-and-confirm state: an anchor whose secant was rejected after a
+  # >=25-count move is held at the same counts for one pass and re-read;
+  # hold_counts / hold_lifts keep the point before that move so the
+  # fresh read gives the drift over it. confirm_streak counts the
+  # consecutive confirm-driven updates (capped at 2, reset only by a
+  # secant-driven pass) so spillover from a neighbour cannot keep a dead
+  # anchor inflating indefinitely.
+  my %hold;
+  my %hold_counts;
+  my %hold_lifts;
+  my %confirm_streak;
 
   for(my $pass=1; $pass<=$max_passes; $pass++) {
    die "cancelled\n" if(cancelled());
@@ -5126,10 +5145,12 @@ sub run_hdr20_postcal_shadow_correction {
    #    seen at the 20% anchor on the C1);
    #  - the per-pass move is capped so one bad slope can't blow an
    #    anchor into deep overshoot;
-   #  - a rejected secant falls back to the anchor's cumulative slope
-   #    from its pass-1 point when that is usable (one noisy read can
-   #    flip a two-point secant on a slow anchor while the drift since
-   #    baseline still shows it responding).
+   #  - a secant rejected after a >=25-count move is either one noisy
+   #    read or a dead anchor: the anchor is held at the same counts for
+   #    one pass and re-read, and the drift over the held move then
+   #    either confirms a usable slope or parks the anchor at its best
+   #    pass (the G3 froze a live 10% anchor on one noisy read, and the
+   #    same anchor on the other job was flat over 197 counts).
    my %slope_for;
    my @valid_slopes;
    for my $idx (@anchor_idx) {
@@ -5146,6 +5167,19 @@ sub run_hdr20_postcal_shadow_correction {
     my @ss=sort { $a <=> $b } @valid_slopes;
     $median_slope=$ss[int(scalar(@ss)/2)];
    }
+   # Cumulative slope per anchor from its pass-1 point: the reference a
+   # confirm slope is judged against (median over the OTHER anchors
+   # that have one), so a neighbour's spillover alone cannot pass as
+   # the anchor's own response.
+   my %cum_slope_for;
+   for my $idx (@anchor_idx) {
+    next if(!defined($lift_for{$idx}) || !defined($first_counts{$idx}) || !defined($baseline_lifts{$idx}));
+    my $dc=$counts{$idx}-$first_counts{$idx};
+    next if(abs($dc) < 1);
+    my $s=($lift_for{$idx}-$baseline_lifts{$idx})/$dc;
+    next if($s >= -0.0002);
+    $cum_slope_for{$idx}=$s;
+   }
    my %slope_src;
    for(my $ai=0; $ai<scalar(@anchor_idx); $ai++) {
     my $idx=$anchor_idx[$ai];
@@ -5158,57 +5192,69 @@ sub run_hdr20_postcal_shadow_correction {
      next;
     }
     my $own_slope=$slope_for{$idx};
-    # Cumulative slope from the pass-1 point. Usable only when it is
-    # negative and at least 0.0002 in magnitude, at least half the
-    # peer median when one exists (a neighbour's spillover can drift a
-    # dead anchor's lift too), and this anchor has not already run on
-    # it for the last two passes.
-    my $cum_slope=undef;
-    if(defined($first_counts{$idx}) && defined($baseline_lifts{$idx}) && ($cum_streak{$idx}||0) < 2) {
-     my $dc=$counts{$idx}-$first_counts{$idx};
-     if(abs($dc) >= 1) {
-      my $s=($lift-$baseline_lifts{$idx})/$dc;
-      if($s <= -0.0002 && (!defined($median_slope) || abs($s) >= 0.5*abs($median_slope))) {
-       $cum_slope=$s;
-      }
+    my $slope=undef;
+    my $src="gain";
+    if($hold{$idx}) {
+     # Confirm pass: the anchor was held at the same counts after a
+     # rejected secant, so this fresh read gives the drift over the
+     # held move without the single read that rejected it. Usable when
+     # negative, at least 0.0002 in magnitude and at least half the
+     # median of the other anchors' cumulative slopes when they have
+     # one. Otherwise the anchor's zone estimate is wrong for this
+     # panel: declare it dead and park it at the counts of its best
+     # pass so far (lift closest to the target), not its last value,
+     # so the frozen anchor leaves no bump in the DPG (the first
+     # zone-table run pushed a dead 15% anchor to 101 counts with zero
+     # effect).
+     $hold{$idx}=0;
+     my $dc=$counts{$idx}-$hold_counts{$idx};
+     my $confirm=(abs($dc) >= 1) ? ($lift-$hold_lifts{$idx})/$dc : 0;
+     my @peer_cum=map { $cum_slope_for{$_} } grep { $_ != $idx && defined($cum_slope_for{$_}) } @anchor_idx;
+     my $peer_median=undef;
+     if(scalar(@peer_cum)) {
+      my @ss=sort { $a <=> $b } @peer_cum;
+      $peer_median=$ss[int(scalar(@ss)/2)];
      }
-    }
-    # Dead-anchor guard: an anchor whose zone estimate is wrong for
-    # this panel eats counts with no lift response, and the median-
-    # slope substitution must not keep inflating it (the first zone-
-    # table run pushed a dead 15% anchor to 101 counts with zero
-    # effect, leaving an orphan bump in the DPG). Declare it dead only
-    # after two consecutive passes with a rejected secant and no usable
-    # cumulative slope, each after a >=25-count move; a single noisy
-    # read must not freeze a slow but live anchor. A dead anchor is
-    # parked at the counts of its best pass so far, not its last value.
-    if(!defined($own_slope) && !defined($cum_slope)
-       && defined($prev_counts{$idx}) && defined($prev_lifts{$idx})
-       && abs($counts{$idx}-$prev_counts{$idx}) >= 25) {
-     $dead_streak{$idx}=($dead_streak{$idx}||0)+1;
-    } else {
-     $dead_streak{$idx}=0;
-    }
-    if(($dead_streak{$idx}||0) >= 2) {
-     $dead_anchor{$idx}=1;
-     $state->{"postcal_shadow_dead_anchor_".$idx}=json_true();
+     my $usable=($confirm <= -0.0002 && (!defined($peer_median) || abs($confirm) >= 0.5*abs($peer_median))) ? 1 : 0;
+     $usable=0 if(($confirm_streak{$idx}||0) >= 2);
+     if(!$usable) {
+      $dead_anchor{$idx}=1;
+      $state->{"postcal_shadow_dead_anchor_".$idx}=json_true();
+      $prev_counts{$idx}=$counts{$idx};
+      $prev_lifts{$idx}=$lift;
+      $counts{$idx}=defined($anchor_best_counts{$idx}) ? $anchor_best_counts{$idx}+0 : $counts{$idx};
+      $slope_src{$idx}="dead";
+      next;
+     }
+     $slope=$confirm;
+     $src="confirmed";
+     $confirm_streak{$idx}=($confirm_streak{$idx}||0)+1;
+    } elsif(defined($own_slope)) {
+     $slope=$own_slope;
+     $src="secant";
+     if(defined($median_slope) && abs($slope) < 0.5*abs($median_slope)) {
+      $slope=$median_slope;
+      $src="median";
+     }
+     $confirm_streak{$idx}=0 if($src eq "secant");
+    } elsif(defined($prev_counts{$idx}) && defined($prev_lifts{$idx})
+            && abs($counts{$idx}-$prev_counts{$idx}) >= 25) {
+     # Rejected secant after a big move: one noisy read or a dead
+     # anchor. Hold the counts for one pass and re-read instead of
+     # inflating the anchor on a substituted slope; the next pass
+     # confirms the slope or parks the anchor.
+     $hold{$idx}=1;
+     $hold_counts{$idx}=$prev_counts{$idx};
+     $hold_lifts{$idx}=$prev_lifts{$idx};
      $prev_counts{$idx}=$counts{$idx};
      $prev_lifts{$idx}=$lift;
-     $counts{$idx}=defined($anchor_best_counts{$idx}) ? $anchor_best_counts{$idx}+0 : $counts{$idx};
-     $slope_src{$idx}="dead";
+     $slope_src{$idx}="hold";
      next;
-    }
-    my $slope=$own_slope;
-    my $src=defined($slope) ? "secant" : "gain";
-    if(!defined($slope) && defined($cum_slope)) {
-     $slope=$cum_slope;
-     $src="cumulative";
-    } elsif(defined($median_slope) && (!defined($slope) || abs($slope) < 0.5*abs($median_slope))) {
+    } elsif(defined($median_slope)) {
      $slope=$median_slope;
      $src="median";
     }
     $slope_src{$idx}=$src;
-    $cum_streak{$idx}=($src eq "cumulative") ? ($cum_streak{$idx}||0)+1 : 0;
     my $next;
     if(defined($slope)) {
      $next=$counts{$idx} + ($target_lift-$lift)/$slope;
@@ -5234,6 +5280,7 @@ sub run_hdr20_postcal_shadow_correction {
    my $moved=0;
    for my $idx (@anchor_idx) {
     $moved=1 if(abs($counts{$idx}-$pass_counts{$idx}) >= 1);
+    $moved=1 if($hold{$idx}); # a held anchor still needs its confirm read
    }
    if(!$moved) {
     $status->{"note"}=($status->{"note"}||"")." early exit after pass $pass: no anchor counts changed; ";
