@@ -6142,6 +6142,7 @@ sub lg_picture_key_forbidden_on_ddc_only (@) {
  return ($key =~ /^(?:pictureMode|colorTemperature|whiteBalance.*)$/) ? 1 : 0;
 }
 
+my $LG_RESOLVE_LOGGED=0;
 # Phase 2 step 2: capability profile for a given generation_info hash. The
 # on-wire protocol is uniform across LG generations — only the parameters
 # differ — so consumers (Phase 3 reset + readback paths) can branch on a
@@ -6153,6 +6154,13 @@ sub lg_generation_profile (@) {
  my $ddc_only=$g->{"ddc_only_white_balance"} ? 1 : 0;
  my $resolved=eval { resolve_lg_capabilities($g) };
  $resolved={} if(ref($resolved) ne "HASH");
+ # Once per helper process: where the profile came from and what it cost,
+ # so a store that stopped serving (unwritable, wrong key) shows up in the
+ # diagnostic log instead of as a silent return to 2.5 s resolves.
+ if(!$LG_RESOLVE_LOGGED++) {
+  &diag_log_append("capabilities:resolve",{ source => $PGLGCapabilities::LAST_RESOLVE_SOURCE, seconds => sprintf("%.3f",$PGLGCapabilities::LAST_RESOLVE_SECONDS||0),
+   store => $PGLGCapabilities::LAST_RESOLVE_STORE, profile => $resolved->{"capability_profile_id"}||"" });
+ }
  my $data=(ref($resolved->{"data"}) eq "HASH") ? $resolved->{"data"} : {};
  my $runtime=(ref($data->{"runtime"}) eq "HASH") ? $data->{"runtime"} : {};
  my $calibration=(ref($data->{"calibration"}) eq "HASH") ? $data->{"calibration"} : {};

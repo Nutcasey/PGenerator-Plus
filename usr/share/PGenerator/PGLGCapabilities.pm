@@ -9,6 +9,7 @@ use File::Find ();
 use File::Path qw(make_path);
 use File::Spec ();
 use Fcntl qw(:flock);
+use Cwd ();
 use JSON::PP ();
 use Time::HiRes qw(time);
 
@@ -49,7 +50,14 @@ my %CACHE;
 # identity and the catalogue's file signature, so a catalogue edit or a new
 # deploy invalidates it without any bookkeeping.
 my %RESOLVED;
+# The signature each loaded library was read under: a long-lived process
+# (the runner mid-batch, a daemon thread between the deploy and the restart)
+# must never write a profile computed from a pre-deploy library under the
+# post-deploy signature.
+my %CACHE_SIGNATURE;
 our $LAST_RESOLVE_SOURCE='';
+our $LAST_RESOLVE_SECONDS=0;
+our $LAST_RESOLVE_STORE='';
 our $RESOLVED_CACHE_SCHEMA=1;
 our $RESOLVED_CACHE_KEEP_SECONDS=7*86400;
 
@@ -58,7 +66,16 @@ sub _default_root {
   || File::Spec->catdir(File::Basename::dirname(__FILE__),'tv');
 }
 
-sub clear_lg_capability_cache { %CACHE=(); %RESOLVED=(); return 1; }
+sub clear_lg_capability_cache { %CACHE=(); %CACHE_SIGNATURE=(); %RESOLVED=(); return 1; }
+
+# One spelling per library, so the helper (/usr/sbin/../share/...) and the
+# daemon (/usr/share/...) share memo keys and store entries.
+sub _canonical_root {
+ my ($root)=@_;
+ $root=_default_root() if(!defined($root) || $root eq '');
+ my $absolute=eval { Cwd::abs_path($root) };
+ return (defined($absolute) && $absolute ne '') ? $absolute : $root;
+}
 
 # Every file under the library root, and this module (the merge and match
 # rules live here, and a deploy that changes them must not keep serving
@@ -313,8 +330,9 @@ sub _builtin_conservative {
 
 sub load_lg_library {
  my ($root)=@_;
- $root=_default_root() if(!defined($root) || $root eq '');
+ $root=_canonical_root($root);
  return $CACHE{$root} if($CACHE{$root});
+ $CACHE_SIGNATURE{$root}=_library_signature($root);
  my @errors;
  my $sources_doc=_read_json(File::Spec->catfile($root,'sources.json'),\@errors);
  my $source_map=(ref($sources_doc) eq 'HASH' && ref($sources_doc->{'sources'}) eq 'HASH') ? $sources_doc->{'sources'} : {};
@@ -511,11 +529,13 @@ sub _expand_key_sets {
 
 sub resolve_lg_capabilities {
  my ($identity,%options)=@_;
- my $root=(defined($options{'root'}) && $options{'root'} ne '') ? $options{'root'} : _default_root();
+ my $started=time();
+ my $root=_canonical_root($options{'root'});
  my $normalized=_normalized_identity($identity);
  my $memo_key=join("\0",$root,_observation_root(%options),$JSON->encode($normalized));
  if(ref($RESOLVED{$memo_key}) eq 'HASH') {
   $LAST_RESOLVE_SOURCE='memo';
+  $LAST_RESOLVE_SECONDS=time()-$started;
   return $RESOLVED{$memo_key};
  }
  my $signature=_library_signature($root);
@@ -524,12 +544,17 @@ sub resolve_lg_capabilities {
  if(ref($cached) eq 'HASH') {
   $RESOLVED{$memo_key}=$cached;
   $LAST_RESOLVE_SOURCE='cache';
+  $LAST_RESOLVE_STORE='';
+  $LAST_RESOLVE_SECONDS=time()-$started;
   return $cached;
  }
+ # A library loaded under another signature is stale for this call.
+ delete $CACHE{$root} if($CACHE{$root} && ($CACHE_SIGNATURE{$root}||'') ne $signature);
  my $resolved=_compute_lg_capabilities($root,$normalized);
- _write_resolved_cache($cache_path,$signature,$resolved);
+ $LAST_RESOLVE_STORE=_write_resolved_cache($cache_path,$signature,$resolved) ? 'written' : 'not-written';
  $RESOLVED{$memo_key}=$resolved;
  $LAST_RESOLVE_SOURCE='computed';
+ $LAST_RESOLVE_SECONDS=time()-$started;
  return $resolved;
 }
 
@@ -653,7 +678,7 @@ sub lg_calibration_mode_contract {
  my $alternatives=join(', ',map {$_->{label}} sort {$a->{label} cmp $b->{label}} grep {$_->{offered}} @eligible) || 'a reviewed SDR, HDR10 or Dolby Vision calibration mode';
  return {allowed=>$allowed?JSON::PP::true:JSON::PP::false,signal_mode=>$signal,picture_mode=>$mode,
   allowed_modes=>[map {_mode_aliases($_)} @eligible],alternatives=>$alternatives,
-  catalogue=>[map {$rows->{$_}} sort keys %$rows],mode=>$record,
+  catalogue=>[map {_clone($rows->{$_})} sort keys %$rows],mode=>defined($record)?_clone($record):$record,
   message=>$allowed?'This mode is eligible for AutoCal; TV and settings support are checked before calibration.'
    :"No reviewed AutoCal calibration bank is available for this picture mode. Choose $alternatives, or turn AutoCal off and enable readings. The selected picture mode has not been changed.",
   capability_profile_hash=>$profile->{capability_profile_hash}};

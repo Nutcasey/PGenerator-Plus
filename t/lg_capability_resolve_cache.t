@@ -158,4 +158,49 @@ like(PGLGCapabilities::_library_signature($shipped),qr/(?:^|\n)PGLGCapabilities\
  is(scalar(@in_other),1,'and the profile is written to the second store');
 }
 
+# Touching the resolver module invalidates the store entry.
+{
+ my $module="$Bin/../usr/share/PGenerator/PGLGCapabilities.pm";
+ my @st=stat($module);
+ clear_lg_capability_cache();
+ resolve_lg_capabilities($g3,root=>$shipped);
+ clear_lg_capability_cache();
+ resolve_lg_capabilities($g3,root=>$shipped);
+ is($PGLGCapabilities::LAST_RESOLVE_SOURCE,'cache','served from the store before the module changes');
+ utime($st[8],$st[9]+2,$module) or die "utime: $!";
+ clear_lg_capability_cache();
+ resolve_lg_capabilities($g3,root=>$shipped);
+ is($PGLGCapabilities::LAST_RESOLVE_SOURCE,'computed','a changed module invalidates the store entry');
+ utime($st[8],$st[9],$module);
+}
+
+# A process holding a library loaded before a catalogue change never writes
+# a profile computed from it under the new signature.
+{
+ my $root=tempdir(CLEANUP=>1);
+ copy_tree($shipped,$root);
+ clear_lg_capability_cache();
+ resolve_lg_capabilities($g3,root=>$root);
+ is($PGLGCapabilities::LAST_RESOLVE_SOURCE,'computed','library loaded');
+ my $index="$root/lg/index.json";
+ open(my $fh,'>>',$index) or die $!; print {$fh} "\n"; close($fh);
+ my $before=resolve_lg_capabilities($c2,root=>$root);
+ is($PGLGCapabilities::LAST_RESOLVE_SOURCE,'computed','a new identity after the change is computed');
+ clear_lg_capability_cache();
+ my $fresh=resolve_lg_capabilities($c2,root=>$root);
+ is($PGLGCapabilities::LAST_RESOLVE_SOURCE,'cache','and the entry written for it is served to a fresh process');
+ is($fresh->{library_version},PGLGCapabilities::load_lg_library($root)->{version},'from a library reloaded under the new signature');
+}
+
+# The helper's and the daemon's spellings of the same root share one entry.
+{
+ clear_lg_capability_cache();
+ unlink($_) for cache_files();
+ resolve_lg_capabilities($g3,root=>$shipped);
+ clear_lg_capability_cache();
+ resolve_lg_capabilities($g3,root=>"$Bin/../usr/share/PGenerator/../PGenerator/tv");
+ is($PGLGCapabilities::LAST_RESOLVE_SOURCE,'cache','a differently spelt path to the same library hits the same entry');
+ is(scalar(cache_files()),1,'and writes no second entry');
+}
+
 done_testing();
