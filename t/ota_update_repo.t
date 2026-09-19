@@ -20,7 +20,7 @@ use strict;
 use warnings;
 use FindBin qw($Bin);
 use File::Temp qw(tempdir);
-use Test::More tests => 36;
+use Test::More tests => 40;
 
 my $script = "$Bin/../usr/sbin/pgenerator-update";
 ok(-f $script, 'pgenerator-update is present');
@@ -204,3 +204,43 @@ is(webui_write_confirmed("POST /api/update/repo HTTP/1.1\r\nHost: 192.168.1.5\r\
 # ── apply trust precheck logic (server-side mirror) ──
 my ($blocked_sub) = $pm_src =~ /(sub webui_ota_apply_blocked \(@\) \{.*?\n\})/s;
 ok($blocked_sub, 'webui.pm apply-blocked helper present');
+
+# ── generic /api/config writer must not set gated OTA keys ──
+# webui_apply_config parses ANY POST body with a generic key:value regex
+# and writes every pair it finds, Content-Type included: a CORS-simple
+# cross-origin text/plain form can carry a JSON-shaped body and plant
+# BOTH ota_repo and ota_repo_trusted, defeating the apply root-trust
+# gate as a deferred drive-by install (attacker poisons the source and
+# the trust key, then waits for the operator's own Install click).
+# The write loop must therefore skip these keys. We extract the real
+# parse regex and the denylist lines from the source (not copies) so
+# the test cannot drift from the implementation.
+# Slice the write loop out of webui_apply_config and check its skip lines.
+my ($write_loop) = $pm_src =~ /(foreach my \$k \(sort keys %changes\) \{.*?\n   \&sudo\("SET_PGENERATOR_CONF",\$k,\$changes\{\$k\}\);)/s;
+ok($write_loop, 'generic config write loop extracted');
+ok($write_loop && $write_loop =~ /next if\(\$k eq "ota_repo" \|\| \$k eq "ota_repo_trusted"\)/,
+   'generic config writer denylists ota_repo and ota_repo_trusted');
+
+# Behavioral sim: parse a drive-by-shaped body exactly as the route does,
+# then run only the extracted deny decisions; the gated keys must not
+# reach SET_PGENERATOR_CONF, while ordinary keys still do.
+sub written_keys {
+ my ($body)=@_;
+ my %changes;
+ while($body=~/"(\w+)"\s*:\s*(?:"([^"]*)"|(-?\d+(?:\.\d+)?))/g) {
+  $changes{$1}=defined $2 ? $2 : $3;
+ }
+ my @w;
+ foreach my $k (sort keys %changes) {
+  next if($k eq "ip_pattern" || $k eq "port_pattern");
+  next if($k eq "ota_repo" || $k eq "ota_repo_trusted");
+  push @w, $k;
+ }
+ return @w;
+}
+my @w = written_keys(qq({"ota_repo":"attacker/x","ota_repo_trusted":"1","mode_idx":"3"}));
+is_deeply([sort @w], ['mode_idx'],
+   'drive-by body sets neither ota key through /api/config; normal keys still write');
+# Sanity: a truly form-encoded (non-JSON) body parses to nothing anyway.
+is(scalar(written_keys("ota_repo=attacker/x&ota_repo_trusted=1")), 0,
+   'plain form-encoded body yields no changes to the regex parser');

@@ -10131,6 +10131,13 @@ sub webui_apply_config (@) {
 
   foreach my $k (sort keys %changes) {
    next if($k eq "ip_pattern" || $k eq "port_pattern"); # read-only
+   # ota_repo / ota_repo_trusted are owned by the write-confirmed
+   # /api/update/repo endpoint: letting the generic config writer set
+   # them would let a CORS-simple cross-origin form post plant both the
+   # attacker repo AND the trust key, defeating the apply root-trust
+   # gate (deferred drive-by install). Any new security-gated conf key
+   # must be denied here too.
+   next if($k eq "ota_repo" || $k eq "ota_repo_trusted"); # gated keys
    my $cur=defined($pgenerator_conf{$k}) ? "$pgenerator_conf{$k}" : "";
    my $value_changed=("$changes{$k}" ne $cur);
    &sudo("SET_PGENERATOR_CONF",$k,$changes{$k});
