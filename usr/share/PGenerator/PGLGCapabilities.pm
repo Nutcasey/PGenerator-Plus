@@ -550,9 +550,9 @@ sub resolve_lg_capabilities {
  if(ref($cached) eq 'HASH') {
   $RESOLVED{$memo_key}=$cached;
   $LAST_RESOLVE_SOURCE='cache';
-  $LAST_RESOLVE_STORE='';
+  $LAST_RESOLVE_STORE='read';
   $LAST_RESOLVE_SECONDS=time()-$started;
-  ($FIRST_RESOLVE_SOURCE,$FIRST_RESOLVE_SECONDS,$FIRST_RESOLVE_STORE)=('cache',$LAST_RESOLVE_SECONDS,'') if($first);
+  ($FIRST_RESOLVE_SOURCE,$FIRST_RESOLVE_SECONDS,$FIRST_RESOLVE_STORE)=('cache',$LAST_RESOLVE_SECONDS,'read') if($first);
   return $cached;
  }
  # A library loaded under another signature is stale for this call.
