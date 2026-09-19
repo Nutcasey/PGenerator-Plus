@@ -4851,41 +4851,46 @@ sub run_hdr20_postcal_shadow_correction {
    # piecewise profile cannot steer them separately). Bisect every
    # shared bracket with a prefix shelf at its midpoint, re-reading only
    # the anchors in that bracket, until each anchor has its own bracket
-   # or the bracket is 4 indices wide or narrower. At most 3 refinement
-   # shelves per ladder bracket.
+   # or the bracket is 4 indices wide or narrower. The cap is global:
+   # at most 3 refinement shelves per probe in total, so several shared
+   # brackets cannot multiply the bind and low-light read cost.
    my %bracket_hi=%resolved;
    my %shared;
    for my $ai (keys %resolved) {
     push @{$shared{$bracket_lo{$ai}.":".$bracket_hi{$ai}}}, $ai;
    }
+   my $refine_cap=3;
+   my $refine_capped=0;
    my @refine_shelves;
-   for my $key (sort { (split(/:/,$a))[0] <=> (split(/:/,$b))[0] } keys %shared) {
+   REFINE: for my $key (sort { (split(/:/,$a))[0] <=> (split(/:/,$b))[0] } keys %shared) {
     next if(scalar(@{$shared{$key}}) < 2);
     my ($g_lo,$g_hi)=split(/:/,$key);
     my @queue=([$g_lo+0,$g_hi+0,[ sort { $a <=> $b } @{$shared{$key}} ]]);
-    my $shelves=0;
     while(scalar(@queue)) {
      my $group=shift @queue;
      my ($lo,$hi,$members)=@{$group};
      next if(scalar(@{$members}) < 2 || $hi-$lo <= 4);
-     last if($shelves >= 3);
      my $mid=int(($lo+$hi)/2);
      next if($mid <= $lo || $mid >= $hi || $mid < 14);
+     if(scalar(@refine_shelves) >= $refine_cap) {
+      $refine_capped=1;
+      last REFINE;
+     }
      die "cancelled\n" if(cancelled());
      my $shelf=hdr20_postcal_prefix_shelf($dpg_base,$mid,$probe_depth);
      $shelf=hdr20_postcal_monotone_clamp($shelf) if($shelf);
-     last if(!$shelf);
+     last REFINE if(!$shelf);
      my ($p_resp,$p_bound,$p_msg)=$bind_dpg->($shelf);
      if(!$p_bound) {
       $status->{"note"}=($status->{"note"}||"")." zone probe refinement X=$mid bind not real (".$p_msg."); refinement stopped; ";
-      last;
+      last REFINE;
      }
-     $shelves++;
      push @refine_shelves, $mid;
      select(undef,undef,undef,$settle_ms/1000.0);
      my @below;
      my @above;
      for my $ai (@{$members}) {
+      die "cancelled\n" if(cancelled());
       my ($reading,$error)=read_step($config,$anchor_steps[$ai],$state);
       next if($error || !$reading);
       my $xyz=reading_xyz($reading);
@@ -4906,7 +4911,11 @@ sub run_hdr20_postcal_shadow_correction {
      push @queue, [$mid,$hi,\@above] if(scalar(@above) > 1);
     }
    }
+   if($refine_capped) {
+    log_line("HDR20 post-cal shadow zone probe: refinement cap of $refine_cap shelves reached; remaining shared brackets keep their ladder bracket");
+   }
    $state->{"postcal_shadow_zone_probe_refine"}=join(",",@refine_shelves);
+   $state->{"postcal_shadow_zone_probe_refine_capped"}=$refine_capped ? json_true() : json_false();
    # Assign zones: clamp the prior into the measured bracket; keep the
    # prior when the anchor never responded. Anchors still sharing a
    # bracket are spread evenly through it (one third and two thirds for
@@ -4931,6 +4940,7 @@ sub run_hdr20_postcal_shadow_correction {
      my $n=$share_count{$lo.":".$hi}||1;
      if($n > 1) {
       $zone=$lo+($hi-$lo)*($share_rank{$ai}+1)/($n+1);
+      $zone=$lo+1 if($zone < $lo+1);
       $probe_note.=$anchor_ire[$ai]."% shared bracket ".($lo+1)."..".$hi." ";
      } else {
       $zone=$lo+1 if($zone < $lo+1);
@@ -4947,6 +4957,7 @@ sub run_hdr20_postcal_shadow_correction {
    @anchor_idx=@probed_idx;
    log_line("HDR20 post-cal shadow zone probe: zones ".join("/",@anchor_idx)." for IRE ".join("/",@anchor_ire)
     .(scalar(@refine_shelves) ? " refinement shelves ".join("/",@refine_shelves) : "")
+    .($refine_capped ? " (refinement cap reached)" : "")
     .($probe_note ne "" ? " (".$probe_note.")" : ""));
    $status->{"zone_probe"}=join(",",@anchor_idx);
    # No base re-bind needed here: pass 1 below binds the all-zero-counts
@@ -4973,6 +4984,10 @@ sub run_hdr20_postcal_shadow_correction {
   my %anchor_best_counts;
   my %anchor_best_err;
   my %dead_streak;
+  # Consecutive passes an anchor has been driven by its cumulative
+  # slope; capped at 2 so spillover from a neighbour cannot keep a
+  # dead anchor inflating indefinitely.
+  my %cum_streak;
 
   for(my $pass=1; $pass<=$max_passes; $pass++) {
    die "cancelled\n" if(cancelled());
@@ -5143,12 +5158,19 @@ sub run_hdr20_postcal_shadow_correction {
      next;
     }
     my $own_slope=$slope_for{$idx};
+    # Cumulative slope from the pass-1 point. Usable only when it is
+    # negative and at least 0.0002 in magnitude, at least half the
+    # peer median when one exists (a neighbour's spillover can drift a
+    # dead anchor's lift too), and this anchor has not already run on
+    # it for the last two passes.
     my $cum_slope=undef;
-    if(defined($first_counts{$idx}) && defined($baseline_lifts{$idx})) {
+    if(defined($first_counts{$idx}) && defined($baseline_lifts{$idx}) && ($cum_streak{$idx}||0) < 2) {
      my $dc=$counts{$idx}-$first_counts{$idx};
      if(abs($dc) >= 1) {
       my $s=($lift-$baseline_lifts{$idx})/$dc;
-      $cum_slope=$s if($s <= -0.0002);
+      if($s <= -0.0002 && (!defined($median_slope) || abs($s) >= 0.5*abs($median_slope))) {
+       $cum_slope=$s;
+      }
      }
     }
     # Dead-anchor guard: an anchor whose zone estimate is wrong for
@@ -5186,6 +5208,7 @@ sub run_hdr20_postcal_shadow_correction {
      $src="median";
     }
     $slope_src{$idx}=$src;
+    $cum_streak{$idx}=($src eq "cumulative") ? ($cum_streak{$idx}||0)+1 : 0;
     my $next;
     if(defined($slope)) {
      $next=$counts{$idx} + ($target_lift-$lift)/$slope;
@@ -5270,7 +5293,10 @@ sub run_hdr20_postcal_shadow_correction {
  } or do {
   my $inner_err=$@ || "HDR20 post-cal shadow inner eval failed";
   $inner_err=~s/[\r\n]+/ /g;
-  die $inner_err if($inner_err =~ /^cancelled$/i); # let cancellation propagate
+  # Let cancellation propagate in its canonical form: the substitution
+  # above turned "cancelled\n" into "cancelled ", and the outer handlers
+  # match the bare word.
+  die "cancelled\n" if($inner_err =~ /^cancelled\s*$/i);
   # Any non-cancellation error: corrected stays at base DPG, record note,
   # still re-establish below.
   $status->{"status"}="error" if(($status->{"status"}||"") ne "skipped" && ($status->{"status"}||"") ne "self_gated" && ($status->{"status"}||"") ne "converged" && ($status->{"status"}||"") ne "best_effort" && ($status->{"status"}||"") ne "reverted");
@@ -5986,7 +6012,9 @@ eval {
   } or do {
    my $shadow_err=$@ || "HDR20 post-cal shadow correction failed";
    $shadow_err=~s/[\r\n]+/ /g;
-   die $shadow_err if($shadow_err =~ /^cancelled$/i);
+   # Canonical rethrow: the substitution above turned "cancelled\n" into
+   # "cancelled " and the outermost handler matches the bare word.
+   die "cancelled\n" if($shadow_err =~ /^cancelled\s*$/i);
    if(ref($state->{"hdr20_postcal_shadow"}) ne "HASH") { $state->{"hdr20_postcal_shadow"}={}; }
    $state->{"hdr20_postcal_shadow"}->{"status"}="error";
    $state->{"hdr20_postcal_shadow"}->{"note"}=($state->{"hdr20_postcal_shadow"}->{"note"}||"")." eval error: ".$shadow_err;

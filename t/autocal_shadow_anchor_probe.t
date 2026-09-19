@@ -42,7 +42,9 @@ sub panel_lift {
 }
 
 *main::write_state=sub { return 1; };
-*main::cancelled=sub { return 0; };
+*main::cancelled=sub {
+ return (defined($panel{cancel_at_binds}) && $panel{binds} >= $panel{cancel_at_binds}) ? 1 : 0;
+};
 *main::log_line=sub { push @{$panel{log}}, $_[0]; };
 *main::hdr20_postcal_save_matrix=sub { return 1; };
 *main::reading_xyz=sub { my ($reading)=@_; return [0,$reading->{Y},0]; };
@@ -55,6 +57,7 @@ sub panel_lift {
   }
   return { status=>"ok", cal_start_response=>{type=>"response"}, cal_end_response=>{type=>"response"} };
  }
+ $panel{reestablish}++ if($path eq "/api/lg/3d-lut/reset");
  return { status=>"ok" };
 };
 *main::read_step=sub {
@@ -72,8 +75,8 @@ sub panel_lift {
 sub run_panel {
  my (%opt)=@_;
  %panel=(
-  bound=>[ @base ], binds=>0, reads=>0, log=>[], peak=>800,
-  sens=>($opt{sens}||{}), noise=>$opt{noise},
+  bound=>[ @base ], binds=>0, reads=>0, reestablish=>0, log=>[], peak=>800,
+  sens=>($opt{sens}||{}), noise=>$opt{noise}, cancel_at_binds=>$opt{cancel_at_binds},
   baseline=>($opt{baseline}||{ %job1_baseline }),
  );
  my $config={
@@ -90,8 +93,15 @@ sub run_panel {
   %{$opt{config}||{}},
  };
  my $state={ signal_mode=>"hdr10" };
- my $status=main::run_hdr20_postcal_shadow_correction($config,$state,{});
- return ($status,$state);
+ my $status=eval { main::run_hdr20_postcal_shadow_correction($config,$state,{}) };
+ my $err=$@;
+ return ($status,$state,$err);
+}
+# Static zone scales that reproduce the stacked pre-fix zones
+# 26/51/53/70/95/116 when the probe is off.
+sub stacked_zone_scales {
+ my %zone=(5=>26,10=>51,15=>53,20=>70,25=>95,30=>116);
+ return join(",",map { sprintf("%d:%.5f",$_,$zone{$_}/($_/100*1023)) } @anchor_ire);
 }
 sub zones_of {
  my ($status)=@_;
@@ -151,21 +161,67 @@ sub pass_series {
 }
 
 # (3) One noisy read does not freeze a slow anchor. The 10% anchor
-# responds weakly (as on the G3), so a +0.03 read after a 60-count move
-# flips its two-point secant; the cumulative slope from pass 1 keeps it
-# alive and moving.
+# responds at 0.6x (slow, as on the G3), so a +0.15 read after a
+# 42-count move flips its two-point secant (the G3 read was about +0.09
+# against an expected -0.06). Its cumulative slope from pass 1 is still
+# well above half the peer median, so it drives the update and the
+# anchor keeps moving; the previous guard froze it on this pass.
 {
- my ($status,$state)=run_panel(sens=>{10=>0.09}, noise=>{pass=>3, ire=>10, delta=>0.03});
+ my ($status,$state)=run_panel(sens=>{10=>0.60}, noise=>{pass=>3, ire=>10, delta=>0.15});
  my %z=zones_of($status);
  my $idx=$z{10};
  diag("noisy run zones: ".$status->{zone_probe});
  diag("10% anchor by pass: ".pass_series($state,$idx,10));
+ cmp_ok($state->{postcal_shadow_pass_3_counts}{$idx}-$state->{postcal_shadow_pass_2_counts}{$idx}, '>=', 25, 'noisy pass follows a move of at least 25 counts');
  my $src3=(ref($state->{postcal_shadow_pass_3_slope_src}) eq "HASH") ? $state->{postcal_shadow_pass_3_slope_src}{$idx} : "";
  is($src3, 'cumulative', 'rejected secant on the noisy pass falls back to the cumulative slope');
  ok(!$state->{"postcal_shadow_dead_anchor_$idx"}, '10% anchor is not declared dead after one noisy read');
  cmp_ok($state->{postcal_shadow_pass_4_counts}{$idx}, '>', $state->{postcal_shadow_pass_3_counts}{$idx}, '10% anchor keeps moving after the noisy pass');
  my $src4=(ref($state->{postcal_shadow_pass_4_slope_src}) eq "HASH") ? $state->{postcal_shadow_pass_4_slope_src}{$idx} : "";
  isnt($src4, 'dead', '10% anchor is still live on the pass after the noise');
+ is($status->{status}, 'converged', 'noisy run still converges');
+ my $cum_run=0;
+ my $cum_max=0;
+ for(my $p=1;$p<=6;$p++) {
+  my $s=$state->{"postcal_shadow_pass_${p}_slope_src"};
+  last if(ref($s) ne "HASH");
+  $cum_run=(($s->{$idx}||"") eq "cumulative") ? $cum_run+1 : 0;
+  $cum_max=$cum_run if($cum_run > $cum_max);
+ }
+ cmp_ok($cum_max, '<=', 2, 'no anchor runs on the cumulative slope for more than two consecutive passes');
+}
+
+# (5) Stacked zones are clearly worse than probed ones. A stronger 10%
+# lift (1.70) makes the 10%/15% interaction bite: with the probe off and
+# the pre-fix zones 26/51/53/70/95/116 supplied as static scales, the
+# same loop cannot bring the 15% anchor inside tolerance.
+{
+ my %strong=(%job1_baseline, 10=>1.70);
+ my ($probed,$probed_state)=run_panel(baseline=>{ %strong });
+ my ($stacked,$stacked_state)=run_panel(baseline=>{ %strong }, config=>{
+  lg_autocal_hdr20_postcal_shadow_zone_probe=>0,
+  lg_autocal_hdr20_postcal_shadow_zone_scales=>stacked_zone_scales(),
+ });
+ my @stacked_zones=sort { $a <=> $b } keys %{$stacked_state->{postcal_shadow_pass_1_counts}};
+ diag(sprintf("strong 10%% lift: probed zones %s worst %.3f (%s); stacked zones %s worst %.3f (%s)",
+  $probed->{zone_probe},$probed->{best_worst},$probed->{status},join("/",@stacked_zones),$stacked->{best_worst},$stacked->{status}));
+ is(join("/",@stacked_zones), '26/51/53/70/95/116', 'static scales reproduce the stacked pre-fix zones');
+ is($probed->{status}, 'converged', 'probed zones converge with the stronger 10% lift');
+ cmp_ok($stacked->{best_worst}, '>', $stacked->{tolerance}, 'stacked zones stay outside tolerance');
+ cmp_ok($stacked->{best_worst}, '>', 2*$probed->{best_worst}, 'stacked zones give a clearly worse worst anchor');
+}
+
+# (6) Cancellation inside a refinement shelf propagates as "cancelled"
+# instead of being swallowed as an error, and the held session is not
+# re-established for a run that is aborting. The 7th single-socket bind
+# is the first refinement shelf, so the cancel is first seen by the
+# per-member check between its reads.
+{
+ my ($status,$state,$err)=run_panel(cancel_at_binds=>7);
+ is($err, "cancelled\n", 'cancel during a refinement read propagates as cancelled');
+ ok(!defined($status), 'cancelled run returns no status');
+ is($panel{reestablish}, 0, 'cancelled run does not re-establish the held session');
+ is($panel{binds}, 7, 'cancel was raised inside the first refinement shelf');
 }
 
 # (4) Early exit. No anchor responds and only 5/10/15 start lifted, so
