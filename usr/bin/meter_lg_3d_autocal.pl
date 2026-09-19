@@ -4992,9 +4992,10 @@ sub run_hdr20_postcal_shadow_correction {
   # >=25-count move is held at the same counts for one pass and re-read;
   # hold_counts / hold_lifts keep the point before that move so the
   # fresh read gives the drift over it. confirm_streak counts the
-  # consecutive confirm-driven updates (capped at 2, reset only by a
-  # secant-driven pass) so spillover from a neighbour cannot keep a dead
-  # anchor inflating indefinitely.
+  # confirm-driven updates since the last ordinary (secant, median or
+  # gain) pass; after two the anchor degrades to the median slope, so
+  # spillover from a neighbour cannot keep a dead anchor inflating
+  # indefinitely.
   my %hold;
   my %hold_counts;
   my %hold_lifts;
@@ -5208,7 +5209,6 @@ sub run_hdr20_postcal_shadow_correction {
       $peer_median=$ss[int(scalar(@ss)/2)];
      }
      my $usable=($confirm <= -0.0002 && (!defined($peer_median) || abs($confirm) >= 0.5*abs($peer_median))) ? 1 : 0;
-     $usable=0 if(($confirm_streak{$idx}||0) >= 2);
      if(!$usable) {
       $dead_anchor{$idx}=1;
       $state->{"postcal_shadow_dead_anchor_".$idx}=json_true();
@@ -5218,9 +5218,26 @@ sub run_hdr20_postcal_shadow_correction {
       $slope_src{$idx}="dead";
       next;
      }
-     $slope=$confirm;
-     $src="confirmed";
-     $confirm_streak{$idx}=($confirm_streak{$idx}||0)+1;
+     if(($confirm_streak{$idx}||0) >= 2) {
+      # Two confirm-driven updates without an ordinary pass between
+      # them: the anchor is live, but its own slope is not trusted any
+      # further. Degrade to the median-slope update, or sit this pass
+      # out when no peer has one; never declare it dead here.
+      if(defined($median_slope)) {
+       $slope=$median_slope;
+       $src="median";
+      } else {
+       $prev_counts{$idx}=$counts{$idx};
+       $prev_lifts{$idx}=$lift;
+       $slope_src{$idx}="wait";
+       $confirm_streak{$idx}=0;
+       next;
+      }
+     } else {
+      $slope=$confirm;
+      $src="confirmed";
+      $confirm_streak{$idx}=($confirm_streak{$idx}||0)+1;
+     }
     } elsif(defined($own_slope)) {
      $slope=$own_slope;
      $src="secant";
@@ -5228,7 +5245,6 @@ sub run_hdr20_postcal_shadow_correction {
       $slope=$median_slope;
       $src="median";
      }
-     $confirm_streak{$idx}=0 if($src eq "secant");
     } elsif(defined($prev_counts{$idx}) && defined($prev_lifts{$idx})
             && abs($counts{$idx}-$prev_counts{$idx}) >= 25) {
      # Rejected secant after a big move: one noisy read or a dead
@@ -5247,6 +5263,9 @@ sub run_hdr20_postcal_shadow_correction {
      $src="median";
     }
     $slope_src{$idx}=$src;
+    # Any ordinary update (secant, median or gain) ends a confirm
+    # streak; only a hold carries it into the next confirm.
+    $confirm_streak{$idx}=0 if($src ne "confirmed");
     my $next;
     if(defined($slope)) {
      $next=$counts{$idx} + ($target_lift-$lift)/$slope;
