@@ -4826,27 +4826,109 @@ sub run_hdr20_postcal_shadow_correction {
     }
     $lo_prev=$X;
    }
+   # Bracket refinement. One ladder shelf can crush two still-unresolved
+   # anchors at once (the G3 put 10% and 15% in one bracket on 18 and 19
+   # September 2026, which left them two indices apart where the
+   # piecewise profile cannot steer them separately). Bisect every
+   # shared bracket with a prefix shelf at its midpoint, re-reading only
+   # the anchors in that bracket, until each anchor has its own bracket
+   # or the bracket is 4 indices wide or narrower. At most 3 refinement
+   # shelves per ladder bracket.
+   my %bracket_hi=%resolved;
+   my %shared;
+   for my $ai (keys %resolved) {
+    push @{$shared{$bracket_lo{$ai}.":".$bracket_hi{$ai}}}, $ai;
+   }
+   my @refine_shelves;
+   for my $key (sort { (split(/:/,$a))[0] <=> (split(/:/,$b))[0] } keys %shared) {
+    next if(scalar(@{$shared{$key}}) < 2);
+    my ($g_lo,$g_hi)=split(/:/,$key);
+    my @queue=([$g_lo+0,$g_hi+0,[ sort { $a <=> $b } @{$shared{$key}} ]]);
+    my $shelves=0;
+    while(scalar(@queue)) {
+     my $group=shift @queue;
+     my ($lo,$hi,$members)=@{$group};
+     next if(scalar(@{$members}) < 2 || $hi-$lo <= 4);
+     last if($shelves >= 3);
+     my $mid=int(($lo+$hi)/2);
+     next if($mid <= $lo || $mid >= $hi || $mid < 14);
+     die "cancelled\n" if(cancelled());
+     my $shelf=hdr20_postcal_prefix_shelf($dpg_base,$mid,$probe_depth);
+     $shelf=hdr20_postcal_monotone_clamp($shelf) if($shelf);
+     last if(!$shelf);
+     my ($p_resp,$p_bound,$p_msg)=$bind_dpg->($shelf);
+     if(!$p_bound) {
+      $status->{"note"}=($status->{"note"}||"")." zone probe refinement X=$mid bind not real (".$p_msg."); refinement stopped; ";
+      last;
+     }
+     $shelves++;
+     push @refine_shelves, $mid;
+     select(undef,undef,undef,$settle_ms/1000.0);
+     my @below;
+     my @above;
+     for my $ai (@{$members}) {
+      my ($reading,$error)=read_step($config,$anchor_steps[$ai],$state);
+      next if($error || !$reading);
+      my $xyz=reading_xyz($reading);
+      my $y=(ref($xyz) eq "ARRAY") ? ($xyz->[1]+0) : 0;
+      next if($y <= 0);
+      if($y < 0.88*$probe_base_y{$ai}) {
+       $bracket_hi{$ai}=$mid;
+       push @below, $ai;
+      } else {
+       $bracket_lo{$ai}=$mid;
+       push @above, $ai;
+      }
+     }
+     log_line("HDR20 post-cal shadow zone probe: refinement shelf X=$mid in bracket ".($lo+1)."..".$hi.": "
+      .(scalar(@below) ? "IRE ".join("/",map { $anchor_ire[$_] } @below)." below" : "none below")
+      .", ".(scalar(@above) ? "IRE ".join("/",map { $anchor_ire[$_] } @above)." above" : "none above"));
+     push @queue, [$lo,$mid,\@below] if(scalar(@below) > 1);
+     push @queue, [$mid,$hi,\@above] if(scalar(@above) > 1);
+    }
+   }
+   $state->{"postcal_shadow_zone_probe_refine"}=join(",",@refine_shelves);
    # Assign zones: clamp the prior into the measured bracket; keep the
-   # prior when the anchor never responded. Enforce strictly ascending.
+   # prior when the anchor never responded. Anchors still sharing a
+   # bracket are spread evenly through it (one third and two thirds for
+   # a pair) instead of being clamped onto the same end. Consecutive
+   # anchors keep at least 4 indices between them, moving the higher
+   # IRE up, because closer anchors cannot be trimmed independently.
+   my %share_count;
+   my %share_rank;
+   for(my $ai=0; $ai<scalar(@anchor_idx); $ai++) {
+    next if(!exists($resolved{$ai}));
+    my $key=$bracket_lo{$ai}.":".$bracket_hi{$ai};
+    $share_rank{$ai}=$share_count{$key}||0;
+    $share_count{$key}=$share_rank{$ai}+1;
+   }
    my @probed_idx;
    my $probe_note="";
    for(my $ai=0; $ai<scalar(@anchor_idx); $ai++) {
     my $zone=$anchor_idx[$ai];
     if(exists($resolved{$ai})) {
-     my $lo=($bracket_lo{$ai}||13)+1;
-     my $hi=$resolved{$ai};
-     $zone=$lo if($zone < $lo);
-     $zone=$hi if($zone > $hi);
+     my $lo=(defined($bracket_lo{$ai}) ? $bracket_lo{$ai} : 13)+0;
+     my $hi=$bracket_hi{$ai}+0;
+     my $n=$share_count{$lo.":".$hi}||1;
+     if($n > 1) {
+      $zone=$lo+($hi-$lo)*($share_rank{$ai}+1)/($n+1);
+      $probe_note.=$anchor_ire[$ai]."% shared bracket ".($lo+1)."..".$hi." ";
+     } else {
+      $zone=$lo+1 if($zone < $lo+1);
+      $zone=$hi if($zone > $hi);
+     }
     } else {
      $probe_note.=$anchor_ire[$ai]."% unresolved(prior kept) ";
     }
     $zone=int($zone+0.5);
-    $zone=$probed_idx[-1]+2 if(scalar(@probed_idx) && $zone <= $probed_idx[-1]);
+    $zone=$probed_idx[-1]+4 if(scalar(@probed_idx) && $zone < $probed_idx[-1]+4);
     push @probed_idx, $zone;
     $state->{"postcal_shadow_zone_IRE_".$anchor_ire[$ai]}=$zone;
    }
    @anchor_idx=@probed_idx;
-   log_line("HDR20 post-cal shadow zone probe: zones ".join("/",@anchor_idx)." for IRE ".join("/",@anchor_ire).($probe_note ne "" ? " (".$probe_note.")" : ""));
+   log_line("HDR20 post-cal shadow zone probe: zones ".join("/",@anchor_idx)." for IRE ".join("/",@anchor_ire)
+    .(scalar(@refine_shelves) ? " refinement shelves ".join("/",@refine_shelves) : "")
+    .($probe_note ne "" ? " (".$probe_note.")" : ""));
    $status->{"zone_probe"}=join(",",@anchor_idx);
    # No base re-bind needed here: pass 1 below binds the all-zero-counts
    # candidate, which IS the base.
@@ -4864,6 +4946,14 @@ sub run_hdr20_postcal_shadow_correction {
   # Anchors whose zone estimate proved wrong for this panel (big count
   # move, no lift response) -- frozen by the dead-anchor guard below.
   my %dead_anchor;
+  # Pass-1 counts per anchor (the cumulative slope's first point), the
+  # per-anchor best pass so far (lift closest to the target) a frozen
+  # anchor is parked at, and the rejected-secant streak that has to
+  # reach 2 before an anchor is declared dead.
+  my %first_counts;
+  my %anchor_best_counts;
+  my %anchor_best_err;
+  my %dead_streak;
 
   for(my $pass=1; $pass<=$max_passes; $pass++) {
    die "cancelled\n" if(cancelled());
@@ -4883,6 +4973,9 @@ sub run_hdr20_postcal_shadow_correction {
    write_state($state);
    my ($cand_resp,$cand_bound,$cand_msg)=$bind_dpg->($candidate);
    $state->{"postcal_shadow_pass_".$pass."_counts"}={ %counts };
+   # Counts bound for this pass; the early exit below compares the
+   # updated counts against them.
+   my %pass_counts=%counts;
    if(!$cand_bound) {
     $status->{"note"}=($status->{"note"}||"")." pass $pass: bind not real (".$cand_msg."); ";
     last;
@@ -4924,6 +5017,17 @@ sub run_hdr20_postcal_shadow_correction {
    }
    $status->{"passes"}=$pass;
    $state->{"postcal_shadow_pass_".$pass."_worst"}=$worst;
+   # Per-anchor best pass: the counts whose lift came closest to the
+   # target. A frozen anchor is parked here rather than at its last
+   # (possibly overshooting) value.
+   foreach my $idx (@anchor_idx) {
+    next if(!defined($lift_for{$idx}));
+    my $err=abs($lift_for{$idx}-$target_lift);
+    if(!defined($anchor_best_err{$idx}) || $err < $anchor_best_err{$idx}) {
+     $anchor_best_err{$idx}=$err;
+     $anchor_best_counts{$idx}=$counts{$idx};
+    }
+   }
 
    # Track pass-1 lifts for the lift_before status field (the 5%
    # anchor is representative of the lifted shadow region).
@@ -4933,6 +5037,7 @@ sub run_hdr20_postcal_shadow_correction {
     $status->{"lift_before"}=$first_lift if(defined($first_lift));
     foreach my $idx (@anchor_idx) {
      $baseline_lifts{$idx}=$lift_for{$idx} if(defined($lift_for{$idx}));
+     $first_counts{$idx}=$counts{$idx};
     }
     # Self-gating: if pass 1 (counts=0 -> correction=base) is already
     # inside tol across all anchors, apply no correction. The 8-bit run
@@ -4986,7 +5091,11 @@ sub run_hdr20_postcal_shadow_correction {
    #    band; a 5x sensitivity cliff between neighbours is noise --
    #    seen at the 20% anchor on the C1);
    #  - the per-pass move is capped so one bad slope can't blow an
-   #    anchor into deep overshoot.
+   #    anchor into deep overshoot;
+   #  - a rejected secant falls back to the anchor's cumulative slope
+   #    from its pass-1 point when that is usable (one noisy read can
+   #    flip a two-point secant on a slow anchor while the drift since
+   #    baseline still shows it responding).
    my %slope_for;
    my @valid_slopes;
    for my $idx (@anchor_idx) {
@@ -5003,32 +5112,61 @@ sub run_hdr20_postcal_shadow_correction {
     my @ss=sort { $a <=> $b } @valid_slopes;
     $median_slope=$ss[int(scalar(@ss)/2)];
    }
+   my %slope_src;
    for(my $ai=0; $ai<scalar(@anchor_idx); $ai++) {
     my $idx=$anchor_idx[$ai];
     my $lift=$lift_for{$idx};
     next if(!defined($lift));
-    # Dead-anchor guard: if this anchor's counts already moved a lot
-    # and its lift barely responded (own measured slope rejected as
-    # near-flat over a >=25-count move), the anchor's zone estimate is
-    # wrong for this panel -- do NOT let the median-slope substitution
-    # keep inflating it (the first zone-table run pushed a dead 15%
-    # anchor to 101 counts with zero effect, leaving an orphan bump in
-    # the DPG). Freeze it at its current value instead.
-    my $own_slope=$slope_for{$idx};
-    if(!defined($own_slope) && defined($prev_counts{$idx}) && defined($prev_lifts{$idx})
-       && abs($counts{$idx}-$prev_counts{$idx}) >= 25) {
-     $dead_anchor{$idx}=($dead_anchor{$idx}||0)+1;
-    }
     if(($dead_anchor{$idx}||0) >= 1) {
+     $prev_counts{$idx}=$counts{$idx};
+     $prev_lifts{$idx}=$lift;
+     $slope_src{$idx}="dead";
+     next;
+    }
+    my $own_slope=$slope_for{$idx};
+    my $cum_slope=undef;
+    if(defined($first_counts{$idx}) && defined($baseline_lifts{$idx})) {
+     my $dc=$counts{$idx}-$first_counts{$idx};
+     if(abs($dc) >= 1) {
+      my $s=($lift-$baseline_lifts{$idx})/$dc;
+      $cum_slope=$s if($s <= -0.0002);
+     }
+    }
+    # Dead-anchor guard: an anchor whose zone estimate is wrong for
+    # this panel eats counts with no lift response, and the median-
+    # slope substitution must not keep inflating it (the first zone-
+    # table run pushed a dead 15% anchor to 101 counts with zero
+    # effect, leaving an orphan bump in the DPG). Declare it dead only
+    # after two consecutive passes with a rejected secant and no usable
+    # cumulative slope, each after a >=25-count move; a single noisy
+    # read must not freeze a slow but live anchor. A dead anchor is
+    # parked at the counts of its best pass so far, not its last value.
+    if(!defined($own_slope) && !defined($cum_slope)
+       && defined($prev_counts{$idx}) && defined($prev_lifts{$idx})
+       && abs($counts{$idx}-$prev_counts{$idx}) >= 25) {
+     $dead_streak{$idx}=($dead_streak{$idx}||0)+1;
+    } else {
+     $dead_streak{$idx}=0;
+    }
+    if(($dead_streak{$idx}||0) >= 2) {
+     $dead_anchor{$idx}=1;
      $state->{"postcal_shadow_dead_anchor_".$idx}=json_true();
      $prev_counts{$idx}=$counts{$idx};
      $prev_lifts{$idx}=$lift;
+     $counts{$idx}=defined($anchor_best_counts{$idx}) ? $anchor_best_counts{$idx}+0 : $counts{$idx};
+     $slope_src{$idx}="dead";
      next;
     }
     my $slope=$own_slope;
-    if(defined($median_slope) && (!defined($slope) || abs($slope) < 0.5*abs($median_slope))) {
+    my $src=defined($slope) ? "secant" : "gain";
+    if(!defined($slope) && defined($cum_slope)) {
+     $slope=$cum_slope;
+     $src="cumulative";
+    } elsif(defined($median_slope) && (!defined($slope) || abs($slope) < 0.5*abs($median_slope))) {
      $slope=$median_slope;
+     $src="median";
     }
+    $slope_src{$idx}=$src;
     my $next;
     if(defined($slope)) {
      $next=$counts{$idx} + ($target_lift-$lift)/$slope;
@@ -5046,6 +5184,19 @@ sub run_hdr20_postcal_shadow_correction {
     $prev_counts{$idx}=$counts{$idx};
     $prev_lifts{$idx}=$lift;
     $counts{$idx}=$next+0;
+   }
+   $state->{"postcal_shadow_pass_".$pass."_slope_src"}={ %slope_src };
+   # Early exit: when no anchor's counts changed by a whole count
+   # (every anchor frozen, floored or converged) another pass would
+   # only cost a bind and six low-light reads for the same result.
+   my $moved=0;
+   for my $idx (@anchor_idx) {
+    $moved=1 if(abs($counts{$idx}-$pass_counts{$idx}) >= 1);
+   }
+   if(!$moved) {
+    $status->{"note"}=($status->{"note"}||"")." early exit after pass $pass: no anchor counts changed; ";
+    log_line("HDR20 post-cal shadow correction: no anchor counts changed after pass $pass; stopping early");
+    last;
    }
   }
 
