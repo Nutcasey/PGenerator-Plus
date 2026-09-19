@@ -60,8 +60,10 @@ sub _default_root {
 
 sub clear_lg_capability_cache { %CACHE=(); %RESOLVED=(); return 1; }
 
-# Every file under the library root with its size and sub-second mtime. A
-# resolved profile is reused only while this is unchanged.
+# Every file under the library root, and this module (the merge and match
+# rules live here, and a deploy that changes them must not keep serving
+# profiles the previous release computed), with size and sub-second mtime.
+# A resolved profile is reused only while this is unchanged.
 sub _library_signature {
  my ($root)=@_;
  return '' if(!defined($root) || $root eq '' || !-d $root);
@@ -69,8 +71,11 @@ sub _library_signature {
  File::Find::find({no_chdir=>1,wanted=>sub {
   return if(!-f $_);
   my @st=Time::HiRes::stat($_);
+  return if(!@st);
   push(@rows,join(':',substr($_,length($root)),$st[7],$st[9]));
  }},$root);
+ my @self=Time::HiRes::stat(__FILE__);
+ push(@rows,join(':','PGLGCapabilities.pm',$self[7],$self[9])) if(@self);
  return join("\n",sort @rows);
 }
 
@@ -100,7 +105,10 @@ sub _write_resolved_cache {
  my $dir=File::Basename::dirname($path);
  eval { make_path($dir); 1 } if(!-d $dir);
  return 0 if(!-d $dir);
- my $tmp=$path.'.'.$$.'.tmp';
+ # The daemon resolves from several worker threads of one process; each
+ # writer needs its own temporary name before the atomic rename.
+ my $tid=$INC{'threads.pm'} ? threads->tid() : 0;
+ my $tmp=$path.'.'.$$.'.'.$tid.'.'.int(rand(1_000_000_000)).'.tmp';
  open(my $fh,'>',$tmp) or return 0;
  my $ok=print {$fh} $JSON->encode({schema_version=>$RESOLVED_CACHE_SCHEMA,signature=>$signature,written_at=>time(),profile=>$profile});
  $ok=close($fh) && $ok;
@@ -505,7 +513,7 @@ sub resolve_lg_capabilities {
  my ($identity,%options)=@_;
  my $root=(defined($options{'root'}) && $options{'root'} ne '') ? $options{'root'} : _default_root();
  my $normalized=_normalized_identity($identity);
- my $memo_key=join("\0",$root,$JSON->encode($normalized));
+ my $memo_key=join("\0",$root,_observation_root(%options),$JSON->encode($normalized));
  if(ref($RESOLVED{$memo_key}) eq 'HASH') {
   $LAST_RESOLVE_SOURCE='memo';
   return $RESOLVED{$memo_key};

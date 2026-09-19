@@ -142,4 +142,20 @@ SKIP: {
  ok(!-f $old,'an entry older than the keep window is removed when a new entry is written');
 }
 
+# The signature covers this module too, so a deploy that changes the merge
+# or match rules never serves a profile the previous release computed.
+like(PGLGCapabilities::_library_signature($shipped),qr/(?:^|\n)PGLGCapabilities\.pm:\d+:\d+/,'the resolver module is part of the signature');
+
+# The memo is per store as well as per root and identity.
+{
+ my $other=tempdir(CLEANUP=>1);
+ clear_lg_capability_cache();
+ resolve_lg_capabilities($g3,root=>$shipped);
+ local $ENV{PGENERATOR_LG_CAPABILITY_STORE}=$other;
+ resolve_lg_capabilities($g3,root=>$shipped);
+ is($PGLGCapabilities::LAST_RESOLVE_SOURCE,'computed','a different store is not served from the first store\'s memo');
+ my @in_other; find({no_chdir=>1,wanted=>sub { push(@in_other,$_) if(-f $_ && /\.json$/); }},$other);
+ is(scalar(@in_other),1,'and the profile is written to the second store');
+}
+
 done_testing();

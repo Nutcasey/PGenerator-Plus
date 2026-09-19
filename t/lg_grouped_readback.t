@@ -37,6 +37,10 @@ local *main::lg_authenticated_session=sub {{
  hello_info=>{deviceOSReleaseVersion=>'9.2.2',deviceUUID=>'grouped-g3'},
 }};
 local *main::websocket_close=sub {};
+# A confirmed context (active input and picture mode agree with the request)
+# is what lets a read observation count for the next readback's contracts.
+local *main::lg_current_input_info=sub {{current_input=>'hdmi1',current_input_checked=>1}};
+local *main::lg_current_picture_mode=sub {'hdrCinema'};
 
 my @requests;
 my $reply_all=sub {
@@ -97,6 +101,73 @@ my $reply_all=sub {
  my @singles=sort map { $_->{label} } grep { $_->{label} =~ /^get_picture_setting_/ } @requests;
  is_deeply(\@singles,[sort map { "get_picture_setting_$_" } @keys],'every key is read on its own after a refused grouped call');
  is($read->{picture_settings}{$_},"single-$_","$_ value comes from its single read") for @keys;
+}
+
+# pictureMode is grouped like any other key; the authoritative mode comes
+# from its own read (lg_current_picture_mode), which is unchanged.
+{
+ @requests=();
+ local *main::lg_request=$reply_all;
+ my $read=main::lg_picture_get_workflow('127.0.0.1','test-key',1,['brightness','pictureMode'],'hdrCinema','hdmi1',0,'hdr10',0,'picture');
+ is($read->{status},'ok','a read including pictureMode succeeds');
+ my @grouped=grep { $_->{label} eq 'get_picture_settings' } @requests;
+ is(scalar(@grouped),1,'one grouped call');
+ ok(grep({ $_ eq 'pictureMode' } @{$grouped[0]{payload}{keys}||[]}),'pictureMode is asked for in the grouped call');
+ ok(!grep({ $_->{label} eq 'get_picture_setting_pictureMode' } @requests),'and not read on its own');
+}
+
+# A grouped call refused for a key it names is retried once without it.
+{
+ @requests=();
+ my $refused=$individual[1];
+ local *main::lg_request=sub {
+  my ($session,$label,$path,$payload)=@_;
+  push(@requests,{label=>$label,path=>$path,payload=>$payload});
+  if($path eq 'settings/getSystemSettings' && grep { $_ eq $refused } @{$payload->{keys}||[]}) {
+   return {type=>'error',error=>"doesn't support the key: $refused"};
+  }
+  return {type=>'response',payload=>{settings=>{map { $_=>"value-$_" } @{$payload->{keys}||[]}}}}
+   if($path eq 'settings/getSystemSettings');
+  return {type=>'response',payload=>{}};
+ };
+ my $read=main::lg_picture_get_workflow('127.0.0.1','test-key',1,[@keys],'hdrCinema','hdmi1',0,'hdr10',0,'picture');
+ is($read->{status},'ok','a refusal naming one key still completes');
+ is_deeply([map { $_->{label} } grep { $_->{label} =~ /^get_picture_settings/ } @requests],['get_picture_settings','get_picture_settings_retry'],'the group is retried once');
+ my ($retry)=grep { $_->{label} eq 'get_picture_settings_retry' } @requests;
+ ok(!grep({ $_ eq $refused } @{$retry->{payload}{keys}||[]}),'the retry leaves out the refused key');
+ is_deeply([map { $_->{label} } grep { $_->{label} =~ /^get_picture_setting_/ } @requests],["get_picture_setting_$refused"],'only the refused key is read on its own');
+ is($read->{picture_settings}{brightness},'value-brightness','the other keys come from the retried group');
+ ok(exists($read->{unsupported_picture_keys}{$refused}) || exists($read->{picture_capabilities}{unsupported}{$refused}),'the refused key is reported unsupported');
+}
+
+# A key observed unsupported (in a confirmed context) stays out of the next
+# grouped call, so one unsupported key cannot put every readback back on
+# single reads.
+{
+ @requests=();
+ my $refused=$individual[1];
+ local *main::lg_request=sub {
+  my ($session,$label,$path,$payload)=@_;
+  push(@requests,{label=>$label,path=>$path,payload=>$payload});
+  if($path eq 'settings/getSystemSettings' && grep { $_ eq $refused } @{$payload->{keys}||[]}) {
+   return {type=>'error',error=>"doesn't support the key"};
+  }
+  return {type=>'response',payload=>{settings=>{map { $_=>"value-$_" } @{$payload->{keys}||[]}}}}
+   if($path eq 'settings/getSystemSettings');
+  return {type=>'response',payload=>{}};
+ };
+ my $first=main::lg_picture_get_workflow('127.0.0.1','test-key',1,[@keys],'hdrCinema','hdmi1',0,'hdr10',1,'picture');
+ is($first->{status},'ok','an unnamed refusal falls back to single reads and completes');
+ my @grouped=grep { $_->{label} eq 'get_picture_settings' } @requests;
+ ok(grep({ $_ eq $refused } @{$grouped[0]{payload}{keys}||[]}),'the first grouped call still asked for the key');
+ @requests=();
+ my $second=main::lg_picture_get_workflow('127.0.0.1','test-key',1,[@keys],'hdrCinema','hdmi1',0,'hdr10',1,'picture');
+ is($second->{status},'ok','the next read succeeds');
+ @grouped=grep { $_->{label} eq 'get_picture_settings' } @requests;
+ is(scalar(@grouped),1,'one grouped call');
+ ok(!grep({ $_ eq $refused } @{$grouped[0]{payload}{keys}||[]}),'the key observed unsupported is left out of the group');
+ is_deeply([map { $_->{label} } grep { $_->{label} =~ /^get_picture_setting_/ } @requests],["get_picture_setting_$refused"],'and is the only single read');
+ is($second->{picture_settings}{brightness},'value-brightness','the grouped keys are read together');
 }
 
 done_testing();

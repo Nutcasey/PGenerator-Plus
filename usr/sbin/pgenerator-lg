@@ -1489,8 +1489,16 @@ sub lg_picture_get_workflow (@) {
   # below still covers firmware that drops context-sensitive keys from a
   # grouped reply, and a grouped call that fails outright still falls back
   # to reading each key on its own.
-  my @bulk_keys=@{$keys_to_read};
-  my @individual_keys=();
+  # A key already observed unsupported in this context stays on its own
+  # read: the settings service refuses a whole grouped call that names one
+  # unsupported key, which would put every readback back on one round trip
+  # per key.
+  my @bulk_keys=grep {
+   my $contract=$setting_contracts->{$_}||{};
+   ($contract->{"read_state"}||"") !~ /unsupported/ && ($contract->{"read_decision"}||"") ne "blocked"
+  } @{$keys_to_read};
+  my %grouped=map { $_=>1 } @bulk_keys;
+  my @individual_keys=grep { !$grouped{$_} } @{$keys_to_read};
   my $response={};
   my %scope=($category eq "picture" && $requested_picture_mode ne "")
    ? (dimension=>{pictureMode=>$requested_picture_mode,($tv_input ne "" ? (input=>$tv_input,"_3dStatus"=>"2d") : ())}) : ();
@@ -1502,12 +1510,35 @@ sub lg_picture_get_workflow (@) {
     %scope,
    },$timeout);
    ($failed,$message)=&response_is_app_failure($response);
+   # A grouped call refused for a key it names is retried once without
+   # that key, which then takes the single read that records it as
+   # unsupported for the next readback.
+   if($failed && &lg_settings_error_is_unsupported_key($message)) {
+    my @refused=grep { my $key=$_; ($message||"") =~ /(?:^|[^A-Za-z0-9_])\Q$key\E(?:[^A-Za-z0-9_]|$)/ } @bulk_keys;
+    if(@refused && scalar(@refused) < scalar(@bulk_keys)) {
+     my %drop=map { $_=>1 } @refused;
+     my @retry=grep { !$drop{$_} } @bulk_keys;
+     &diag_log_append("picture_get:grouped-refused",{ ip => $ip, refused => \@refused, retry_keys => scalar(@retry), message => $message });
+     $response=&lg_request($session,"get_picture_settings_retry","settings/getSystemSettings",{
+      category => $category,
+      keys => \@retry,
+      %scope,
+     },$timeout);
+     ($failed,$message)=&response_is_app_failure($response);
+     push(@individual_keys,@refused);
+     @bulk_keys=@retry;
+    }
+   }
    if(!$failed && ref($response) eq "HASH" && ref($response->{"payload"}) eq "HASH" && ref($response->{"payload"}{"settings"}) eq "HASH") {
     %settings=%{$response->{"payload"}{"settings"}};
    }
    # LG firmware can return a successful grouped response while silently
-   # omitting context-sensitive keys. Retry every omission individually.
-   push(@individual_keys,grep { !exists($settings{$_}) } @bulk_keys);
+   # omitting context-sensitive keys. Retry every omission individually. A
+   # refused grouped call sends every key that way, which is the slow path
+   # this readback is meant to avoid, so both are recorded.
+   my @omitted=grep { !exists($settings{$_}) } @bulk_keys;
+   &diag_log_append("picture_get:grouped-fallback",{ ip => $ip, refused => $failed ? 1 : 0, message => $message, omitted => \@omitted, single_reads => scalar(@omitted)+scalar(@individual_keys) }) if(@omitted);
+   push(@individual_keys,@omitted);
   }
   my %individual_seen=();
   foreach my $key (grep { !$individual_seen{$_}++ } @individual_keys) {
