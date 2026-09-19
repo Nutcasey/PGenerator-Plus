@@ -3951,10 +3951,14 @@ async function meterGreyAdjustCurrentStepChannel(channel,deltaStep){
 			   capabilities:response.picture_capabilities||state.capabilities||null
 			  };
 			  if(window.lgStatusState){
-			   window.lgStatusState.calibrationMode=!!response.calibration_mode;
-			   if(response.calibration_picture_mode) window.lgStatusState.calibrationPictureMode=response.calibration_picture_mode;
+			  window.lgStatusState.calibrationMode=!!response.calibration_mode;
+			  if(response.calibration_picture_mode) window.lgStatusState.calibrationPictureMode=response.calibration_picture_mode;
 			  }
-		  return true;
+			  // The write changed what this patch measures: drop the step's
+			  // scatter history so the old-setting samples cannot skew the
+			  // empirical floor of the new setting (re-reads rebuild σ).
+			  if(typeof meterInvalidateStepNoise==='function') meterInvalidateStepNoise(targetStep);
+			  return true;
 	 }catch(e){
 	  meterLgGreyState={status:'error',picture:previousPicture,needsRepair:false,message:'Unable to reach the LG TV control API.'};
 	  toast('Unable to reach the LG TV control API.',true);
@@ -4265,6 +4269,9 @@ async function meterAutoCalWritePanelLight(key,value,omitPictureMode){
   return meterAutoCalWritePanelLight(key,value,true);
  }
  if(!r||r.status!=='ok') throw new Error((r&&(r.repair_hint||r.message))||'Unable to adjust display panel light.');
+ // Panel light is panel-wide: scatter for every step was taken under the
+ // old luminance.
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  const pic=r.picture_settings||{};
  const readback=Number(pic[key]);
  if(Number.isFinite(readback)){
@@ -5304,6 +5311,9 @@ async function meterAutoCalWriteClipControl(key,value,pictureMode){
   _timeoutMs:20000
  });
  if(!r||r.status!=='ok') throw new Error((r&&(r.repair_hint||r.message))||'Unable to adjust '+key);
+ // Clip controls are panel-wide: every step's scatter was taken under the
+ // old value. (meterAutoCalWritePanelLight shares this path's semantics.)
+ if(typeof meterLgTrimKeyAffectsPatch==='function'&&meterLgTrimKeyAffectsPatch(key)&&typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  const pic=r.picture_settings||{};
  const readback=Number(pic[key]);
  return Number.isFinite(readback)?readback:settings[key];
@@ -5540,6 +5550,9 @@ async function meterAutoCalResetDdc(){
  if(response.ddc_reset_verified!==true){
   throw new Error('LG picture mode reset did not verify against the TV 1D LUT readback.');
  }
+ // The baseline reset zeroed every WB offset: scatter from the previous
+ // session's curve describes a setting that no longer exists.
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  // SDR reference reset: after the DDC white-balance / 1D LUT baseline is
  // cleared, run the reference SDR workflow (gamma-disable CAL_START/CAL_END
  // + identity BT.709 3D LUT / 1D DPG / 3x3 matrix outside cal mode). This
@@ -15138,10 +15151,13 @@ function drawRGBChart(gs,allSteps,readingMap){
    // Name the band where it is widest (the leftmost plotted step sits toward
    // black): without this the shading reads as an unexplained watermark until
    // the operator hovers a point. Pill style matches the EOTF '0% =' label.
-   // Text names the mode's unit generically — per-point floors vary in
-   // empirical mode, so the exact number for a point lives in its tooltip.
+   // Text names the mode: flat mode shows the operator constant (it is the
+   // same for every point); empirical stays generic because per-point floors
+   // vary with σ and the exact number lives in each point's tooltip.
    const zp=zone[0];
-   const zText='noise floor';
+   const zText=(meterRgbBalanceNoiseFloorMode()==='empirical')
+    ? 'noise floor'
+    : '±'+meterFormatNoiseFloorValue(meterRgbBalanceNoiseFloor())+' L* noise';
    ctx.font='bold 9px sans-serif';
    const zW=ctx.measureText(zText).width;
    // Clamp keeps the whole pill inside the plot rect on both axes.

@@ -9974,13 +9974,6 @@ function meterRgbBalanceWithinNoise(chValue,gain,point){
 function meterRgbBalanceNoiseFloorApplies(){
  return meterRgbBalanceFormula()==='perceptual';
 }
-// The single definition of 'the annotation is live': the operator's floor,
-// or 0 when the selected formula does not use it. Every annotation site
-// (chart band, live bars, hover) gates on this or sits inside a Perceptual
-// branch, so the definition cannot drift between panels.
-function meterRgbBalanceActiveNoiseFloor(){
- return meterRgbBalanceNoiseFloorApplies()?meterRgbBalanceNoiseFloor():0;
-}
 // The single predicate 'the annotation is live on the panels right now':
 // Perceptual must be selected AND a floor source must be capable of
 // annotating. In empirical mode the flat field may legitimately be empty
@@ -14096,15 +14089,46 @@ function meterStepNoiseSigma(key){
   return (Number.isFinite(dom)&&dom>0)?dom:0;
  }catch(e){ return null; }
 }
+// Which generic picture-settings keys represent a change to what a patch
+// MEASURES (as opposed to picture plumbing like hdmiRange or calibration
+// mode). A change to one of these invalidates scatter for EVERY step (the
+// control is not per-step), so the whole history is wiped; firing on
+// plumbing keys would erase history those writes did not affect. Pure
+// predicate so the harness pins both halves.
+function meterLgTrimKeyAffectsPatch(key){
+ const k=String(key||'').toLowerCase();
+ return /whitebalance|brightness|contrast|colour temp|color temp/.test(k)&&!k.includes('hdmirange');
+}
+// Drop a step's scatter samples: the trim just changed what the patch
+// measures, so the old scatter describes a setting that no longer exists
+// and would inflate (or deflate) the floor for the NEW setting. Callers are
+// the manual white-balance write paths; after the write, fresh re-reads
+// rebuild σ around the current picture.
+function meterInvalidateStepNoise(step){
+ try{
+  const key=meterStepNoiseKey(step);
+  if(key) meterNoiseHistoryStore().delete(key);
+ }catch(e){}
+}
+// A generic (not per-step) control change — picture mode, brightness,
+// contrast — changes what EVERY patch measures, so all scatter history is
+// stale at once. Callers gate on meterLgTrimKeyAffectsPatch first.
+function meterInvalidateAllStepNoise(){
+ try{ meterNoiseHistoryStore().clear(); }catch(e){}
+}
 // The empirical floor in pre-gain L* points for a reading/step: k·σ of the
 // step's own balance scatter, capped at the control's 10-point maximum.
 // null (not a number) when there is not enough history — callers then fall
 // back to the flat operator floor, so a partially-measured series behaves
-// exactly like the old annotation instead of silently going blind.
+// exactly like the old annotation instead of silently going blind. σ==0 is
+// also null: a quantized colorimeter can repeat identical readings over two
+// distinct XYZ samples near black, and a 0-wide floor would blind the
+// annotation at exactly the points where the operator needs context —
+// the typed flat value is the safer default there.
 function meterEmpiricalNoiseFloorFor(stepOrReading){
  if(meterRgbBalanceNoiseFloorMode()!=='empirical') return null;
  const sigma=meterStepNoiseSigma(meterStepNoiseKey(stepOrReading));
- if(sigma==null) return null;
+ if(sigma==null||sigma===0) return null;
  return Math.min(10,METER_NOISE_HISTORY_K*sigma);
 }
 // Single definition of the EFFECTIVE pre-gain floor for one point:

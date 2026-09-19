@@ -41,7 +41,6 @@ const FN_NAMES = [
   'rgbBalance',
   'meterRgbBalancePlotKey',
   'meterRgbBalancePlotIdentity',
-  'meterRgbBalanceActiveNoiseFloor',
   'meterRgbBalanceNoiseFloor',
   'meterRgbBalanceNoiseFloorMode',
   'meterRgbBalanceNoiseFloorActive',
@@ -52,6 +51,9 @@ const FN_NAMES = [
   'meterRecordReadingNoise',
   'meterStepNoiseSigma',
   'meterEmpiricalNoiseFloorFor',
+  'meterInvalidateStepNoise',
+  'meterInvalidateAllStepNoise',
+  'meterLgTrimKeyAffectsPatch',
   'meterRgbBalanceEffectiveNoiseFloor',
   'meterRgbBalanceOffScaleDir',
   'meterRgbBalanceWithinNoise',
@@ -478,7 +480,6 @@ test('plot_key_identity', () => {
   const idFewer = S.meterRgbBalancePlotIdentity([{ ire: 0 }, { ire: 100 }], 'relative', 0.01, w1);
   assert(idA !== idFewer, 'a genuinely smaller distinct-IRE set differs');
   assert(S.meterRgbBalancePlotIdentity(gsA, 'relative', 0.01, null) !== idA, 'null whiteRef identity differs from a real one');
-  assert(typeof S.meterRgbBalanceActiveNoiseFloor === 'function', 'active-floor helper exists');
 });
 
 test('noise_floor_annotation', () => {
@@ -1099,6 +1100,46 @@ test('empirical_floor_from_repeat_scatter', () => {
   const store = S.meterNoiseHistoryStore();
   store.set('45%', { vals: [[0, 0, 0], [0.1, -0.1, 0]] });
   assert(S.meterStepNoiseSigma('45%') > 0, 'store is shared module state');
+
+  // Cap: k·sigma must never exceed the control's 10-point maximum, or
+  // 'within noise' would swallow the entire plot (review #22 item 3).
+  globalThis.__noiseMode = { value: 'empirical' };
+  globalThis.__noiseFloor = { value: '0.3' };
+  store.set('cap%', { vals: [[0, 0, 0], [10, 0, 0]] });
+  assert(S.meterStepNoiseSigma('cap%') > 5, 'cap fixture: k·sigma would exceed 10');
+  assertClose(S.meterEmpiricalNoiseFloorFor({ name: 'cap%' }), 10, 1e-12,
+    'empirical floor capped at 10 L*');
+
+  // sigma == 0 (quantized meter: identical balances over DISTINCT XYZ near
+  // black) is NOT a 0-wide floor — it falls back to the flat field
+  // (review #22 item 2).
+  store.set('zero%', { vals: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] });
+  assert(S.meterStepNoiseSigma('zero%') === 0, 'zero-scatter fixture');
+  assert(S.meterEmpiricalNoiseFloorFor({ name: 'zero%' }) === null,
+    'sigma 0 must not produce a 0-wide floor');
+  assertClose(S.meterRgbBalanceEffectiveNoiseFloor({ name: 'zero%' }), 0.3, 1e-9,
+    'sigma 0 point falls back to the flat floor');
+
+  // Trim invalidation: a WB write drops ONLY that step's scatter.
+  S.meterInvalidateStepNoise({ name: '45%' });
+  assert(S.meterStepNoiseSigma('45%') === null, 'trimmed step: history dropped');
+  assert(S.meterStepNoiseSigma('5%') !== null, 'other steps keep their history');
+
+  // Which generic control writes invalidate EVERYTHING (review #22 item 1):
+  // measurement-affecting keys yes, picture plumbing no.
+  assert(S.meterLgTrimKeyAffectsPatch('whiteBalanceRed') === true, 'WB offset invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('Colour Temp') === true, 'colour temp invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('brightness') === true, 'brightness invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('contrast') === true, 'contrast invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('hdmiRange') === false, 'hdmiRange keeps history');
+  assert(S.meterLgTrimKeyAffectsPatch('calibration_mode') === false, 'cal mode keeps history');
+  assert(S.meterLgTrimKeyAffectsPatch('') === false, 'empty key keeps history');
+
+  S.meterInvalidateAllStepNoise();
+  assert(S.meterStepNoiseSigma('5%') === null, 'panel-wide write wipes all scatter');
+
+  globalThis.__noiseMode = null;
+  globalThis.__noiseFloor = null;
 });
 
 test('empirical_mode_control_wiring', () => {
