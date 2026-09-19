@@ -11835,6 +11835,28 @@ function meterOnNoiseFloorModeChange(){
    if(last&&typeof updateLiveReading==='function') updateLiveReading(last);
   }
  }catch(e){}
+ try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
+}
+// Empirical mode on an empty scatter store behaves EXACTLY like flat mode
+// (every point falls back to the typed floor) — with no visible difference
+// until you hover each point. The row must answer "is Empirical doing
+// anything?" without hovering: 'N points measured', or a named repair when
+// nothing has scatter yet. Called on mode change, after each recorded
+// sample, and on both invalidation paths so the count can never lag the
+// store it describes.
+function meterUpdateNoiseFloorModeStatus(){
+ const el=document.getElementById('meterNoiseFloorModeStatus');
+ if(!el) return;
+ let text='';
+ try{
+  if(meterRgbBalanceNoiseFloorMode()==='empirical'){
+   let n=0;
+   meterNoiseHistoryStore().forEach(h=>{ if(h&&Array.isArray(h.vals)&&h.vals.length>=2) n++; });
+   text=n>0?('· '+n+(n===1?' point measured':' points measured')):'· no scatter yet — re-read patches';
+  }
+ }catch(e){}
+ el.textContent=text;
+ el.style.display=text?'':'none';
 }
 
 function meterOnRgbBalanceFormulaChange(){
@@ -13968,6 +13990,8 @@ function meterReplaceReadings(readings){
  // annotate the new one (the array replace, unlike per-step upserts, is
  // where a new measurement context begins).
  meterNoiseHistory=null;
+ // Series reset also empties the scatter store: refresh the row count.
+ try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
  return meterReadings;
 }
 
@@ -14070,6 +14094,8 @@ function meterRecordReadingNoise(reading,step){
   h.vals.push(sample);
   h.lastXYZ=xyz;
   if(h.vals.length>METER_NOISE_HISTORY_MAX) h.vals.shift();
+  // Keep the row's live 'N points measured' count honest as it grows.
+  try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
  }catch(e){}
 }
 function meterStepNoiseSigma(key){
@@ -14110,13 +14136,14 @@ function meterInvalidateStepNoise(step){
  try{
   const key=meterStepNoiseKey(step);
   if(key) meterNoiseHistoryStore().delete(key);
+  try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
  }catch(e){}
 }
 // A generic (not per-step) control change — picture mode, brightness,
 // contrast — changes what EVERY patch measures, so all scatter history is
 // stale at once. Callers gate on meterLgTrimKeyAffectsPatch first.
 function meterInvalidateAllStepNoise(){
- try{ meterNoiseHistoryStore().clear(); }catch(e){}
+ try{ meterNoiseHistoryStore().clear(); try{ meterUpdateNoiseFloorModeStatus(); }catch(e){} }catch(e){}
 }
 // The empirical floor in pre-gain L* points for a reading/step: k·σ of the
 // step's own balance scatter, capped at the control's 10-point maximum.

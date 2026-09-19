@@ -52,6 +52,7 @@ const FN_NAMES = [
   'meterStepNoiseSigma',
   'meterEmpiricalNoiseFloorFor',
   'meterNoiseFloorSourceNote',
+  'meterUpdateNoiseFloorModeStatus',
   'meterInvalidateStepNoise',
   'meterInvalidateAllStepNoise',
   'meterLgTrimKeyAffectsPatch',
@@ -172,6 +173,9 @@ const document = { getElementById: (id) => {
   }
   if (id === 'meterRgbBalanceNoiseFloorHint') {
     return (typeof globalThis.__noiseHint !== 'undefined' && globalThis.__noiseHint) || null;
+  }
+  if (id === 'meterNoiseFloorModeStatus') {
+    return (typeof globalThis.__modeStatus !== 'undefined' && globalThis.__modeStatus) || null;
   }
   return (typeof globalThis.__sel !== 'undefined' && globalThis.__sel) || null;
 } , querySelectorAll: (sel) => {
@@ -1186,6 +1190,33 @@ test('empirical_mode_control_wiring', () => {
   assert(S.meterRgbBalanceNoiseFloorAnnotationLive() === true, 'perceptual + empirical: live');
   globalThis.__noiseMode = null;
   assert(S.meterRgbBalanceNoiseFloorAnnotationLive() === false, 'perceptual + flat + empty: off');
+
+  // Row status: 'Empirical σ' selected on an empty scatter store behaves
+  // exactly like Flat — the row must SAY that instead of leaving the
+  // operator to hover every point.
+  const statusEl = { style: {}, textContent: 'x' };
+  globalThis.__modeStatus = statusEl;
+  globalThis.__noiseMode = { value: 'empirical' };
+  S.meterNoiseHistoryStore().clear();
+  S.meterUpdateNoiseFloorModeStatus();
+  assert(statusEl.textContent === '· no scatter yet — re-read patches', 'empty store names the repair');
+  assert(statusEl.style.display === '', 'empty-store hint is visible');
+  S.meterNoiseHistoryStore().set('a', { vals: [[0, 0, 0], [0.1, 0, 0]] });
+  S.meterUpdateNoiseFloorModeStatus();
+  assert(statusEl.textContent === '· 1 point measured', 'one point: singular count');
+  S.meterNoiseHistoryStore().set('b', { vals: [[0, 0, 0], [0, 0.1, 0], [0, 0, 0.1]] });
+  S.meterNoiseHistoryStore().set('c', { vals: [[0, 0, 0]] });
+  S.meterUpdateNoiseFloorModeStatus();
+  assert(statusEl.textContent === '· 2 points measured', 'counts only points with >=2 samples');
+  globalThis.__noiseMode = { value: 'flat' };
+  S.meterUpdateNoiseFloorModeStatus();
+  assert(statusEl.style.display === 'none', 'flat mode: status hidden');
+  // Markup must carry the element the updater writes to (id + aria-live).
+  const statusTag = /<span[^>]*id="meterNoiseFloorModeStatus"[^>]*aria-live="polite"[^>]*>/.exec(html);
+  assert(!!statusTag, 'status span exists in the mode row with aria-live');
+  globalThis.__noiseMode = null;
+  globalThis.__modeStatus = null;
+  S.meterNoiseHistoryStore().clear();
 });
 
 test('floor_formatter_prints_as_judged', () => {
