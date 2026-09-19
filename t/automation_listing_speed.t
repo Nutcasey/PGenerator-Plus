@@ -109,6 +109,21 @@ require "$Bin/../usr/share/PGenerator/lg.pm";
  }
  is(PGAutomation::read_json_file(PGAutomation::run_dir('run-01').'/listing-cache.json')->{version},$main::WEBUI_LISTING_CACHE_VERSION,'the trimmed summary replaces the old one on disk');
  cmp_ok(-s PGAutomation::run_dir('run-01').'/listing-cache.json','<',2000,'and is a fraction of its size');
+ # A first-format summary that does not hold a row is rebuilt from the manifest.
+ my $key3=main::webui_automation_listing_key(PGAutomation::run_dir('run-03').'/run.json');
+ PGAutomation::write_json_atomic(PGAutomation::run_dir('run-03').'/listing-cache.json',{key=>$key3,summary=>{%$old,id=>''}});
+ my $key4=main::webui_automation_listing_key(PGAutomation::run_dir('run-04').'/run.json');
+ PGAutomation::write_json_atomic(PGAutomation::run_dir('run-04').'/listing-cache.json',{key=>$key4,summary=>{%$old,id=>'run-04',failure=>'boom'}});
+ $reads=0;
+ {
+  local *main::webui_automation_read_run=sub {$reads++;$real->(@_)};
+  my %by_id=map {($_->{id}=>$_)} @{main::webui_automation_list_runs()};
+  is($reads,2,'a first-format summary without a run id, or with a failure that is not a record, is rebuilt from the manifest');
+  is_deeply($by_id{'run-03'},$list->[-3],'and lists the run as the manifest says');
+  is_deeply($by_id{'run-04'},$list->[-4],'for both');
+ }
+ ok(!defined(main::webui_automation_listing_upgrade({queue_name=>'No id'})),'no run id, no row');
+ ok(!defined(main::webui_automation_listing_upgrade({id=>'x',failure=>['not','a','record']})),'a failure that is not a record, no row');
 }
 
 # ---- P3: LG Calibration History list

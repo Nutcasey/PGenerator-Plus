@@ -13655,25 +13655,34 @@ sub webui_automation_activity (@) {
  return $feed->(\@entries,$truncated,$log_end);
 }
 
-# A revision of the saved startup check as the page reads it: every
-# top-level scalar, and of each check, job, issue and event its state and
-# words, so a rewrite that keeps the counts still changes it. update_age is
-# derived per request and stays out; elapsed_seconds is in, so a check still
-# running is resent.
+# A revision of the saved startup check as the page reads it: every value in
+# the block, however deep, walked in key order, except what is derived per
+# request (update_age, and elapsed_seconds, which the page advances itself
+# from the poll the block arrived in) and the revision. Walking the decoded
+# block costs a few milliseconds; encoding it again would cost the poll most
+# of what the revision saves.
+sub webui_automation_rev_walk (@) {
+ my ($value,$out)=@_;
+ if(ref($value) eq "HASH") {
+  push @$out,"{";
+  foreach my $key (sort keys %$value) { push @$out,$key; &webui_automation_rev_walk($value->{$key},$out); }
+  push @$out,"}";
+ } elsif(ref($value) eq "ARRAY") {
+  push @$out,"[";
+  &webui_automation_rev_walk($_,$out) foreach @$value;
+  push @$out,"]";
+ } else {
+  push @$out,defined($value) ? "=$value" : "~";
+ }
+}
 sub webui_automation_preflight_rev (@) {
  my ($state)=@_;
  return "" if(ref($state) ne "HASH");
  my @parts;
  foreach my $key (sort keys %$state) {
-  next if($key eq "update_age" || $key eq "rev");
-  my $value=$state->{$key};
-  if(ref($value) eq "ARRAY") {
-   push @parts,"$key=[".join("\x1e",scalar(@$value),map { ref($_) eq "HASH" ? join("/",map { defined($_) ? $_ : "" } @{$_}{qw(status ok level name message item_number)}) : (defined($_) && !ref($_) ? $_ : "") } @$value)."]";
-  } elsif(ref($value) eq "HASH") {
-   push @parts,"$key={".scalar(keys %$value)."}";
-  } else {
-   push @parts,"$key=".(defined($value) ? "$value" : "");
-  }
+  next if($key eq "update_age" || $key eq "elapsed_seconds" || $key eq "rev");
+  push @parts,$key;
+  &webui_automation_rev_walk($state->{$key},\@parts);
  }
  my $text=join("\x1f",@parts);
  utf8::encode($text);
@@ -13949,14 +13958,27 @@ sub webui_automation_job_detail (@) {
   my $manifest=&webui_automation_read_run_cached($id);
   $record=ref($manifest) eq "HASH" && ref($manifest->{items}[$index]) eq "HASH" ? $manifest->{items}[$index] : {};
  }
+ # The record supplies the recipe; the job's state comes from the live view's
+ # compact item, republished on every manifest write and heartbeat. The
+ # runner claims a job in the manifest first and writes its record only
+ # after the signal and mode switch, so for that window the record still
+ # says queued (or interrupted, for a resumed job) while the run is running.
+ my $live_item=ref($run->{items}[$index]) eq "HASH" ? $run->{items}[$index] : {};
+ foreach my $key (qw(status failure warnings checkpoints checkpoint checkpoint_status readiness)) {
+  if(exists($live_item->{$key})) { $record->{$key}=$live_item->{$key}; } else { delete $record->{$key}; }
+ }
  # Both reads are this worker's own copies, so the view is built by selecting
  # from the record: a JSON round trip of the whole 92 KB item before dropping
  # 86 KB of it cost 37 ms per poll on a desktop.
  my $item=&webui_automation_job_view_item($record);
  # The note the view shows for an apply-to-all-inputs write that could not be
- # confirmed reads the outcome; the rest of the record is a capability profile.
- my $apply=PGAutomation::read_json_cached("$dir/apply-all.json");
- $item->{"apply-all"}={map { exists($apply->{$_}) ? ($_=>$apply->{$_}) : () } qw(outcome confirmed confirmation_unavailable message)} if(ref($apply) eq "HASH");
+ # confirmed reads the outcome; the rest of the record is a capability
+ # profile. The record outlives a Resume that drops the apply-all-done
+ # checkpoint, so it is shown only while that checkpoint stands.
+ if(grep { ref($_) eq "HASH" && ($_->{name}||"") eq "apply-all-done" } @{$item->{checkpoints}||[]}) {
+  my $apply=PGAutomation::read_json_cached("$dir/apply-all.json");
+  $item->{"apply-all"}={map { exists($apply->{$_}) ? ($_=>$apply->{$_}) : () } qw(outcome confirmed confirmation_unavailable message)} if(ref($apply) eq "HASH");
+ }
  # 18 Sep 2026: with the manifest cached, this call still cost 2.2-2.5 s on
  # the G3 per poll: 106 KB of settings checks decoded line by line and up to
  # 313 KB of series and calibration snapshots decoded from disk every time.
@@ -14041,8 +14063,13 @@ sub webui_automation_listing_run (@) {
 our $WEBUI_LISTING_CACHE_VERSION=3;
 sub webui_automation_listing_upgrade (@) {
  my ($old)=@_;
- return undef if(ref($old) ne "HASH");
- return {map { ($_=>$old->{$_}) } grep { exists($old->{$_}) } @WEBUI_LISTING_ROW_KEYS};
+ # Anything short of a row (no run id, a failure that is not a record) is
+ # rebuilt from the manifest instead.
+ return undef if(ref($old) ne "HASH" || !defined($old->{id}) || ref($old->{id}) || $old->{id} eq "");
+ return undef if(defined($old->{failure}) && ref($old->{failure}) ne "HASH");
+ my %row=map { ($_=>$old->{$_}) } grep { exists($old->{$_}) } @WEBUI_LISTING_ROW_KEYS;
+ $row{failure}={map { exists($old->{failure}{$_}) ? ($_=>$old->{failure}{$_}) : () } qw(stage message error_code)} if(ref($old->{failure}) eq "HASH");
+ return \%row;
 }
 
 # The History list used to decode every run manifest (52 runs, up to 0.5 MB
@@ -14083,14 +14110,15 @@ sub webui_automation_list_runs (@) {
    push @runs,$cached->{summary};
    next;
   }
+  # A summary in any other format for this same manifest holds every row
+  # field (the row keys are a subset of every shape written so far). Trim
+  # it in place rather than decode the manifest again: 72 of them on the
+  # appliance would take minutes. One that does not hold a row is rebuilt
+  # from the manifest.
   my $summary;
-  if(ref($cached) eq "HASH" && ($cached->{version}||0) != $WEBUI_LISTING_CACHE_VERSION && ($cached->{key}||"") eq $key && ref($cached->{summary}) eq "HASH") {
-   # A summary in any other format for this same manifest holds every row
-   # field (the row keys are a subset of every shape written so far). Trim
-   # it in place rather than decode the manifest again: 72 of them on the
-   # appliance would take minutes.
-   $summary=&webui_automation_listing_upgrade($cached->{summary});
-  } else {
+  $summary=&webui_automation_listing_upgrade($cached->{summary})
+   if(ref($cached) eq "HASH" && ($cached->{version}||0) != $WEBUI_LISTING_CACHE_VERSION && ($cached->{key}||"") eq $key && ref($cached->{summary}) eq "HASH");
+  if(ref($summary) ne "HASH") {
    my $run=&webui_automation_read_run($id);
    next if(ref($run) ne "HASH");
    $summary=&webui_automation_listing_run($run);

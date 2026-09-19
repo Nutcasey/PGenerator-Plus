@@ -113,7 +113,12 @@ my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],
  is_deeply($detail->{item}{checkpoints}[0],{name=>'cp1',status=>'done',verified=>1,completed_at=>1001,duration_seconds=>5},'checkpoints keep their name, state and times, not their evidence');
  is(scalar(@{$detail->{item}{checkpoints}}),12,'and all of them');
  is_deeply($detail->{item}{readiness},{passed=>3,checks=>[]},'readiness keeps the count of passing checks; the failing ones travel once, as readiness issues');
- is_deeply(main::webui_automation_job_detail($id,1)->{item}{readiness},{passed=>3,checks=>[{ok=>0,level=>'warning',message=>'look'}]},'a job that failed its own readiness stage keeps its failing checks, the one case the view reads them from the item');
+ # The finished run is now served from its materialised live view, whose
+ # readiness holds only the failing checks: the passed count no longer adds
+ # the ok checks the manifest still lists. Nothing on the page reads it.
+ my $failed_readiness=main::webui_automation_job_detail($id,1)->{item}{readiness};
+ is_deeply($failed_readiness->{checks},[{ok=>0,level=>'warning',message=>'look'}],'a job that failed its own readiness stage keeps its failing checks, the one case the view reads them from the item');
+ like($failed_readiness->{passed},qr/^\d+$/,'with a count of passing checks');
  is(scalar(@{$detail->{checks}}),300,'every check row is kept: the view lists and counts them all');
  is_deeply([sort keys %{$detail->{checks}[0]}],[qw(category checkpoint error_code expected key observed reason result timestamp verified)],'each row is trimmed to what the view reads');
  my %snap=map {($_->{phase}.'/'.$_->{key}=>$_->{snapshot})} @{$detail->{snapshots}};
@@ -167,10 +172,14 @@ my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],
 {
  my $id='job-record';my $rdir=PGAutomation::run_dir($id);
  my @jobs=map {{name=>"Job $_",status=>$_==0?'running':'queued',signal_format=>'sdr',settings=>{brightness=>50},padding=>'p'x40000}} 0..10;
- my $manifest={id=>$id,token=>'rec',status=>'running',active_item=>0,active_stage=>'tv-setup-verified',stage_started_at=>time(),items=>\@jobs,readiness=>{checks=>[{item_number=>0,ok=>0,message=>'Look at job 1'}]}};
- PGAutomation::write_json_atomic("$rdir/run.json",$manifest);
+ # The records are written before the runner claims job 3: the claim, its
+ # checkpoints and the apply-to-all outcome reach the manifest only.
  for my $n (0..10) { PGAutomation::write_json_atomic(PGAutomation::item_dir($id,$n).'/item.json',{%{$jobs[$n]},name=>"Record $n"}); }
- PGAutomation::write_json_atomic(PGAutomation::item_dir($id,3).'/apply-all.json',{outcome=>'sent-unconfirmed',confirmation_unavailable=>JSON::PP::true(),confirmed=>JSON::PP::false(),message=>'Confirmation unavailable',generation_profile=>{big=>'g'x40000}});
+ $jobs[3]={%{$jobs[3]},status=>'running',checkpoint=>'item-started',checkpoint_status=>'done',checkpoints=>[{name=>'item-started',status=>'done',completed_at=>1,evidence=>{e=>'x'x100}},{name=>'apply-all-done',status=>'done',completed_at=>2}]};
+ my $apply_all={outcome=>'sent-unconfirmed',confirmation_unavailable=>JSON::PP::true(),confirmed=>JSON::PP::false(),message=>'Confirmation unavailable',generation_profile=>{big=>'g'x40000}};
+ PGAutomation::write_json_atomic(PGAutomation::item_dir($id,$_).'/apply-all.json',$apply_all) for 3,4;
+ my $manifest={id=>$id,token=>'rec',status=>'running',active_item=>3,active_stage=>'tv-setup-verified',stage_started_at=>time(),items=>\@jobs,readiness=>{checks=>[{item_number=>0,ok=>0,message=>'Look at job 1'}]}};
+ PGAutomation::write_json_atomic("$rdir/run.json",$manifest);
  PGAutomation::write_json_atomic("$rdir/status.json",PGAutomation::compact_run($manifest));
  local $PGAutomation::JSON_CACHE_MAX_BYTES=(-s "$rdir/run.json")-1;
  my %reads;my $real_read=\&PGAutomation::read_json_file;
@@ -179,7 +188,11 @@ my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],
  my $detail=main::webui_automation_job_detail($id,3);
  is($detail->{item}{name},'Record 3','the job comes from its own record');
  is($detail->{run_status},'running','and the run state from the live view');
+ is($detail->{item}{status},'running','as does the job\'s state: a claim the runner wrote to the manifest only, while the record still says queued');
+ is($detail->{item}{checkpoint},'item-started','with its checkpoint');
+ is_deeply($detail->{item}{checkpoints},[{name=>'item-started',status=>'done',completed_at=>1},{name=>'apply-all-done',status=>'done',completed_at=>2}],'and its checkpoint list, compacted');
  is_deeply($detail->{item}{'apply-all'},{outcome=>'sent-unconfirmed',confirmation_unavailable=>JSON::PP::true(),confirmed=>JSON::PP::false(),message=>'Confirmation unavailable'},'the apply-to-all outcome reaches the view without its capability profile');
+ ok(!exists main::webui_automation_job_detail($id,4)->{item}{'apply-all'},'an outcome left by an earlier attempt, with no apply-all-done checkpoint standing, is not shown');
  is_deeply([map {$_->{message}} @{main::webui_automation_job_detail($id,0)->{readiness_issues}}],['Look at job 1'],'run-level readiness issues still reach the job from the live view');
  %reads=();
  main::webui_automation_job_detail($id,3);

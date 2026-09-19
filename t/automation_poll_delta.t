@@ -72,16 +72,30 @@ ok(ref($changed->{preflight}) eq 'HASH' && !$changed->{preflight_unchanged},'a r
 isnt($changed->{preflight}{rev},$first->{preflight}{rev},'with a new revision');
 ok($changed->{activity}{partial},'while the activity feed stays partial');
 
-# A check still running is resent: the card shows its elapsed time.
+# A check still running is not resent for its elapsed time alone: the page
+# advances that itself from the poll the block arrived in. Its progress
+# writes resend it.
 $preflight->{status}='checking';delete $preflight->{completed_at};$preflight->{started_at}=Time::HiRes::time()-0.9;$preflight->{updated_at}=time();
 PGAutomation::write_json_atomic("$store/preflight.json",$preflight);
 my $running=$poll->();
+is($running->{preflight}{elapsed_seconds},0,'the elapsed time is served with the check');
 Time::HiRes::sleep(0.25);
-ok(!$poll->('preflight_rev='.$running->{preflight}{rev})->{preflight_unchanged},'a check still running is resent as its elapsed time moves');
+ok($poll->('preflight_rev='.$running->{preflight}{rev})->{preflight_unchanged},'a check still running is unchanged while only its elapsed time moves');
+push @{$preflight->{checks}},{ok=>1,message=>'One more'};$preflight->{updated_at}=Time::HiRes::time();
+PGAutomation::write_json_atomic("$store/preflight.json",$preflight);
+ok(!$poll->('preflight_rev='.$running->{preflight}{rev})->{preflight_unchanged},'and resent when a check is added');
+pop @{$preflight->{checks}};
 $preflight->{status}='started';$preflight->{completed_at}=$preflight->{updated_at}=time();
 PGAutomation::write_json_atomic("$store/preflight.json",$preflight);
 my $settled=$poll->();
 ok($poll->('preflight_rev='.$settled->{preflight}{rev})->{preflight_unchanged},'a finished check is unchanged from one poll to the next');
+# Every value the page reads is in the revision, however deep.
+my $base=main::webui_automation_preflight_rev($settled->{preflight});
+is($base,$settled->{preflight}{rev},'the served revision is the one computed from the block');
+{ my $copy=PGAutomation::clone($settled->{preflight});$copy->{issues}[0]{stage}='job-readiness';isnt(main::webui_automation_preflight_rev($copy),$base,'a changed issue stage changes the revision'); }
+{ my $copy=PGAutomation::clone($settled->{preflight});$copy->{checks}[0]{signal_format}='hdr10';isnt(main::webui_automation_preflight_rev($copy),$base,'a changed check signal format changes the revision'); }
+{ my $copy=PGAutomation::clone($settled->{preflight});$copy->{items}[0]{status}='checked-limited';isnt(main::webui_automation_preflight_rev($copy),$base,'a changed job state changes the revision'); }
+{ my $copy=PGAutomation::clone($settled->{preflight});$copy->{update_age}=999;$copy->{elapsed_seconds}=999;delete $copy->{rev};is(main::webui_automation_preflight_rev($copy),$base,'the per-request fields do not'); }
 
 # A different run: the feed the page holds is for another run, so it is reset.
 my $other='poll-delta-2';

@@ -11,7 +11,7 @@ const element=id=>{if(!elements.has(id))elements.set(id,{style:{},dataset:{},inn
 const c=vm.createContext({document:{getElementById:element,querySelectorAll:()=>[],querySelector:()=>null,body:{classList:{add(){},remove(){}}}},setTimeout(){},clearTimeout(){},Date,console});
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../../usr/share/PGenerator/webui-automation.js'),'utf8'),c);
 // Rendering is exercised elsewhere; here only what the poll holds matters.
-vm.runInContext('pgAutomationRenderLiveRun=()=>{};pgAutomationRenderActivity=()=>{};pgAutomationSyncCalibrationView=()=>{};pgAutomationRenderProgress=()=>{};',c);
+vm.runInContext('var pgAutomationRenderActivityReal=pgAutomationRenderActivity;pgAutomationRenderLiveRun=()=>{};pgAutomationRenderActivity=()=>{};pgAutomationSyncCalibrationView=()=>{};pgAutomationRenderProgress=()=>{};',c);
 let replies=[],requests=[];
 c.fetchJSON=async url=>{requests.push(url);const reply=replies.shift();if(reply instanceof Error)throw reply;return reply;};
 const poll=()=>vm.runInContext('pgAutomationPollLive()',c);
@@ -67,5 +67,25 @@ const messages=()=>current().activity.entries.map(e=>e.message);
  assert.equal(requests[8],'/api/automation/runs/current','a reply without a revision or cursor (an older daemon) leaves the next poll bare');
  assert.deepEqual(messages(),['line 1'],'and its feed replaces what was held');
  assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(pgAutomationMergeActivity(undefined,{entries:[{message:"x"}],head:0,cursor:"c",partial:true}))',c)),{entries:[{message:'x'}],head:0,cursor:'c',truncated:false},'a partial feed with nothing held is taken as is');
+ // A fresh check list is stamped with its arrival, so a check still running
+ // shows its elapsed time advancing without being resent for it.
+ replies=[{status:'ok',run,execution:{},preflight:{id:'p3',status:'checking',rev:'rev-3',started_at:1,elapsed_seconds:5},activity:{entries:[line(1)],truncated:0,run_id:'r',head:0,cursor:'r:9:0.x'}}];
+ await poll();now=current();
+ assert.ok(now.preflight.received_at>0,'a fresh check list is stamped with its arrival');
+ const stamped=now.preflight.received_at;
+ replies=[{status:'ok',run,execution:{},preflight_unchanged:true,activity:{entries:[],truncated:0,run_id:'r',head:0,cursor:'r:9:0.x',partial:true}}];
+ await poll();now=current();
+ assert.equal(now.preflight.received_at,stamped,'a kept check list keeps its stamp');
+ const elapsed=pre=>vm.runInContext('pgAutomationPreflightElapsed('+JSON.stringify(pre)+')',c);
+ assert.equal(elapsed({elapsed_seconds:5,received_at:Date.now()/1000-3.2}),8,'a check still running advances the daemon\'s figure by the time since it arrived');
+ assert.equal(elapsed({elapsed_seconds:5,started_at:10,completed_at:16.9}),6,'a finished check says so itself');
+ assert.equal(elapsed({started_at:10}),null,'nothing to say without a figure');
+ // Entries without a time sort to the top of the log, as in a full read.
+ replies=[{status:'ok',run,execution:{},preflight_unchanged:true,activity:{entries:[{source:'Log',message:'Saved runner log could not be read',level:'error'}],truncated:0,run_id:'r',head:0,cursor:'r:9:0.y',partial:true}}];
+ await poll();
+ assert.deepEqual(messages(),['line 1','Saved runner log could not be read'],'the untimed entry is appended');
+ vm.runInContext('pgAutomation.tab="live";pgAutomationRenderActivityReal();',c);
+ const log=elements.get('pgAutomationLog').innerHTML;
+ assert.ok(log.includes('could not be read')&&log.indexOf('could not be read')<log.indexOf('line 1'),'and renders first, as a full read shows it');
  console.log(JSON.stringify({ok:true,checks:'bare first poll, encoded parameters, kept check list, appended lines, cap, reset, missed poll, dropped check list, older daemon'}));
 })().catch(e=>{console.error(e);process.exit(1);});

@@ -1241,7 +1241,8 @@ function pgAutomationRenderProgress(){
  }else if(pre){
   total=pre.total_items||0;completed=(pre.items||[]).filter(item=>['checked','checked-limited'].includes(item.status)).length;
   title=pre.status==='checking'?'Checking '+(pre.active_item==null?'TV and meter':'job '+(Number(pre.active_item)+1)+' of '+total):pre.status==='ready'?'Last readiness check passed':pre.status==='started'?'Launching calibration runner':'Last readiness check did not pass';
-  message=(pre.queue_name?pre.queue_name+' · ':'')+(pre.message||'')+(pre.elapsed_seconds!=null?' · '+pre.elapsed_seconds+' s elapsed':'');
+  const elapsed=pgAutomationPreflightElapsed(pre);
+  message=(pre.queue_name?pre.queue_name+' · ':'')+(pre.message||'')+(elapsed!=null?' · '+elapsed+' s elapsed':'');
   issues=pre.issues||[];error=['blocked','failed','interrupted'].includes(pre.status)||issues.some(issue=>issue.level==='error');
  }else if(!pgAutomation.lastProblem&&!pgAutomation.statusError){box.style.display='none';return;}
  if(pgAutomation.statusError){error=true;issues=[{message:pgAutomation.statusError},...issues];}
@@ -1431,6 +1432,18 @@ function pgAutomationPollQuery(previous){
  if(previous?.activity?.cursor)params.push('activity_after='+encodeURIComponent(previous.activity.cursor));
  return params.length?'?'+params.join('&'):'';
 }
+// How long a startup check has run. A finished check says so itself; one
+// still running is not resent for its elapsed time alone, so the daemon's
+// figure from the poll the block arrived in is advanced by the time since.
+// The daemon's clock is not this page's (the appliance has no real-time
+// clock), so started_at is never compared with Date.now().
+function pgAutomationPreflightElapsed(pre){
+ if(!pre||typeof pre!=='object')return null;
+ if(pre.completed_at!=null&&pre.started_at!=null)return Math.max(0,Math.floor(Number(pre.completed_at)-Number(pre.started_at)));
+ if(pre.elapsed_seconds==null)return null;
+ const since=pre.received_at?Math.max(0,Date.now()/1000-pre.received_at):0;
+ return Math.floor(Number(pre.elapsed_seconds)+since);
+}
 // A partial feed carries only new runner lines; append them to the entries
 // already held and cap the log lines the way a full read does: the entries
 // that are not from the log (head) come first and are kept whole.
@@ -1457,6 +1470,7 @@ async function pgAutomationPollLive(){
   const result=await fetchJSON('/api/automation/runs/current'+pgAutomationPollQuery(previous),{_quiet:true,_timeoutMs:PG_AUTOMATION_POLL_TIMEOUT_MS});
   if(result&&result.status!=='error'){
    if(result.preflight_unchanged&&previous?.preflight&&!('preflight' in result))result.preflight=previous.preflight;
+   else if(result.preflight&&typeof result.preflight==='object')result.preflight.received_at=Date.now()/1000;
    result.activity=pgAutomationMergeActivity(previous?.activity,result.activity);
    if(pgAutomation.dismissedCheck&&result.preflight?.id===pgAutomation.dismissedCheck.id&&result.preflight?.started_at===pgAutomation.dismissedCheck.started_at&&result.preflight?.status!=='checking')result.preflight=null;
    if(pgAutomation.current?.preflight?.id&&!result.preflight&&!pgAutomation.pendingChecks)pgAutomationEl('Readiness').innerHTML='';
