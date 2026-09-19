@@ -550,7 +550,10 @@ sub _lg_control_seconds {
 }
 sub _reset_lg_control_seconds {
     $LG_CONTROL_STAMP_WARNED = 0;
-    @LG_CONTROL_SAMPLES = grep { defined($_) && !ref($_) && $_ =~ /^\d+(?:\.\d+)?$/ && $_ > 0 } @_;
+    # A seeded sample obeys the same cap as a measured one, whatever runner
+    # stamped it.
+    @LG_CONTROL_SAMPLES = map { $_ > $LG_CONTROL_SAMPLE_CAP ? $LG_CONTROL_SAMPLE_CAP : $_ }
+        grep { defined($_) && !ref($_) && $_ =~ /^\d+(?:\.\d+)?$/ && $_ > 0 } @_;
     shift @LG_CONTROL_SAMPLES while @LG_CONTROL_SAMPLES > 3;
     return scalar(@LG_CONTROL_SAMPLES);
 }
@@ -600,7 +603,8 @@ sub _lg_helper_timeout_for {
         # with a 60 s budget: one second from failing a job during setup.
         # Reads follow the same measured figure per key, never below the
         # 120 s that covered that readback.
-        my $keys = ref($payload->{keys}) eq 'ARRAY' ? scalar(@{$payload->{keys}}) : 0;
+        # Without a key list the daemon reads its whole default set.
+        my $keys = ref($payload->{keys}) eq 'ARRAY' && @{$payload->{keys}} ? scalar(@{$payload->{keys}}) : $LG_CONTROL_LARGEST_GROUP + 1;
         my $read = $LG_CONTROL_SESSION_SECONDS + int($per_control + 0.5) * $keys;
         $read = 120 if $read < 120;
         $read = $LG_CONTROL_TIMEOUT_CAP if $read > $LG_CONTROL_TIMEOUT_CAP;
@@ -2194,9 +2198,10 @@ sub _apply_settings_batched {
             keep_calibration_mode=>$calibration_active ? JSON::PP::true : JSON::PP::false,
             calibration_mode_active=>$calibration_active ? JSON::PP::true : JSON::PP::false,
         });
-        # Only a write that reached the TV measures the TV: a reply of any
-        # kind, or the daemon's helper running out of its budget. A refused
-        # connection or an unreachable daemon measures nothing.
+        # Only a write that reached the TV measures the TV: an accepted
+        # write, or the daemon's helper running out of its budget. A TV-side
+        # error reply, a refused connection or an unreachable daemon
+        # measures nothing.
         my $reached=ref($result) eq 'HASH' && !_lg_connection_failure($result)
             && (($result->{status}||'') =~ /^(?:ok|started)$/ || ($result->{message}||'') =~ /did not finish/i);
         _note_lg_control_seconds(scalar(@group),time()-$write_started,$budget) if $reached;
