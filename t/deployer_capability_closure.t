@@ -41,7 +41,12 @@ my $prot_end = index($py, "\n}", $prot_start);
 ok($prot_end > $prot_start, 'PROTECTED_PATHS dict delimited');
 my $prot_block = substr($py, $prot_start, $prot_end - $prot_start + 2);
 
-my $probe = "import sys\n" . $prefix_line . "\n" . $prot_block . "\n" . $body . <<'PY';
+# The sliced function carries its real annotations (dict[str, Any], tuple[...])
+# but not server.py's own `from __future__ import annotations`, so on Python
+# < 3.14 the def line is evaluated eagerly and dies with NameError: Any (3.14+
+# defers annotations by default, which hid this locally). Re-supply the future
+# import so the annotations stay strings on every Python the CI might run.
+my $probe = "from __future__ import annotations\nimport sys\n" . $prefix_line . "\n" . $prot_block . "\n" . $body . <<'PY';
 
 TV = "usr/share/PGenerator/"
 PREFIX = CAPABILITY_TREE_PREFIX
