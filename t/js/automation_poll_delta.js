@@ -87,5 +87,5 @@ const messages=()=>current().activity.entries.map(e=>e.message);
  vm.runInContext('pgAutomation.tab="live";pgAutomationRenderActivityReal();',c);
  const log=elements.get('pgAutomationLog').innerHTML;
  assert.ok(log.includes('could not be read')&&log.indexOf('could not be read')<log.indexOf('line 1'),'and renders first, as a full read shows it');
- console.log(JSON.stringify({ok:true,checks:'bare first poll, encoded parameters, kept check list, appended lines, cap, reset, missed poll, dropped check list, older daemon'}));
+ console.log(JSON.stringify({ok:true,checks:'bare first poll, encoded parameters, kept check list, appended lines, cap, reset, missed poll, dropped check list, older daemon, received stamp, elapsed advance, untimed entries first'}));
 })().catch(e=>{console.error(e);process.exit(1);});

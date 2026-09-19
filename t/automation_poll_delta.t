@@ -75,10 +75,11 @@ ok($changed->{activity}{partial},'while the activity feed stays partial');
 # A check still running is not resent for its elapsed time alone: the page
 # advances that itself from the poll the block arrived in. Its progress
 # writes resend it.
-$preflight->{status}='checking';delete $preflight->{completed_at};$preflight->{started_at}=Time::HiRes::time()-0.9;$preflight->{updated_at}=time();
+$preflight->{status}='checking';delete $preflight->{completed_at};$preflight->{started_at}=Time::HiRes::time()-5.5;$preflight->{updated_at}=time();
 PGAutomation::write_json_atomic("$store/preflight.json",$preflight);
 my $running=$poll->();
-is($running->{preflight}{elapsed_seconds},0,'the elapsed time is served with the check');
+my $elapsed=$running->{preflight}{elapsed_seconds};
+ok(defined($elapsed) && $elapsed>=5 && $elapsed<=8,'the elapsed time is served with the check') or diag("elapsed_seconds=".($elapsed//'undef'));
 Time::HiRes::sleep(0.25);
 ok($poll->('preflight_rev='.$running->{preflight}{rev})->{preflight_unchanged},'a check still running is unchanged while only its elapsed time moves');
 push @{$preflight->{checks}},{ok=>1,message=>'One more'};$preflight->{updated_at}=Time::HiRes::time();

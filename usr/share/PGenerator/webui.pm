@@ -13387,8 +13387,9 @@ sub webui_automation_item_summary (@) {
  # The page names a job's signal when it explains that job's failure.
  $summary->{signal_format}=$item->{signal_format} if(defined($item->{signal_format}) && !ref($item->{signal_format}));
  $summary->{failure}=PGAutomation::clone($item->{failure}) if(ref($item->{failure}) eq "HASH");
- # Only the checks that need a look travel with every poll; a job's passing
- # checks are in its own record for the job detail.
+ # Only the checks that need a look travel with every poll and reach the
+ # job detail; a job's passing checks stay in the manifest and the
+ # artifact download.
  if(ref($item->{readiness}) eq 'HASH' && ref($item->{readiness}{checks}) eq 'ARRAY') {
   my @checks=grep { ref($_) eq 'HASH' } @{$item->{readiness}{checks}};
   $summary->{readiness}={checks=>&webui_automation_scrub_credentials([grep { !$_->{ok} } @checks]),
