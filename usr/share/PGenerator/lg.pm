@@ -2826,6 +2826,9 @@ sub webui_meter_lg_dv_profile_mark_cancelled (@) {
  my $json="";
  if(open(my $fh,"<",$_meter_lg_dv_profile_file)) { local $/; $json=<$fh>; close($fh); }
  return if($json eq "");
+ # Keep the rewrites below off the keys inside activity events.
+ my $events;
+ ($json,$events)=&webui_worker_status_detach_events($json);
  if($json=~/"status"\s*:\s*"[^"]*"/) {
   $json=~s/"status"\s*:\s*"[^"]*"/"status":"cancelled"/;
  } else {
@@ -2836,7 +2839,7 @@ sub webui_meter_lg_dv_profile_mark_cancelled (@) {
  } else {
   $json=~s/\}\s*\z/,"message":"Dolby Vision profile measurement stopped"}/;
  }
- if(open(my $fh,">",$_meter_lg_dv_profile_file)) { print $fh $json; close($fh); chmod(0666,$_meter_lg_dv_profile_file); }
+ if(open(my $fh,">",$_meter_lg_dv_profile_file)) { print $fh &webui_worker_status_attach_events($json,$events); close($fh); chmod(0666,$_meter_lg_dv_profile_file); }
 }
 
 sub webui_meter_lg_dv_profile_kill (@) {
@@ -2940,7 +2943,7 @@ sub webui_meter_lg_dv_profile_start (@) {
   : '{"status":"running","message":"Starting Dolby Vision profile measurement","steps":[]}';
  $init=PGAutomation::seed_worker_state_json($init,$body);
  return PGAutomation::encode_json({status=>"error",message=>"Unable to persist worker launch identity"})
-  if(!PGAutomation::write_atomic($_meter_lg_dv_profile_file,$init,0666));
+  if(!&webui_worker_state_init_write($_meter_lg_dv_profile_file,$init));
  my $log_file=&webui_prepare_tmp_worker_log($_meter_lg_dv_profile_log_file,"meter_lg_dv_profile");
  my $cmd="setsid /usr/bin/perl /usr/bin/meter_lg_dv_profile.pl '$_meter_lg_dv_profile_config_file' '$_meter_lg_dv_profile_file' '$_meter_lg_dv_profile_stop_file' </dev/null >'$log_file' 2>&1 &";
  system($cmd);

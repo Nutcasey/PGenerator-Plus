@@ -1211,12 +1211,30 @@ sub _log_worker_events {
 # carries every key the wait loop reads, at a few KB instead of the full state
 # (160 KB late in a greyscale stage, half a second to decode on the appliance
 # every two seconds). The full state is fetched once at the end, so callers
-# and the archive still see the whole result.
-my %WORKER_SUMMARY_STATUS_PATHS = map { $_ => 1 } qw(
-    /api/meter/lg-autocal/status
-    /api/meter/lg-3d-autocal/status
-    /api/lg/dv-profile/status
+# and the archive still see the whole result. Each route maps to the
+# worker's state file, read directly when the daemon cannot serve it.
+my %WORKER_SUMMARY_STATUS_PATHS = (
+    '/api/meter/lg-autocal/status'    => '/tmp/meter_lg_autocal.json',
+    '/api/meter/lg-3d-autocal/status' => '/tmp/meter_lg_3d_autocal.json',
+    '/api/lg/dv-profile/status'       => '/tmp/meter_lg_dv_profile.json',
 );
+
+# The worker's own state file, the same file the archive step reads. Tests
+# replace this to keep off the appliance paths.
+sub _worker_state_file_read {
+    my ($status_path) = @_;
+    my $file = $WORKER_SUMMARY_STATUS_PATHS{$status_path} || '';
+    return undef if $file eq '';
+    return PGAutomation::read_json_file($file);
+}
+
+# A state file stands in for a failed full read only when it is this
+# attempt's finished state: a hash, terminal, stamped with the summary's id.
+sub _worker_state_file_usable {
+    my ($summary, $saved) = @_;
+    return 0 if ref($saved) ne 'HASH' || !_status_terminal($saved->{status} || '');
+    return PGAutomation::worker_id($saved) eq PGAutomation::worker_id($summary) ? 1 : 0;
+}
 
 sub _worker_status_poll_path {
     my ($status_path, $after) = @_;
@@ -1275,8 +1293,20 @@ sub _wait_worker {
             my $full = _api('GET', $status_path, undef);
             if (_worker_full_status_usable($status, $full)) {
                 $status = $full;
-            } elsif (!$full_read_warned++) {
-                _log("$kind finished but its full status could not be read; keeping the summary");
+            } else {
+                # The daemon could not serve the full state. The worker's own
+                # state file carries the measurements, curves and export paths
+                # the stage callers and the archive need, so adopt it when it
+                # is this attempt's finished state; only then does the summary
+                # stand, and the archived evidence is a projection.
+                my $saved = _worker_state_file_read($status_path);
+                if (_worker_state_file_usable($status, $saved)) {
+                    $status = $saved;
+                    _log("$kind finished but its full status could not be read; using the worker's state file")
+                        if !$full_read_warned++;
+                } elsif (!$full_read_warned++) {
+                    _log("$kind finished but its full status could not be read and its state file is not this attempt's finished state; keeping the summary, so the archived evidence is a projection");
+                }
             }
         }
         my $state = $status->{status} || '';

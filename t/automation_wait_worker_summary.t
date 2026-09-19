@@ -26,6 +26,9 @@ local *main::_active_item_number=sub {0};
 local *main::_refresh_control=sub {};
 local *main::_sleep_controlled=sub {1};
 local *main::_update_run=sub {my $r={};$_[0]->($r);return $r};
+# The runner falls back to the worker's own state file when the daemon cannot
+# serve the full state; keep the harness off the appliance paths.
+local *main::_worker_state_file_read=sub {undef};
 
 is(main::_worker_status_poll_path('/api/meter/lg-autocal/status',0),'/api/meter/lg-autocal/status?view=summary&after=0','greyscale polls use the summary view');
 is(main::_worker_status_poll_path('/api/meter/lg-3d-autocal/status',5),'/api/meter/lg-3d-autocal/status?view=summary&after=5','3D LUT polls use the summary view');
@@ -46,6 +49,12 @@ ok(!main::_worker_full_status_usable($summary,{status=>'complete',automation_wor
 ok(main::_worker_full_status_usable($summary,{status=>'running',automation_worker_id=>'w1'}),'a same-worker state that is not terminal is adopted so polling continues');
 ok(!main::_worker_full_status_usable($summary,{status=>'idle'}),'an unstamped read after a stamped summary is not this attempt\'s state');
 ok(main::_worker_full_status_usable({status=>'idle'},{status=>'idle'}),'an unstamped read matches an unstamped summary');
+ok(main::_worker_state_file_usable($summary,{status=>'complete',automation_worker_id=>'w1',measurements=>{}}),'this attempt\'s finished state file stands in for a failed full read');
+ok(main::_worker_state_file_usable($summary,{status=>'error',automation_worker_id=>'w1'}),'including its own failure');
+ok(!main::_worker_state_file_usable($summary,undef),'a missing or unreadable state file does not');
+ok(!main::_worker_state_file_usable($summary,{status=>'running',automation_worker_id=>'w1'}),'nor a state file still mid-run');
+ok(!main::_worker_state_file_usable($summary,{status=>'complete',automation_worker_id=>'w2'}),'nor another attempt\'s state file');
+ok(!main::_worker_state_file_usable($summary,{status=>'complete'}),'nor an unstamped state file after a stamped summary');
 
 my $event=sub {my ($seq)=@_;return {seq=>$seq,time=>100+$seq,message=>"event $seq"}};
 {
@@ -118,6 +127,38 @@ for my $case (
  is($result->{status},'complete',"$name: the terminal summary stands as the result");
  is($result->{message},'done',"$name: with the summary's own fields");
  is(scalar(grep {/full status could not be read/} @lines),1,"$name: the fallback is logged once");
+ ok(scalar(grep {/archived evidence is a projection/} @lines),"$name: the log says the archived evidence is a projection");
+}
+# When the daemon cannot serve the full state, the worker's own state file is
+# adopted if it is this attempt's finished state: it carries the measurements,
+# curves and export paths the stage callers and the archive need.
+{
+ @lines=();
+ my @summaries=({status=>'complete',automation_worker_id=>'w1',message=>'done'});
+ local *main::_api=sub {
+  my ($method,$path)=@_;
+  return {status=>'ok'} if $path eq '/api/lg/status';
+  return {status=>'error',error_code=>'daemon-unreachable',_transport_error=>1} if $path eq '/api/meter/lg-autocal/status';
+  return shift(@summaries) || die 'polled after the terminal summary';
+ };
+ my @asked;
+ local *main::_worker_state_file_read=sub {push @asked,$_[0];return {status=>'complete',automation_worker_id=>'w1',message=>'done',
+  measurements=>{white=>[1,2,3]},hdr20_1d_dpg_data=>[1..3072],export=>{cube_path=>'/var/lib/PGenerator/lg/luts/a.cube'}}};
+ my $result=main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{});
+ is($result->{status},'complete','the state file result is adopted');
+ is(scalar @{$result->{hdr20_1d_dpg_data}},3072,'with the full curve the archive needs');
+ ok(ref $result->{measurements} eq 'HASH' && ref $result->{export} eq 'HASH','and the measurements and export paths the callers gate on');
+ is_deeply(\@asked,['/api/meter/lg-autocal/status'],'the state file is read once for this route');
+ is(scalar(grep {/using the worker's state file/} @lines),1,'the fallback to the state file is logged once');
+ ok(!scalar(grep {/projection/} @lines),'and not reported as a projection');
+ for my $saved ([undef,'unreadable'],[{status=>'running',automation_worker_id=>'w1'},'still mid-run'],[{status=>'complete',automation_worker_id=>'w2'},'from another attempt']) {
+  @lines=();
+  @summaries=({status=>'complete',automation_worker_id=>'w1',message=>'done'});
+  local *main::_worker_state_file_read=sub {$saved->[0]};
+  my $r=main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{});
+  is($r->{message},'done',"a state file that is $saved->[1] leaves the summary standing");
+  ok(scalar(grep {/archived evidence is a projection/} @lines),'and the log says the archived evidence is a projection');
+ }
 }
 # A same-worker full read that is not terminal is adopted and polling goes
 # on: the daemon's liveness check saw the worker again after the summary
@@ -199,5 +240,28 @@ for my $case (
  my $dv=main::_wait_worker('/api/lg/dv-profile/status','Dolby Vision profile',{});
  ok(exists $dv->{profile},'the Dolby Vision wait also ends on the full state');
  is_deeply(\@seen,['/api/lg/dv-profile/status?view=summary&after=0','/api/lg/dv-profile/status?view=summary&after=0','/api/lg/dv-profile/status'],'Dolby Vision polls use the summary view');
+}
+# The production identity check: _start_worker stamps the attempt id, a
+# same-attempt summary is followed to the full state, and a summary from
+# another attempt is refused before anything is adopted or archived.
+{
+ my $attempt='';
+ my @summaries;
+ local *main::_api=sub {
+  my ($m,$p,$payload)=@_;
+  return {status=>'ok'} if $p eq '/api/lg/status';
+  if($m eq 'POST') { $attempt=$payload->{automation_worker_id}; return {status=>'started'} }
+  return {status=>'complete',automation_worker_id=>$attempt,full=>1} if $p eq '/api/meter/lg-autocal/status';
+  return shift(@summaries) || die 'extra poll';
+ };
+ is(main::_start_worker('/api/meter/lg-autocal','/api/meter/lg-autocal/status',{})->{status},'started','the worker launch is accepted');
+ like($attempt,qr/^wait-worker-summary-test-0-\S+$/,'the launch stamped this attempt');
+ @summaries=({status=>'running',automation_worker_id=>$attempt},{status=>'complete',automation_worker_id=>$attempt});
+ ok(main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{})->{full},'a same-attempt summary is followed to the full state');
+ @summaries=({status=>'running',automation_worker_id=>'another-attempt'});
+ is(main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{})->{error_code},'worker-identity-mismatch','a foreign running summary is refused on its first poll');
+ @summaries=({status=>'complete',automation_worker_id=>'another-attempt'});
+ is(main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{})->{error_code},'worker-identity-mismatch','a foreign terminal summary is refused even after the full read');
+ main::_clear_active_worker();
 }
 done_testing();

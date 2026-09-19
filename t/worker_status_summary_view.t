@@ -261,4 +261,31 @@ $plain=decode(main::webui_meter_lg_dv_profile_status(undef,$dv));
 is($plain->{message},$summary->{message},'DV plain view rewrites the same message');
 is($plain->{activity_events}[0]{message},'Starting DV','DV plain view leaves the event message alone');
 like(main::webui_meter_lg_dv_profile_status('view=summary',"$dir/absent-dv.json"),qr/"status":"idle"/,'no DV state file is idle in the summary view');
+
+# A fresh attempt starts from an init state. After a backward clock step the
+# previous attempt's terminal sidecar would outrank it by mtime, so the init
+# write removes the sidecar first.
+{
+ $running=1;
+ my $file="$dir/meter_lg_autocal_init.json";
+ my $old=full_state(status=>'complete',automation_worker_id=>'old-attempt');
+ write_text($file,$encoder->encode($old));
+ write_text("$file.summary",$encoder->encode(summary_of($old)));
+ utime(time()+3600,time()+3600,"$file.summary") or die "utime: $!";
+ is(decode(main::webui_meter_lg_autocal_status('view=summary',$file))->{automation_worker_id},'old-attempt','before the launch the old sidecar is what the summary view serves');
+ my $init='{"status":"running","autocal":true,"current_step":0,"total_steps":0,"current_name":"Starting LG Auto Cal...","message":"Starting","readings":[]}';
+ ok(main::webui_worker_state_init_write($file,$init),'the init write succeeds');
+ ok(!-e "$file.summary",'the previous attempt\'s sidecar is removed');
+ is(read_text($file),$init,'the init state is written');
+ my $s=decode(main::webui_meter_lg_autocal_status('view=summary&after=0',$file));
+ is($s->{status},'running','the summary view now serves the init state, not the old terminal sidecar');
+ ok(!$s->{automation_worker_id},'with no stale attempt identity');
+ for my $source (['webui',"$Bin/../usr/share/PGenerator/webui.pm",2],['lg',"$Bin/../usr/share/PGenerator/lg.pm",1]) {
+  my ($name,$path,$count)=@$source;
+  my $text=read_text($path);
+  is(scalar(()=$text=~/&webui_worker_state_init_write\(/g),$count,"$name: every worker launch writes its init state through the helper");
+  unlike($text,qr/write_atomic\(\$_meter_lg_(?:autocal|3d_autocal|dv_profile)_file,\$init/,"$name: no launch writes the init state directly");
+ }
+ like(read_text("$Bin/../usr/share/PGenerator/webui.pm"),qr/unlink\("\$_meter_lg_3d_autocal_file\.summary"\);\n if\(!rename\(\$state_tmp,\$_meter_lg_3d_autocal_file\)\)/,'the 3D retry launch drops the sidecar before installing its state');
+}
 done_testing();

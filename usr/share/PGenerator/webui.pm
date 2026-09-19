@@ -6226,6 +6226,9 @@ sub webui_meter_lg_autocal_mark_cancelled (@) {
  my $json="";
  if(open(my $fh,"<",$_meter_lg_autocal_file)) { local $/; $json=<$fh>; close($fh); }
  return if($json eq "");
+ # Keep the rewrites below off the keys inside activity events.
+ my $events;
+ ($json,$events)=&webui_worker_status_detach_events($json);
  # Always force cancelled on an explicit Stop — including over a raced
  # process-died promotion to "complete" (final_1d flags set while the
  # worker was killed). Leaving complete here is what resurrects the
@@ -6260,7 +6263,7 @@ sub webui_meter_lg_autocal_mark_cancelled (@) {
  } else {
   $json=~s/\}$/,"message":"Auto Cal stopped"}/;
  }
- if(open(my $fh,">",$_meter_lg_autocal_file)) { print $fh $json; close($fh); chmod(0666,$_meter_lg_autocal_file); }
+ if(open(my $fh,">",$_meter_lg_autocal_file)) { print $fh &webui_worker_status_attach_events($json,$events); close($fh); chmod(0666,$_meter_lg_autocal_file); }
 }
 
 # Clear the full-workflow + HDR tone-map metadata from the persisted
@@ -6715,7 +6718,7 @@ my $_ac_target_gamma="bt1886";
 	 my $init='{"status":"running","autocal":true,"current_step":0,"total_steps":0,"current_name":"Starting LG Auto Cal...","message":"Starting","readings":[]}';
 	 $init=PGAutomation::seed_worker_state_json($init,$body);
  return PGAutomation::encode_json({status=>"error",message=>"Unable to persist worker launch identity"})
-  if(!PGAutomation::write_atomic($_meter_lg_autocal_file,$init,0666));
+  if(!&webui_worker_state_init_write($_meter_lg_autocal_file,$init));
 	 my $log_file=&webui_prepare_tmp_worker_log($_meter_lg_autocal_log_file,"meter_lg_autocal");
 	 my $cmd="setsid /usr/bin/perl /usr/bin/meter_lg_autocal.pl '$_meter_lg_autocal_config_file' '$_meter_lg_autocal_file' '$_meter_lg_autocal_stop_file' </dev/null >'$log_file' 2>&1 &";
 	 system($cmd);
@@ -6811,6 +6814,16 @@ sub webui_worker_status_attach_events (@) {
  return $json if(!defined($json) || !defined($events) || $events eq "");
  $json=~s/"activity_events":\[\]/$events/;
  return $json;
+}
+
+# A fresh attempt starts from an init state. The previous attempt's sidecar
+# is trusted by mtime and the appliance has no RTC, so after a backward clock
+# step it would outrank the init state until the worker's first write; it is
+# removed before the init state is written.
+sub webui_worker_state_init_write (@) {
+ my ($file,$init)=@_;
+ unlink("$file.summary");
+ return PGAutomation::write_atomic($file,$init,0666);
 }
 
 sub webui_meter_lg_autocal_status (@) {
@@ -7035,6 +7048,9 @@ sub webui_meter_lg_3d_autocal_mark_cancelled (@) {
  my $json="";
  if(open(my $fh,"<",$_meter_lg_3d_autocal_file)) { local $/; $json=<$fh>; close($fh); }
  return if($json eq "");
+ # Keep the rewrites below off the keys inside activity events.
+ my $events;
+ ($json,$events)=&webui_worker_status_detach_events($json);
  # Force cancelled over running/complete (same race as greyscale: process-
  # died or a finished 3D stage left status=complete with full_workflow).
  if($json=~/"status"\s*:\s*"[^"]*"/) {
@@ -7052,7 +7068,7 @@ sub webui_meter_lg_3d_autocal_mark_cancelled (@) {
  } else {
   $json=~s/\}$/,"message":"3D LUT AutoCal stopped"}/;
  }
- if(open(my $fh,">",$_meter_lg_3d_autocal_file)) { print $fh $json; close($fh); chmod(0666,$_meter_lg_3d_autocal_file); }
+ if(open(my $fh,">",$_meter_lg_3d_autocal_file)) { print $fh &webui_worker_status_attach_events($json,$events); close($fh); chmod(0666,$_meter_lg_3d_autocal_file); }
 }
 
 sub webui_meter_lg_3d_autocal_kill (@) {
@@ -7268,7 +7284,7 @@ sub webui_meter_lg_3d_autocal_start (@) {
 	  : '{"status":"running","autocal3d":true,"autocal_3d":true,"current_step":0,"total_steps":0,"current_name":"Starting LG 3D LUT AutoCal...","message":"Starting","readings":[]}';
 	 $init=PGAutomation::seed_worker_state_json($init,$body);
  return PGAutomation::encode_json({status=>"error",message=>"Unable to persist worker launch identity"})
-  if(!PGAutomation::write_atomic($_meter_lg_3d_autocal_file,$init,0666));
+  if(!&webui_worker_state_init_write($_meter_lg_3d_autocal_file,$init));
 	 my $log_file=&webui_prepare_tmp_worker_log($_meter_lg_3d_autocal_log_file,"meter_lg_3d_autocal");
 	 my $cmd="setsid /usr/bin/perl /usr/bin/meter_lg_3d_autocal.pl '$_meter_lg_3d_autocal_config_file' '$_meter_lg_3d_autocal_file' '$_meter_lg_3d_autocal_stop_file' </dev/null >'$log_file' 2>&1 &";
 	 system($cmd);
@@ -7398,6 +7414,9 @@ sub webui_meter_lg_3d_autocal_retry_upload (@) {
   unlink($state_tmp);
   return '{"status":"error","message":"Unable to save the 3D LUT upload retry config"}';
  }
+ # A retry is a fresh attempt: drop the previous sidecar before its state
+ # goes in (see webui_worker_state_init_write).
+ unlink("$_meter_lg_3d_autocal_file.summary");
  if(!rename($state_tmp,$_meter_lg_3d_autocal_file)) {
   my $rollback_tmp=$_meter_lg_3d_autocal_config_file.".rollback.$$";
   my $rolled_back=0;
