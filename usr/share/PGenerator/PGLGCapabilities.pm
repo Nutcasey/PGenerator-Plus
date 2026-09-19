@@ -58,6 +58,11 @@ my %CACHE_SIGNATURE;
 our $LAST_RESOLVE_SOURCE='';
 our $LAST_RESOLVE_SECONDS=0;
 our $LAST_RESOLVE_STORE='';
+# The first resolve of the process, whichever caller made it, is the one
+# that paid for the profile; the helper logs these.
+our $FIRST_RESOLVE_SOURCE='';
+our $FIRST_RESOLVE_SECONDS=0;
+our $FIRST_RESOLVE_STORE='';
 our $RESOLVED_CACHE_SCHEMA=1;
 our $RESOLVED_CACHE_KEEP_SECONDS=7*86400;
 
@@ -530,6 +535,7 @@ sub _expand_key_sets {
 sub resolve_lg_capabilities {
  my ($identity,%options)=@_;
  my $started=time();
+ my $first=!%RESOLVED;
  my $root=_canonical_root($options{'root'});
  my $normalized=_normalized_identity($identity);
  my $memo_key=join("\0",$root,_observation_root(%options),$JSON->encode($normalized));
@@ -546,6 +552,7 @@ sub resolve_lg_capabilities {
   $LAST_RESOLVE_SOURCE='cache';
   $LAST_RESOLVE_STORE='';
   $LAST_RESOLVE_SECONDS=time()-$started;
+  ($FIRST_RESOLVE_SOURCE,$FIRST_RESOLVE_SECONDS,$FIRST_RESOLVE_STORE)=('cache',$LAST_RESOLVE_SECONDS,'') if($first);
   return $cached;
  }
  # A library loaded under another signature is stale for this call.
@@ -555,6 +562,7 @@ sub resolve_lg_capabilities {
  $RESOLVED{$memo_key}=$resolved;
  $LAST_RESOLVE_SOURCE='computed';
  $LAST_RESOLVE_SECONDS=time()-$started;
+ ($FIRST_RESOLVE_SOURCE,$FIRST_RESOLVE_SECONDS,$FIRST_RESOLVE_STORE)=('computed',$LAST_RESOLVE_SECONDS,$LAST_RESOLVE_STORE) if($first);
  return $resolved;
 }
 

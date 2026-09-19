@@ -2995,8 +2995,12 @@ sub _calibration_volume_stage {
     if ($signal eq 'dv') {
         # A new attempt starts with no dispatch marker and no accepted
         # artifact from an earlier attempt.
-        unlink(PGAutomation::item_dir($RUN_ID, $item_number) . '/calibration/dv-profile-upload-dispatched.json',
-            PGAutomation::item_dir($RUN_ID, $item_number) . '/calibration/dv-profile-upload.json');
+        my @previous = map { PGAutomation::item_dir($RUN_ID, $item_number) . "/calibration/$_" } qw(dv-profile-upload-dispatched.json dv-profile-upload.json);
+        unlink(@previous);
+        if (my @left = grep { -e $_ } @previous) {
+            $::LAST_ERROR = 'Unable to clear the previous Dolby Vision upload record: ' . join(', ', @left);
+            return 0;
+        }
         return 0 if !_set_dv_map($item, '2');
         _log('launching Dolby Vision profile worker');
         $ACTIVE_WORKER = 'dv';
@@ -3913,6 +3917,9 @@ sub _restore_run_hazards {
 
 sub _drop_resume_checkpoints {
     my ($item, $names) = @_;
+    # A calibration that restarts from its reset owes no baseline restore
+    # and starts the restore-failure count afresh.
+    delete $item->{profile_baseline_restore_failures} if $names->{'reset-and-reapply-verified'};
     # A boundary proof belongs to the calibration immediately before it.
     $names->{'greyscale-settings-verified'} = 1 if $names->{'greyscale-done'};
     $names->{'volume-settings-verified'} = 1 if $names->{'volume-done'};

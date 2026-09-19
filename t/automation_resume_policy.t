@@ -247,4 +247,40 @@ sub grey_state {
  is(main::_expected_calibration_gamut_state($fresh,'colorGamut','resume-setup'),0,'and no waiver applies');
 }
 
+# The profile stage starts with no record of an earlier attempt's upload.
+{
+ my $dir=PGAutomation::item_dir('resume-test',16).'/calibration';
+ make_path($dir);
+ for my $name (qw(dv-profile-upload-dispatched.json dv-profile-upload.json)) { open(my $fh,'>',"$dir/$name") or die $!; print {$fh} '{"status":"ok"}'; close($fh); }
+ my $seen;
+ no warnings 'redefine';
+ local *main::_set_dv_map=sub { $seen=[grep { -e "$dir/$_" } qw(dv-profile-upload-dispatched.json dv-profile-upload.json)]; return 0; };
+ my $item=item(signal_format=>'dv');
+ is(main::_calibration_volume_stage(16,$item),0,'the stage stops at the stubbed map step');
+ is_deeply($seen,[],'both records were removed before anything else ran');
+}
+
+# A restore cut short by a stop request is not a refusal; two refusals latch.
+{
+ no warnings 'redefine';
+ local *main::_prepare_job_context=sub {1};
+ local *main::_prepare_resume=sub {};
+ local *main::_update_item_snapshot=sub {};
+ local *main::_update_run=sub { my ($cb)=@_; my $run={items=>[]}; $cb->($run); return $run; };
+ local *main::_run=sub {{}};
+ my $error='TV refused the unity reset';
+ local *main::_restore_profile_baseline=sub { $::LAST_ERROR_CODE=''; die "$error\n" };
+ my $item=item(profile_baseline_needs_restore=>1);
+ is(main::_run_item(0,$item),0,'a failed restore fails job preparation');
+ is($item->{profile_baseline_restore_failures},1,'the first refusal is counted');
+ ok(!$item->{profile_baseline_restore_failed},'but not yet latched');
+ $item->{profile_baseline_needs_restore}=1; $item->{status}='queued';
+ main::_run_item(0,$item);
+ is($item->{profile_baseline_restore_failed},1,'the second refusal latches');
+ my $stopped=item(profile_baseline_needs_restore=>1);
+ local *main::_restore_profile_baseline=sub { $::LAST_ERROR_CODE='stopped'; die "Automation stop requested\n" };
+ main::_run_item(0,$stopped);
+ ok(!$stopped->{profile_baseline_restore_failures} && !$stopped->{profile_baseline_restore_failed},'a stop during the restore counts for nothing');
+}
+
 done_testing();

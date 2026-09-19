@@ -26,7 +26,7 @@ is($r->{start_attempts},2,'actual start attempts recorded');
 ok(!$r->{cal_start_tolerated},'success requires an acknowledged start, not tolerated rejection');
 is($reads,1,'retry requires a fresh TV mode read');
 is_deeply(\@commands,['CAL_START','CAL_START'],'no reset, data write or CAL_END used for recovery');
-is(scalar @logs,1,'one informative retry entry');
+is(scalar(grep { $_->[0] ne 'capabilities:resolve' } @logs),1,'one informative retry entry');
 like($r->{message},qr/Accepted on attempt 2/,'successful recovery reported');
 is($closed,1,'shared workflow closes session');
 

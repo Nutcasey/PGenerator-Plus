@@ -11,6 +11,7 @@ use File::Copy qw(copy);
 use File::Find qw(find);
 use File::Spec ();
 use JSON::PP ();
+use Time::HiRes ();
 use Test::More;
 
 use lib "$Bin/../usr/share/PGenerator";
@@ -159,15 +160,15 @@ like(PGLGCapabilities::_library_signature($shipped),qr/(?:^|\n)PGLGCapabilities\
 }
 
 # Touching the resolver module invalidates the store entry.
-{
+SKIP: {
  my $module="$Bin/../usr/share/PGenerator/PGLGCapabilities.pm";
- my @st=stat($module);
+ my @st=Time::HiRes::stat($module);
  clear_lg_capability_cache();
  resolve_lg_capabilities($g3,root=>$shipped);
  clear_lg_capability_cache();
  resolve_lg_capabilities($g3,root=>$shipped);
  is($PGLGCapabilities::LAST_RESOLVE_SOURCE,'cache','served from the store before the module changes');
- utime($st[8],$st[9]+2,$module) or die "utime: $!";
+ skip 'the deployed module is not writable by this user',1 if(!utime($st[8],$st[9]+2,$module));
  clear_lg_capability_cache();
  resolve_lg_capabilities($g3,root=>$shipped);
  is($PGLGCapabilities::LAST_RESOLVE_SOURCE,'computed','a changed module invalidates the store entry');
@@ -183,13 +184,19 @@ like(PGLGCapabilities::_library_signature($shipped),qr/(?:^|\n)PGLGCapabilities\
  resolve_lg_capabilities($g3,root=>$root);
  is($PGLGCapabilities::LAST_RESOLVE_SOURCE,'computed','library loaded');
  my $index="$root/lg/index.json";
- open(my $fh,'>>',$index) or die $!; print {$fh} "\n"; close($fh);
+ my $text=do { open(my $in,'<',$index) or die $!; local $/; <$in> };
+ my $doc=JSON::PP->new->decode($text);
+ my $old_version=$doc->{library_version};
+ $doc->{library_version}='2099.01.01.1';
+ open(my $fh,'>',$index) or die $!; print {$fh} JSON::PP->new->canonical->pretty->encode($doc); close($fh);
  my $before=resolve_lg_capabilities($c2,root=>$root);
  is($PGLGCapabilities::LAST_RESOLVE_SOURCE,'computed','a new identity after the change is computed');
+ is($before->{library_version},'2099.01.01.1','from the library as it is now, not the one this process loaded earlier');
+ isnt($before->{library_version},$old_version,'so the stale library was dropped');
  clear_lg_capability_cache();
  my $fresh=resolve_lg_capabilities($c2,root=>$root);
  is($PGLGCapabilities::LAST_RESOLVE_SOURCE,'cache','and the entry written for it is served to a fresh process');
- is($fresh->{library_version},PGLGCapabilities::load_lg_library($root)->{version},'from a library reloaded under the new signature');
+ is($fresh->{library_version},'2099.01.01.1','carrying the new version');
 }
 
 # The helper's and the daemon's spellings of the same root share one entry.
