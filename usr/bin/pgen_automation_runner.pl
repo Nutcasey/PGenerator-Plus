@@ -539,7 +539,9 @@ my @LG_CONTROL_SAMPLES;
 # runner writes (18 controls), so consecutive timeouts converge there rather
 # than growing by half each time.
 my $LG_CONTROL_SESSION_SECONDS = 30;
-my $LG_CONTROL_SAMPLE_CAP = 15;
+my $LG_CONTROL_TIMEOUT_CAP = 300;
+my $LG_CONTROL_LARGEST_GROUP = 18;
+my $LG_CONTROL_SAMPLE_CAP = ($LG_CONTROL_TIMEOUT_CAP - $LG_CONTROL_SESSION_SECONDS) / $LG_CONTROL_LARGEST_GROUP;
 my $LG_CONTROL_STAMP_WARNED = 0;
 sub _lg_control_seconds {
     my $slowest = 0;
@@ -554,10 +556,13 @@ sub _reset_lg_control_seconds {
 }
 sub _note_lg_control_seconds {
     my ($count, $elapsed, $budget) = @_;
-    return if !$count || $count < 2 || !defined($elapsed) || $elapsed <= 0;
+    # Small groups measure mostly the session allowance; only a group of
+    # four or more says anything about the per-control cost, and a write
+    # that finished inside the allowance says nothing either.
+    return if !$count || $count < 4 || !defined($elapsed) || $elapsed <= 0;
     $elapsed = $budget if defined($budget) && $budget > 0 && $elapsed > $budget;
     my $per_control = ($elapsed - $LG_CONTROL_SESSION_SECONDS) / $count;
-    $per_control = 0 if $per_control < 0;
+    return if $per_control <= 0;
     my $sample = 1.5 * $per_control;
     $sample = $LG_CONTROL_SAMPLE_CAP if $sample > $LG_CONTROL_SAMPLE_CAP;
     push @LG_CONTROL_SAMPLES, $sample;
@@ -565,7 +570,7 @@ sub _note_lg_control_seconds {
     my @samples = @LG_CONTROL_SAMPLES;
     my $stamped = eval { ref(_update_run(sub { $_[0]{lg_control_samples} = [@samples]; })) ? 1 : 0 };
     if (!$stamped && !$LG_CONTROL_STAMP_WARNED++) {
-        my $why = $@ || $::LAST_ERROR || '';
+        my $why = $@ || '';
         $why =~ s/[\r\n]+/ /g;
         _log('Unable to record the measured control write time in the manifest; a resumed run starts from the default budget'.($why ne '' ? ": $why" : ''));
     }
@@ -596,9 +601,9 @@ sub _lg_helper_timeout_for {
         # Reads follow the same measured figure per key, never below the
         # 120 s that covered that readback.
         my $keys = ref($payload->{keys}) eq 'ARRAY' ? scalar(@{$payload->{keys}}) : 0;
-        my $read = 30 + int($per_control + 0.5) * $keys;
+        my $read = $LG_CONTROL_SESSION_SECONDS + int($per_control + 0.5) * $keys;
         $read = 120 if $read < 120;
-        $read = 300 if $read > 300;
+        $read = $LG_CONTROL_TIMEOUT_CAP if $read > $LG_CONTROL_TIMEOUT_CAP;
         return $read;
     }
     return undef if $path ne '/api/lg/picture-settings/set';
@@ -606,9 +611,9 @@ sub _lg_helper_timeout_for {
     # White-balance arrays are the DDC path with its own daemon default.
     return undef if grep { ref($settings->{$_}) } keys %$settings;
     # The helper writes and reads back each control inside one session.
-    my $timeout = 30 + int($per_control + 0.5) * scalar(keys %$settings);
+    my $timeout = $LG_CONTROL_SESSION_SECONDS + int($per_control + 0.5) * scalar(keys %$settings);
     $timeout = 45 if $timeout < 45;
-    $timeout = 300 if $timeout > 300;
+    $timeout = $LG_CONTROL_TIMEOUT_CAP if $timeout > $LG_CONTROL_TIMEOUT_CAP;
     return $timeout;
 }
 
