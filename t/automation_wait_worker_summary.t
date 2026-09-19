@@ -44,7 +44,8 @@ ok(!main::_worker_full_status_usable($summary,{status=>'error',error_code=>'inva
 ok(!main::_worker_full_status_usable($summary,{status=>'error',error_code=>'stopped'}),'nor a stop interrupting the request');
 ok(!main::_worker_full_status_usable($summary,{status=>'complete',automation_worker_id=>'w2'}),'nor another worker\'s result');
 ok(main::_worker_full_status_usable($summary,{status=>'running',automation_worker_id=>'w1'}),'a same-worker state that is not terminal is adopted so polling continues');
-ok(main::_worker_full_status_usable($summary,{status=>'idle'}),'an unstamped read is adopted too');
+ok(!main::_worker_full_status_usable($summary,{status=>'idle'}),'an unstamped read after a stamped summary is not this attempt\'s state');
+ok(main::_worker_full_status_usable({status=>'idle'},{status=>'idle'}),'an unstamped read matches an unstamped summary');
 
 my $event=sub {my ($seq)=@_;return {seq=>$seq,time=>100+$seq,message=>"event $seq"}};
 {
@@ -144,15 +145,24 @@ for my $case (
  ok(!scalar(grep {/process died/} @lines),'the flipped summary never reaches the log as an outcome');
 }
 {
- my @summaries=({status=>'complete',automation_worker_id=>'w1'},{status=>'complete',automation_worker_id=>'w1'});
- my @fulls=({status=>'idle'},{status=>'complete',automation_worker_id=>'w1',full=>1});
+ # An unstamped idle full read after a stamped terminal summary is not this
+ # attempt's state (nothing under usr/ removes a state file mid-run), so the
+ # summary stands. The harness runs with no active worker id, so this proves
+ # the adoption rule, not the production identity check that follows it.
+ my @summaries=({status=>'complete',automation_worker_id=>'w1'});
+ my @fulls=({status=>'idle'});
+ my @seen;
  local *main::_api=sub {
   my ($m,$p)=@_;
+  push(@seen,$p);
   return {status=>'ok'} if $p eq '/api/lg/status';
   return shift(@fulls) || die 'extra full read' if $p eq '/api/meter/lg-autocal/status';
   return shift(@summaries) || die 'extra poll';
  };
- ok(main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{})->{full},'an unstamped idle full read is adopted and polling continues');
+ my $result=main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{});
+ is($result->{status},'complete','the stamped terminal summary stands over an unstamped idle full read');
+ ok(!$result->{full},'and the idle read is not adopted');
+ is(scalar(grep { $_ eq '/api/meter/lg-autocal/status' } @seen),1,'after one full read');
 }
 {
  my @summaries=({status=>'idle'},{status=>'running',automation_worker_id=>'w1'},{status=>'complete',automation_worker_id=>'w1'});

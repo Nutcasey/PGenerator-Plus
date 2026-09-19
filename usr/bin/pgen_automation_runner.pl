@@ -1235,8 +1235,12 @@ sub _worker_full_status_usable {
     my ($summary, $full) = @_;
     return 0 if ref($full) ne 'HASH' || $full->{_transport_error};
     return 0 if ($full->{error_code} || '') =~ /^(?:daemon-unreachable|invalid-daemon-response|stopped)$/;
-    my $full_id = PGAutomation::worker_id($full);
-    return ($full_id eq '' || $full_id eq PGAutomation::worker_id($summary)) ? 1 : 0;
+    # The full read must belong to the same attempt as the summary. An
+    # unstamped read after a stamped summary is not this attempt's state
+    # (only outside interference with /tmp produces one); the terminal
+    # summary stands rather than adopting an idle that would end the wait
+    # as a worker-identity mismatch for a stage that had finished.
+    return PGAutomation::worker_id($full) eq PGAutomation::worker_id($summary) ? 1 : 0;
 }
 
 sub _wait_worker {
