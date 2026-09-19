@@ -1419,7 +1419,31 @@ function pgAutomationRenderLiveRun(run,execution){
 // One slow or failed poll is a delay, not a lost connection: the appliance
 // answers slowly while a calibration worker has its CPU. "Connection lost"
 // waits for three misses in a row, about a minute at the live cadence.
-const PG_AUTOMATION_POLL_TIMEOUT_MS=20000,PG_AUTOMATION_POLL_LOST_AFTER=3;
+const PG_AUTOMATION_POLL_TIMEOUT_MS=20000,PG_AUTOMATION_POLL_LOST_AFTER=3,PG_AUTOMATION_LOG_LINES=300;
+// 18 Sep 2026: every 2 s poll resent the same 78 KB of startup checks and
+// 81 KB of activity. The poll now names the check revision and the activity
+// cursor it already holds; the reply omits an unchanged check list and sends
+// only the runner lines appended since. The merged result keeps the shapes
+// the rest of the page reads (activity.entries, .truncated, .run_id, preflight).
+function pgAutomationPollQuery(previous){
+ const params=[];
+ if(previous?.preflight?.rev)params.push('preflight_rev='+encodeURIComponent(previous.preflight.rev));
+ if(previous?.activity?.cursor)params.push('activity_after='+encodeURIComponent(previous.activity.cursor));
+ return params.length?'?'+params.join('&'):'';
+}
+// A partial feed carries only new runner lines; append them to the entries
+// already held and cap the log lines the way a full read does: the entries
+// that are not from the log (head) come first and are kept whole.
+function pgAutomationMergeActivity(previous,incoming){
+ if(!incoming||typeof incoming!=='object'||!incoming.partial)return incoming;
+ const entries=[...(Array.isArray(previous?.entries)?previous.entries:[]),...(Array.isArray(incoming.entries)?incoming.entries:[])];
+ const head=Math.max(0,Number(incoming.head)||0),excess=entries.length-head-PG_AUTOMATION_LOG_LINES;
+ let truncated=!!(previous?.truncated||incoming.truncated);
+ if(excess>0){entries.splice(head,excess);truncated=true;}
+ const merged={...incoming,entries,truncated};
+ delete merged.partial;
+ return merged;
+}
 function pgAutomationPollMissed(message){
  pgAutomation.pollMisses=(pgAutomation.pollMisses||0)+1;
  pgAutomation.pollDelayed=true;
@@ -1429,8 +1453,11 @@ function pgAutomationPollMissed(message){
 async function pgAutomationPollLive(){
  if(pgAutomation.polling)return;pgAutomation.polling=true;
  try{
-  const result=await fetchJSON('/api/automation/runs/current',{_quiet:true,_timeoutMs:PG_AUTOMATION_POLL_TIMEOUT_MS});
+  const previous=pgAutomation.current;
+  const result=await fetchJSON('/api/automation/runs/current'+pgAutomationPollQuery(previous),{_quiet:true,_timeoutMs:PG_AUTOMATION_POLL_TIMEOUT_MS});
   if(result&&result.status!=='error'){
+   if(result.preflight_unchanged&&previous?.preflight&&!('preflight' in result))result.preflight=previous.preflight;
+   result.activity=pgAutomationMergeActivity(previous?.activity,result.activity);
    if(pgAutomation.dismissedCheck&&result.preflight?.id===pgAutomation.dismissedCheck.id&&result.preflight?.started_at===pgAutomation.dismissedCheck.started_at&&result.preflight?.status!=='checking')result.preflight=null;
    if(pgAutomation.current?.preflight?.id&&!result.preflight&&!pgAutomation.pendingChecks)pgAutomationEl('Readiness').innerHTML='';
    pgAutomation.pollMisses=0;pgAutomation.pollDelayed=false;

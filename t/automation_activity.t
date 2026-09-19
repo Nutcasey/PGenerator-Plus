@@ -87,4 +87,65 @@ my @severity=(
  ['Stop cleanup complete: calibration mode off','info'],
 );
 for my $case (@severity){is(main::webui_automation_log_level($case->[0]),$case->[1],$case->[0]);}
+# 18 Sep 2026: the feed carries a cursor. A poll that sends it back gets only
+# the lines appended since, and what the page holds after appending them is
+# what a full read would return.
+{
+ my $store=tempdir(CLEANUP=>1);local $ENV{PGEN_AUTOMATION_DIR}=$store;PGAutomation::ensure_store();
+ my $run={id=>'cursor-test',token=>'private',items=>[{readiness=>{checks=>[{time=>1,ok=>0,level=>'warning',message=>'Look at the TV menu'}]}}],startup_events=>[{time=>2,message=>'Queue accepted'}]};
+ my $path=PGAutomation::run_dir($run->{id}).'/runner.log';
+ PGAutomation::append_line_locked($path,join('',map {"[2026-09-18T10:00:0${_}Z] line $_\n"} 0..4));
+ my $full=main::webui_automation_activity($run,undef);
+ is($full->{head},2,'the entries that are not from the log come first and are counted');
+ like($full->{cursor},qr/^cursor-test:\d+:2\.[0-9a-f]{16}$/,'the cursor names the run, the log offset and a digest of those entries');
+ ok(!$full->{partial},'a feed without a cursor is complete');
+ my $same=main::webui_automation_activity($run,undef,$full->{cursor});
+ ok($same->{partial},'the same cursor gets a partial feed');
+ is_deeply($same->{entries},[],'with nothing new');
+ is($same->{cursor},$full->{cursor},'and the same cursor');
+ is($same->{head},2,'that still counts the entries the page holds');
+ PGAutomation::append_line_locked($path,"[2026-09-18T10:00:05Z] line 5\n[2026-09-18T10:00:06Z] private token=abc six\nunfinished");
+ my $more=main::webui_automation_activity($run,undef,$full->{cursor});
+ is(scalar(@{$more->{entries}}),2,'only the complete lines appended since are returned');
+ is($more->{entries}[0]{message},'line 5','in order');
+ is($more->{entries}[0]{time},'2026-09-18T10:00:05Z','with their timestamps');
+ unlike(PGAutomation::encode_json($more),qr/private|abc|unfinished/,'redacted and without the unfinished line, like a full read');
+ my $fresh=main::webui_automation_activity($run,undef);
+ is_deeply([@{$full->{entries}},@{$more->{entries}}],$fresh->{entries},'the held feed plus the partial feed is the full feed');
+ is($more->{cursor},$fresh->{cursor},'and ends at the same cursor');
+ is_deeply(main::webui_automation_activity($run,undef,$more->{cursor})->{entries},[],'an unfinished line is not served early');
+ PGAutomation::append_line_locked($path," done\n");
+ is(main::webui_automation_activity($run,undef,$more->{cursor})->{entries}[0]{message},'unfinished done','and is served once, complete');
+ # Anything the cursor cannot describe is answered with the full feed.
+ push @{$run->{startup_events}},{time=>3,message=>'Job 1 started'};
+ my $changed=main::webui_automation_activity($run,undef,$more->{cursor});
+ ok(!$changed->{partial},'changed startup entries force a full feed');
+ is($changed->{head},3,'with the new head');
+ is_deeply($changed->{entries},main::webui_automation_activity($run,undef)->{entries},'identical to a fresh read');
+ ok(!main::webui_automation_activity({%$run,id=>'other-run'},undef,$changed->{cursor})->{partial},'a cursor for another run forces a full feed');
+ ok(!main::webui_automation_activity($run,undef,'garbage')->{partial},'an unreadable cursor forces a full feed');
+ my ($rid,$end,$digest)=split(/:/,$changed->{cursor},3);
+ ok(!main::webui_automation_activity($run,undef,join(':',$rid,$end+1,$digest))->{partial},'an offset beyond the log (rotated or rewritten) forces a full feed');
+ PGAutomation::append_line_locked($path,join('',map {"[2026-09-18T10:01:00Z] bulk $_ ".('x'x80)."\n"} 1..400));
+ my $bulk=main::webui_automation_activity($run,undef,$changed->{cursor});
+ ok(!$bulk->{partial},'more new lines than the cap forces a full feed');
+ ok($bulk->{truncated},'which says it is truncated');
+ is(scalar(@{$bulk->{entries}}),3+300,'and holds the head plus the newest 300 lines');
+ like($bulk->{entries}[-1]{message},qr/^bulk 400 /,'ending with the newest');
+ PGAutomation::append_line_locked($path,join('',map {"[2026-09-18T10:02:00Z] more $_ ".('x'x240)."\n"} 1..300));
+ my $beyond=main::webui_automation_activity($run,undef,$bulk->{cursor});
+ ok(!$beyond->{partial} && $beyond->{truncated},'more new output than the window holds forces a full feed too');
+ is_deeply($beyond->{entries},main::webui_automation_activity($run,undef)->{entries},'the same one a fresh read gives');
+ my $tail=main::webui_automation_activity($run,undef,$beyond->{cursor});
+ ok($tail->{partial} && $tail->{truncated},'a partial feed of a log beyond the window is marked truncated too');
+ is_deeply($tail->{entries},[],'and carries nothing the page already holds');
+ # No run: the feed is the startup checks, and the cursor still describes it.
+ my $checks=[{ok=>1,message=>'Passed'}];
+ my $pre=main::webui_automation_activity(undef,{checks=>$checks});
+ like($pre->{cursor},qr/^:0:1\./,'a feed without a run names no run and no log');
+ is_deeply(main::webui_automation_activity(undef,{checks=>$checks},$pre->{cursor})->{entries},[],'and its partial feed is empty');
+ ok(!main::webui_automation_activity(undef,{checks=>[{ok=>0,message=>'Failed'}]},$pre->{cursor})->{partial},'until the checks change');
+ my $unlogged=main::webui_automation_activity({id=>'no-log-yet',items=>[]},undef);
+ ok(main::webui_automation_activity({id=>'no-log-yet',items=>[]},undef,$unlogged->{cursor})->{partial},'a run whose log is not written yet gets a partial feed, not a reset');
+}
 done_testing();

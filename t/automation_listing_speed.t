@@ -53,6 +53,70 @@ require "$Bin/../usr/share/PGenerator/lg.pm";
  }
 }
 
+# ---- 18 Sep 2026: the History list carries one row per job, not the job's
+# checks, warnings and checkpoints (72 runs listed as 588 KB in 3.7 s), and
+# a second listing in the same worker decodes nothing.
+{
+ my $store=tempdir(CLEANUP=>1);$ENV{PGEN_AUTOMATION_DIR}=$store;PGAutomation::ensure_store();
+ my @checks=map {{ok=>($_%9?1:0),level=>'warning',name=>"check-$_",message=>"Setting $_ ".('detail 'x8),time=>$_}} 1..60;
+ my $items=[map {{name=>"Job $_",signal_format=>($_%2?'hdr10':'sdr'),picture_mode=>'filmMaker',status=>$_==1?'failed':'complete-with-warnings',readiness=>{passed=>3,checks=>\@checks},warnings=>['a','b'],
+  checkpoints=>[map {{name=>"c$_",status=>'done',evidence=>{x=>'y'x500}}} 1..12],
+  $_==1?(failure=>{stage=>'post-readings-done',message=>'Meter read failed',error_code=>'meter-read',detail=>{big=>'z'x2000}}):()}} 0..2];
+ for my $n (1..70) {
+  PGAutomation::write_json_atomic(PGAutomation::run_dir(sprintf('run-%02d',$n)).'/run.json',{id=>sprintf('run-%02d',$n),token=>"t$n",status=>'failed',queue_name=>"Queue $n",
+   created_at=>$n,created_at_iso=>'2026-09-18T10:00:00Z',completed_at=>$n+100,items=>$items,failure=>{stage=>'post-readings-done',message=>'Meter read failed'}});
+ }
+ my $list=main::webui_automation_list_runs();
+ is(scalar(@$list),70,'seventy runs are listed');
+ is($list->[0]{queue_name},'Queue 70','newest first');
+ is_deeply([sort keys %{$list->[0]}],[qw(completed_at created_at created_at_iso failure id items queue_name status)],'a run row holds what the History row renders');
+ my $row=$list->[0]{items}[1];
+ is_deeply([sort keys %$row],[qw(checks_failed checks_passed failure name signal_format status warnings)],'a job row holds the name, status, signal format, failure and counts only');
+ is($row->{checks_passed},3+scalar(grep {$_->{ok}} @checks),'passing checks are counted, including those the manifest already summed');
+ is($row->{checks_failed},scalar(grep {!$_->{ok}} @checks),'failing checks are counted');
+ is($row->{warnings},2,'warnings are counted');
+ is_deeply($row->{failure},{stage=>'post-readings-done',message=>'Meter read failed'},'the failure keeps its stage and message');
+ ok(!exists $list->[0]{items}[0]{failure},'a job without a failure carries none');
+ my $bytes=length(PGAutomation::encode_json({status=>'ok',runs=>$list}));
+ cmp_ok($bytes,'<',60000,"seventy three-job runs list under 60 KB ($bytes)");
+ my $cache=PGAutomation::read_json_file(PGAutomation::run_dir('run-01').'/listing-cache.json');
+ is($cache->{version},$main::WEBUI_LISTING_CACHE_VERSION,'the summary beside the manifest carries the format version');
+ # The first listing of a store whose summaries exist decodes each once; the
+ # next in the same worker decodes nothing.
+ my $decoded=0;my $real_read=\&PGAutomation::read_json_file;
+ {
+  local *PGAutomation::read_json_file=sub {$decoded++;$real_read->(@_)};
+  main::webui_automation_list_runs();
+  is($decoded,70,'a worker reads each saved summary once');
+  $decoded=0;
+  my $started=Time::HiRes::time();
+  my $again=main::webui_automation_list_runs();
+  my $took=Time::HiRes::time()-$started;
+  is($decoded,0,'and lists the unchanged store again without decoding a file');
+  is_deeply($again,$list,'with the same rows');
+  cmp_ok($took,'<',0.3,sprintf('in under 0.3 s (%.3f s)',$took));
+ }
+ # A summary in the first format for the same manifest is trimmed in place;
+ # one for another manifest version is rebuilt from the manifest.
+ my $key=main::webui_automation_listing_key(PGAutomation::run_dir('run-01').'/run.json');
+ my $old={id=>'run-01',queue_name=>'Queue 1',status=>'failed',created_at=>1,created_at_iso=>'2026-09-18T10:00:00Z',completed_at=>101,failure=>{stage=>'post-readings-done',message=>'Meter read failed'},
+  items=>[map { main::webui_automation_item_summary($_) } @$items]};
+ PGAutomation::write_json_atomic(PGAutomation::run_dir('run-01').'/listing-cache.json',{key=>$key,summary=>$old});
+ PGAutomation::write_json_atomic(PGAutomation::run_dir('run-02').'/listing-cache.json',{key=>'older',summary=>$old});
+ my $reads=0;my $real=\&main::webui_automation_read_run;
+ {
+  local *main::webui_automation_read_run=sub {$reads++;$real->(@_)};
+  my %by_id=map {($_->{id}=>$_)} @{main::webui_automation_list_runs()};
+  is($reads,1,'only the summary for a changed manifest is rebuilt from the manifest');
+  my $expected=PGAutomation::clone($list->[-1]);
+  delete $_->{signal_format} for @{$expected->{items}};
+  is_deeply($by_id{'run-01'},$expected,'a first-format summary is trimmed to the row fields it holds (all but the signal format)');
+  is_deeply($by_id{'run-02'},$list->[-2],'the rebuilt one carries every row field');
+ }
+ is(PGAutomation::read_json_file(PGAutomation::run_dir('run-01').'/listing-cache.json')->{version},$main::WEBUI_LISTING_CACHE_VERSION,'the trimmed summary replaces the old one on disk');
+ cmp_ok(-s PGAutomation::run_dir('run-01').'/listing-cache.json','<',2000,'and is a fraction of its size');
+}
+
 # ---- P3: LG Calibration History list
 {
  my $root=tempdir(CLEANUP=>1);

@@ -1887,7 +1887,7 @@ sub webui_handle_request (@) {
      }
     }
     elsif($path=~m{^/api/automation(?:/|$)}) {
-     my $result=&webui_automation_api($path,$method,$body);
+     my $result=&webui_automation_api($path,$method,$body,$request_query);
      my $len=length($result);
      print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
     }
@@ -13496,8 +13496,60 @@ sub webui_automation_check_level (@) {
  return $level;
 }
 
+# The window of runner.log a full activity read covers: the last 64 KB, at
+# most 300 lines. The page states the same limits.
+our $WEBUI_ACTIVITY_LOG_WINDOW=65536;
+our $WEBUI_ACTIVITY_LOG_LINES=300;
+
+# One activity entry from a saved runner log line: the timestamp resolved on
+# the device, the run token and any credential field redacted.
+sub webui_automation_log_entry (@) {
+ my ($run,$line)=@_;
+ my $stamp=$line=~s/^\[([^\]]+)\]\s*// ? $1 : undef;
+ $stamp=&webui_automation_log_time($stamp);
+ $line=~s/\Q$run->{token}\E/[redacted]/g if($run->{token});
+ $line=~s/("?(?:automation_token|client[_-]key|token|password)"?\s*[=:]\s*)(?:"[^"]*"|'[^']*'|\S+)/${1}[redacted]/ig;
+ return {time=>$stamp,level=>&webui_automation_log_level($line),message=>$line,source=>"Runner"};
+}
+
+# A short digest of the entries that do not come from the log, so a cursor
+# can say whether they are still the ones the client holds.
+sub webui_automation_activity_digest (@) {
+ my ($entries)=@_;
+ my $text=join("\x1e",map { my $e=$_; join("\x1f",map { defined($_) ? $_ : "" } @{$e}{qw(time level message item_number source)}) } @$entries);
+ utf8::encode($text);
+ return scalar(@$entries).".".substr(Digest::SHA::sha256_hex($text),0,16);
+}
+
+# The log lines appended after a cursor's offset. Returns undef when the
+# window would not describe them as a full read would (a line count over the
+# cap, or a log that cannot be opened), so the caller falls back to that.
+sub webui_automation_activity_tail (@) {
+ my ($run,$path,$start,$size)=@_;
+ return {entries=>[],end=>$start} if($size==$start);
+ return undef if(!open(my $fh,"<:raw",$path));
+ seek($fh,$start,0);
+ my $text="";read($fh,$text,$WEBUI_ACTIVITY_LOG_WINDOW);close($fh);
+ my $read=length($text);
+ my $tail=$text=~s/([^\n]*)\z// ? length($1) : 0; # Ignore a line still being appended.
+ require Encode;
+ $text=Encode::decode('UTF-8',$text);
+ my @lines=split(/\n/,$text);
+ return undef if(@lines>$WEBUI_ACTIVITY_LOG_LINES);
+ return {entries=>[map { &webui_automation_log_entry($run,$_) } @lines],end=>$start+$read-$tail};
+}
+
+# The activity feed: job readiness checks, startup events and startup checks
+# first, then the newest complete lines of runner.log (the last 64 KB, at
+# most 300 lines). It is rebuilt for every status poll, and at most a few
+# lines are new each time, so the reply carries a cursor: the run, the log
+# byte offset already served and a digest of the entries that are not from
+# the log. A poll that sends the cursor back gets only the lines appended
+# since, marked partial, with a new cursor. Anything the cursor cannot
+# describe (another run, changed checks or events, a log that shrank or grew
+# by more than the window) gets the full feed again. No cursor, full feed.
 sub webui_automation_activity (@) {
- my ($run,$preflight)=@_;
+ my ($run,$preflight,$after)=@_;
  my @entries;
  my $truncated=0;
  my $source=ref($run) eq "HASH" ? $run->{readiness} : $preflight;
@@ -13519,32 +13571,71 @@ sub webui_automation_activity (@) {
    push @entries,{time=>$check->{time},level=>&webui_automation_check_level($check),message=>$check->{message}||$check->{name}||"",item_number=>$check->{item_number},source=>"Startup check"};
   }
  }
- if(ref($run) eq "HASH" && PGAutomation::safe_component($run->{id})) {
-  my $path=PGAutomation::run_dir($run->{id})."/runner.log";
+ my $head=scalar(@entries);
+ my $digest=&webui_automation_activity_digest(\@entries);
+ my $run_id=ref($run) eq "HASH" ? PGAutomation::safe_component($run->{id}) : "";
+ my $path=$run_id ne "" ? PGAutomation::run_dir($run_id)."/runner.log" : "";
+ my $size=$path ne "" && -f $path ? (-s $path) : 0;
+ my $cursor=sub { return join(":",$run_id,$_[0],$digest); };
+ my $feed=sub { return {entries=>$_[0],truncated=>$_[1],run_id=>ref($run) eq "HASH"?$run->{id}:undef,head=>$head,cursor=>$cursor->($_[2])}; };
+ if(defined($after) && $after ne "") {
+  my ($after_run,$after_end,$after_digest)=split(/:/,$after,3);
+  if(defined($after_digest) && $after_run eq $run_id && $after_digest eq $digest
+     && $after_end=~/^\d+$/ && $after_end<=$size && $size-$after_end<=$WEBUI_ACTIVITY_LOG_WINDOW) {
+   my $tail=&webui_automation_activity_tail($run,$path,$after_end,$size);
+   if(ref($tail) eq "HASH") {
+    my $partial=$feed->($tail->{entries},$size>$WEBUI_ACTIVITY_LOG_WINDOW?1:0,$tail->{end});
+    $partial->{partial}=JSON::PP::true;
+    return $partial;
+   }
+  }
+ }
+ my $log_end=0;
+ if($path ne "") {
   if(open(my $fh,"<:raw",$path)) {
-   my $size=-s $fh;
-   my $offset=$size>65536 ? $size-65536 : 0;
+   $size=-s $fh;
+   my $offset=$size>$WEBUI_ACTIVITY_LOG_WINDOW ? $size-$WEBUI_ACTIVITY_LOG_WINDOW : 0;
    seek($fh,$offset,0);
-   my $text="";read($fh,$text,65536);close($fh);
+   my $text="";read($fh,$text,$WEBUI_ACTIVITY_LOG_WINDOW);close($fh);
+   my $read=length($text);
    $text=~s/^[^\n]*\n// if($offset);
-   $text=~s/[^\n]*\z//; # Ignore a line still being appended.
+   my $tail=$text=~s/([^\n]*)\z// ? length($1) : 0; # Ignore a line still being appended.
+   $log_end=$offset+$read-$tail;
    require Encode;
    $text=Encode::decode('UTF-8',$text);
    my @lines=split(/\n/,$text);
-   $truncated=1 if($offset || @lines>300);
-   @lines=@lines[-300..-1] if(@lines>300);
-   foreach my $line (@lines) {
-    my $stamp=$line=~s/^\[([^\]]+)\]\s*// ? $1 : undef;
-    $stamp=&webui_automation_log_time($stamp);
-    $line=~s/\Q$run->{token}\E/[redacted]/g if($run->{token});
-    $line=~s/("?(?:automation_token|client[_-]key|token|password)"?\s*[=:]\s*)(?:"[^"]*"|'[^']*'|\S+)/${1}[redacted]/ig;
-    push @entries,{time=>$stamp,level=>&webui_automation_log_level($line),message=>$line,source=>"Runner"};
-   }
+   $truncated=1 if($offset || @lines>$WEBUI_ACTIVITY_LOG_LINES);
+   @lines=@lines[-$WEBUI_ACTIVITY_LOG_LINES..-1] if(@lines>$WEBUI_ACTIVITY_LOG_LINES);
+   push @entries,map { &webui_automation_log_entry($run,$_) } @lines;
   } elsif(-e $path) {
    push @entries,{level=>"error",message=>"Saved runner log could not be read: $!",source=>"Log"};
   }
  }
- return {entries=>\@entries,truncated=>$truncated,run_id=>ref($run) eq "HASH"?$run->{id}:undef};
+ return $feed->(\@entries,$truncated,$log_end);
+}
+
+# A revision of the saved startup check as the page reads it: every value
+# the card shows is a top-level scalar, or a list whose length moves with it,
+# and every writer stamps updated_at. update_age is derived per request and
+# stays out; elapsed_seconds is in, so a check still running is resent.
+sub webui_automation_preflight_rev (@) {
+ my ($state)=@_;
+ return "" if(ref($state) ne "HASH");
+ my @parts;
+ foreach my $key (sort keys %$state) {
+  next if($key eq "update_age" || $key eq "rev");
+  my $value=$state->{$key};
+  if(ref($value) eq "ARRAY") {
+   push @parts,"$key=[".join(",",scalar(@$value),map { ref($_) eq "HASH" ? join("/",map { defined($_) ? $_ : "" } @{$_}{qw(status ok level)}) : () } @$value)."]";
+  } elsif(ref($value) eq "HASH") {
+   push @parts,"$key={".scalar(keys %$value)."}";
+  } else {
+   push @parts,"$key=".(defined($value) ? "$value" : "");
+  }
+ }
+ my $text=join("\x1f",@parts);
+ utf8::encode($text);
+ return substr(Digest::SHA::sha256_hex($text),0,16);
 }
 
 sub webui_automation_read_run (@) {
@@ -13733,13 +13824,53 @@ sub webui_automation_job_checks_cached (@) {
  $WEBUI_JOB_CHECKS_MEMO{$path}={key=>$key,rows=>$rows,used=>time()};
  return $rows;
 }
+# Every row is kept: the job view lists all setting checks and counts them.
+# Each row is trimmed to the fields that view reads; the capability profile
+# identity and the operation name on every row were half of each line.
+our @WEBUI_AUTOMATION_CHECK_KEYS=qw(key category expected observed verified result reason error_code checkpoint point stage timestamp at);
 sub webui_automation_job_checks_read (@) {
  my ($path)=@_;
  my @rows;
  return [] if(!open(my $fh,"<",$path));
- while(my $line=<$fh>) { my $row=eval { JSON::PP::decode_json($line) }; push @rows,$row if(ref($row) eq "HASH"); }
+ while(my $line=<$fh>) {
+  my $row=eval { JSON::PP::decode_json($line) };
+  next if(ref($row) ne "HASH");
+  push @rows,{map { exists($row->{$_}) ? ($_=>$row->{$_}) : () } @WEBUI_AUTOMATION_CHECK_KEYS};
+ }
  close($fh);
  return \@rows;
+}
+
+# What the graphs read of a series or calibration snapshot, whether saved
+# with the job or live from the worker. A worker's saved state also holds
+# its 1D curve, anchor history, processing evidence and upload payloads:
+# evidence for the artifact download, and 300 KB of every job-detail poll.
+our @WEBUI_AUTOMATION_SNAPSHOT_KEYS=qw(type points status steps readings white_reading black_reading signal_mode target_gamma target_gamut delta_e_formula target_white calibration_target_context max_luma dv_map_mode color_format max_bpc signal_range pattern_signal_range transport_signal_range transport_context_inferred sdr_1d_dpg_peak_ire lg_autocal_26_best_known method current_name current_step current_delta_e current_luminance luminance_error_pct message measurement_retry);
+sub webui_automation_graph_snapshot (@) {
+ my ($state)=@_;
+ return undef if(ref($state) ne "HASH");
+ my %safe;
+ foreach my $key (@WEBUI_AUTOMATION_SNAPSHOT_KEYS) { $safe{$key}=$state->{$key} if(exists($state->{$key})); }
+ return \%safe;
+}
+
+# The job view reads a job's recipe fields, name, status, failure, warnings,
+# manual checks, its checkpoint list and the readiness checks that failed.
+# The TV capability profile, setting contracts, checkpoint evidence and the
+# passing checks belong to the manifest and the artifact download.
+our @WEBUI_AUTOMATION_JOB_EVIDENCE_KEYS=qw(setting_contracts generation_profile capability_profile preflight_contract best_available_settings best_available_write_ack tv_input hazards hazard_capabilities hazard_restore device_identity supported_picture_keys calibration_settings_recipe);
+sub webui_automation_job_view_item (@) {
+ my ($item)=@_;
+ return $item if(ref($item) ne "HASH");
+ delete @{$item}{@WEBUI_AUTOMATION_JOB_EVIDENCE_KEYS};
+ $item->{checkpoints}=[map { my $c=$_; ref($c) eq "HASH" ? {map { exists($c->{$_}) ? ($_=>$c->{$_}) : () } qw(name status verified completed_at duration_seconds)} : () } @{$item->{checkpoints}}]
+  if(ref($item->{checkpoints}) eq "ARRAY");
+ if(ref($item->{readiness}) eq "HASH" && ref($item->{readiness}{checks}) eq "ARRAY") {
+  my @checks=grep { ref($_) eq "HASH" } @{$item->{readiness}{checks}};
+  $item->{readiness}{passed}=0+(($item->{readiness}{passed}||0)+scalar(grep { $_->{ok} } @checks));
+  $item->{readiness}{checks}=[grep { !$_->{ok} } @checks];
+ }
+ return $item;
 }
 
 sub webui_automation_job_detail (@) {
@@ -13761,12 +13892,12 @@ sub webui_automation_job_detail (@) {
  foreach my $phase (qw(pre post)) {
   foreach my $key (@{$item->{$phase."_series"}||[qw(greyscale-21 colors-30 saturations-24)]}) {
    next if($key !~ /^(?:greyscale-21|colors-30|saturations-24)$/);
-   my $snapshot=PGAutomation::read_json_cached("$dir/$phase/$key.json");
+   my $snapshot=&webui_automation_graph_snapshot(PGAutomation::read_json_cached("$dir/$phase/$key.json"));
    push @snapshots,{phase=>$phase,key=>$key,snapshot=>$snapshot} if(ref($snapshot) eq "HASH");
   }
  }
  foreach my $key (qw(grey 3d dv-profile)) {
-  my $snapshot=PGAutomation::read_json_cached("$dir/calibration/$key-state.json");
+  my $snapshot=&webui_automation_graph_snapshot(PGAutomation::read_json_cached("$dir/calibration/$key-state.json"));
   push @snapshots,{phase=>"calibration",key=>$key,snapshot=>$snapshot} if(ref($snapshot) eq "HASH");
  }
  my %sources=("greyscale-done"=>["grey","/tmp/meter_lg_autocal.json"],
@@ -13786,25 +13917,45 @@ sub webui_automation_job_detail (@) {
   if(ref($state) eq "HASH" && ($source->[0] eq "series" || ($state->{full_autocal_run_id}||"") eq $run->{id}) && ref($after) eq "HASH" && ($after->{status}||"") eq "running"
     && defined($after->{active_item}) && $after->{active_item} == $index && ($after->{active_stage}||"") eq $stage
     && ($after->{stage_started_at}||0) == $run->{stage_started_at}) {
-   my %safe;
-   foreach my $key (qw(type points status steps readings white_reading black_reading signal_mode target_gamma target_gamut calibration_target_context max_luma dv_map_mode color_format max_bpc signal_range pattern_signal_range transport_signal_range sdr_1d_dpg_peak_ire lg_autocal_26_best_known current_name current_step current_delta_e current_luminance luminance_error_pct message measurement_retry)) {
-    $safe{$key}=$state->{$key} if(exists($state->{$key}));
-   }
-   $live={key=>$source->[0] eq "series" ? ($run->{active_series}{key}||"series") : $source->[0],phase=>$stage eq "pre-readings-done" ? "pre" : $stage eq "post-readings-done" ? "post" : "calibration",snapshot=>\%safe};
+   $live={key=>$source->[0] eq "series" ? ($run->{active_series}{key}||"series") : $source->[0],phase=>$stage eq "pre-readings-done" ? "pre" : $stage eq "post-readings-done" ? "post" : "calibration",snapshot=>&webui_automation_graph_snapshot($state)};
   }
  }
  &webui_automation_scrub_credentials($item);
  my $job_checks=ref($item->{readiness}) eq "HASH" ? $item->{readiness}{checks} : $run->{readiness}{checks};
  my @issues=grep { ref($_) eq "HASH" && !$_->{ok} && defined($_->{item_number}) && $_->{item_number} == $index } @{$job_checks||[]};
+ &webui_automation_job_view_item($item);
  return {status=>"ok",run_id=>$run->{id},item_number=>0+$index,item=>$item,checks=>\@checks,snapshots=>\@snapshots,live=>$live,
   readiness_issues=>\@issues,
   run_status=>$run->{status},active_stage=>$stage,stage_started_at=>$run->{stage_started_at},fetched_at=>PGAutomation::now()};
+}
+
+# One History row per job: what the row and its failure line can show. The
+# check list, warnings and checkpoints wait for the run to be opened; with
+# them, 72 runs listed as 588 KB.
+sub webui_automation_listing_item (@) {
+ my ($item)=@_;
+ $item={} if(ref($item) ne "HASH");
+ my $row={
+  name=>defined($item->{name}) && $item->{name} ne "" ? $item->{name} : ($item->{picture_mode}||"Item"),
+  status=>$item->{status}||"queued",
+ };
+ $row->{signal_format}=$item->{signal_format} if(defined($item->{signal_format}) && !ref($item->{signal_format}));
+ $row->{failure}={stage=>$item->{failure}{stage}||"",message=>$item->{failure}{message}||""} if(ref($item->{failure}) eq "HASH");
+ if(ref($item->{readiness}) eq "HASH" && ref($item->{readiness}{checks}) eq "ARRAY") {
+  my @checks=grep { ref($_) eq "HASH" } @{$item->{readiness}{checks}};
+  $row->{checks_passed}=0+(($item->{readiness}{passed}||0)+scalar(grep { $_->{ok} } @checks));
+  $row->{checks_failed}=0+scalar(grep { !$_->{ok} } @checks);
+ }
+ $row->{warnings}=0+scalar(@{$item->{warnings}}) if(ref($item->{warnings}) eq "ARRAY");
+ return $row;
 }
 
 sub webui_automation_listing_run (@) {
  my ($run)=@_;
  return undef if(ref($run) ne "HASH");
  my $summary=&webui_automation_public_run($run);
+ my $raw_items=ref($run->{items}) eq "ARRAY" ? $run->{items} : [];
+ $raw_items=$run->{queue_snapshot}{items} if(!@$raw_items && ref($run->{queue_snapshot}) eq "HASH" && ref($run->{queue_snapshot}{items}) eq "ARRAY");
  return {
   id=>$summary->{id},
   queue_name=>$summary->{queue_name},
@@ -13813,7 +13964,22 @@ sub webui_automation_listing_run (@) {
   created_at_iso=>$summary->{created_at_iso},
   completed_at=>$summary->{completed_at},
   failure=>$summary->{failure},
-  items=>$summary->{items},
+  items=>[map { &webui_automation_listing_item($_) } @$raw_items],
+ };
+}
+
+# The format of the summary kept beside each manifest. A summary without
+# this version is replaced the first time History is listed: trimmed from
+# the old summary when that still matches the manifest, rebuilt from the
+# manifest otherwise.
+our $WEBUI_LISTING_CACHE_VERSION=2;
+sub webui_automation_listing_upgrade (@) {
+ my ($old)=@_;
+ return undef if(ref($old) ne "HASH");
+ my $items=ref($old->{items}) eq "ARRAY" ? $old->{items} : [];
+ return {
+  (map { ($_=>$old->{$_}) } grep { exists($old->{$_}) } qw(id queue_name status created_at created_at_iso completed_at failure)),
+  items=>[map { &webui_automation_listing_item($_) } @$items],
  };
 }
 
@@ -13848,18 +14014,28 @@ sub webui_automation_list_runs (@) {
   my $dir=PGAutomation::run_dir($id);
   my $key=&webui_automation_listing_key("$dir/run.json");
   next if($key eq "");
-  my $cached=PGAutomation::read_json_file("$dir/listing-cache.json");
-  if(ref($cached) eq "HASH" && ($cached->{key}||"") eq $key && ref($cached->{summary}) eq "HASH") {
+  # Through the shared cache: a worker that has listed the store once decodes
+  # nothing for an unchanged run on the next request.
+  my $cached=PGAutomation::read_json_cached("$dir/listing-cache.json");
+  if(ref($cached) eq "HASH" && ($cached->{version}||0)==$WEBUI_LISTING_CACHE_VERSION && ($cached->{key}||"") eq $key && ref($cached->{summary}) eq "HASH") {
    push @runs,$cached->{summary};
    next;
   }
-  my $run=&webui_automation_read_run($id);
-  next if(ref($run) ne "HASH");
-  my $summary=&webui_automation_listing_run($run);
+  my $summary;
+  if(ref($cached) eq "HASH" && !$cached->{version} && ($cached->{key}||"") eq $key && ref($cached->{summary}) eq "HASH") {
+   # A summary in the first format for this same manifest holds every row
+   # field but the signal format. Trim it in place rather than decode the
+   # manifest again: 72 of them on the appliance would take minutes.
+   $summary=&webui_automation_listing_upgrade($cached->{summary});
+  } else {
+   my $run=&webui_automation_read_run($id);
+   next if(ref($run) ne "HASH");
+   $summary=&webui_automation_listing_run($run);
+  }
   next if(ref($summary) ne "HASH");
   push @runs,$summary;
   # Only cache what was read from the manifest version that was stat'ed.
-  &webui_automation_write_listing_cache($dir,{key=>$key,summary=>$summary})
+  &webui_automation_write_listing_cache($dir,{version=>$WEBUI_LISTING_CACHE_VERSION,key=>$key,summary=>$summary})
    if(&webui_automation_listing_key("$dir/run.json") eq $key);
  }
  @runs=sort { ($b->{created_at}||0) <=> ($a->{created_at}||0) } @runs;
@@ -15411,8 +15587,23 @@ sub webui_automation_reap_dead_runner (@) {
  return 1;
 }
 
+# One value from the request's query string, decoded; undef when absent.
+sub webui_automation_query_param (@) {
+ my ($query,$name)=@_;
+ return undef if(!defined($query) || $query eq "" || !defined($name));
+ foreach my $pair (split(/&/,$query)) {
+  my ($key,$value)=split(/=/,$pair,2);
+  next if(!defined($key) || $key ne $name);
+  $value="" if(!defined($value));
+  $value=~tr/+/ /;
+  $value=~s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge;
+  return $value;
+ }
+ return undef;
+}
+
 sub webui_automation_api (@) {
- my ($path,$method,$body)=@_;
+ my ($path,$method,$body,$query)=@_;
  my $payload=&webui_automation_body($body);
  if($path eq "/api/automation/recipes" && $method eq "GET") { return &webui_automation_json({status=>"ok",recipes=>&webui_automation_list_defs("recipe")}); }
  if($path eq "/api/automation/recipes" && $method eq "POST") { return &webui_automation_save_recipe($payload); }
@@ -15459,14 +15650,31 @@ sub webui_automation_api (@) {
   delete($public_execution->{token}) if(ref($public_execution) eq "HASH");
   my $activity_run=$run;
   $activity_run=undef if(ref($preflight) eq "HASH" && ($preflight->{status}||"")=~/^(?:checking|blocked|failed|interrupted)$/ && ref($run) eq "HASH" && ($run->{status}||"")=~/^(?:complete(?:-with-warnings)?|stopped|failed)$/);
-  my $activity=&webui_automation_activity($activity_run,$preflight);
+  # 18 Sep 2026: every 2 s poll carried 78 KB of startup checks and 81 KB of
+  # activity rebuilt from the log, against 13 KB of run. A poll that names
+  # the check revision and the activity cursor it already holds gets back
+  # only what changed; a poll without them gets the full reply as before.
+  my $preflight_rev=&webui_automation_query_param($query,"preflight_rev");
+  my $activity_after=&webui_automation_query_param($query,"activity_after");
+  my $activity=&webui_automation_activity($activity_run,$preflight,$activity_after);
   my $dismissed=PGAutomation::read_json_file(PGAutomation::base_dir().'/preflight-dismissed.json');
   $preflight=undef if(ref($preflight) eq 'HASH' && ref($dismissed) eq 'HASH'
    && ($preflight->{status}||'') =~ /^(?:ready|blocked|failed|interrupted)$/
    && ($preflight->{id}||'') eq ($dismissed->{id}||'')
    && ($preflight->{started_at}||0)==($dismissed->{started_at}||0)
    && ($preflight->{completed_at}||0)==($dismissed->{completed_at}||0));
-  return &webui_automation_json({status=>"ok",execution=>$public_execution,run=>ref($run) eq "HASH" ? &webui_automation_public_run($run) : undef,preflight=>$preflight,activity=>$activity});
+  my $reply={status=>"ok",execution=>$public_execution,run=>ref($run) eq "HASH" ? &webui_automation_public_run($run) : undef,preflight=>undef,activity=>$activity};
+  $reply->{activity_reset}=JSON::PP::true if(defined($activity_after) && $activity_after ne "" && !$activity->{partial});
+  if(ref($preflight) eq "HASH") {
+   $preflight->{rev}=&webui_automation_preflight_rev($preflight);
+   if(defined($preflight_rev) && $preflight_rev ne "" && $preflight_rev eq $preflight->{rev}) {
+    delete $reply->{preflight};
+    $reply->{preflight_unchanged}=JSON::PP::true;
+   } else {
+    $reply->{preflight}=$preflight;
+   }
+  }
+  return &webui_automation_json($reply);
  }
  if($path=~m{^/api/automation/runs/([^/]+)/jobs/(\d+)$} && $method eq "GET") {
   my $detail=&webui_automation_job_detail($1,$2);
