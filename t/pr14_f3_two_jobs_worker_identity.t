@@ -112,7 +112,10 @@ local *main::_api=sub {
     return series_start($payload) if $p eq '/api/meter/series' && $m eq 'POST';
     return series_status() if $p eq '/api/meter/series/status';
     return grey_start($payload) if $p eq '/api/meter/lg-autocal' && $m eq 'POST';
-    return grey_status() if $p eq '/api/meter/lg-autocal/status';
+    # The wait loop polls the summary view (?view=summary&after=N) and reads
+    # the plain path once at the end; this stand-in serves the same state
+    # for both, which the runner tolerates.
+    return grey_status() if $p =~ m{^/api/meter/lg-autocal/status(?:\?|$)};
     die "unexpected $m $p";
 };
 # Real artifact copier reads fixed /tmp paths only when state undef; keep it

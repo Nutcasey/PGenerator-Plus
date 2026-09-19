@@ -1174,12 +1174,31 @@ sub _log_worker_events {
     }
 }
 
+# Status routes with a summary view (?view=summary&after=N). The projection
+# carries every key the wait loop reads, at a few KB instead of the full state
+# (160 KB late in a greyscale stage, half a second to decode on the appliance
+# every two seconds). The full state is fetched once at the end, so callers
+# and the archive still see the whole result.
+my %WORKER_SUMMARY_STATUS_PATHS = map { $_ => 1 } qw(
+    /api/meter/lg-autocal/status
+    /api/meter/lg-3d-autocal/status
+    /api/lg/dv-profile/status
+);
+
+sub _worker_status_poll_path {
+    my ($status_path, $after) = @_;
+    return $status_path if !$WORKER_SUMMARY_STATUS_PATHS{$status_path};
+    $after = 0 if !defined($after) || $after !~ /^\d+$/;
+    return $status_path . '?view=summary&after=' . $after;
+}
+
 sub _wait_worker {
     my ($status_path, $kind, $item) = @_;
     my $started = time();
     my $last_keepalive = 0;
     my $last_log_progress = '';
     my $last_activity_sequence = 0;
+    my $summary_view = $WORKER_SUMMARY_STATUS_PATHS{$status_path} ? 1 : 0;
     my ($timing_started,$timing_base,$timing_last)=($started,0,0);
     my $point_started=$started;
     my @point_seconds;
@@ -1194,8 +1213,14 @@ sub _wait_worker {
             _log("$kind interrupted by stop request before worker status became terminal");
             return undef;
         }
-        my $status = _api('GET', $status_path, undef);
+        my $status = _api('GET', _worker_status_poll_path($status_path, $last_activity_sequence), undef);
         return $status if $status->{error_code} && $status->{error_code} eq 'daemon-unreachable';
+        if ($summary_view && _status_terminal($status->{status} || '')) {
+            # The summary is a projection; callers and the archive need the
+            # full state, so read it once now the worker has reached an end.
+            $status = _api('GET', $status_path, undef);
+            return $status if $status->{error_code} && $status->{error_code} eq 'daemon-unreachable';
+        }
         my $state = $status->{status} || '';
         my $status_id = PGAutomation::worker_id($status);
         # A transient idle poll carries no attempt id. It is never adopted as a

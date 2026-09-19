@@ -154,7 +154,8 @@ sub run_item {
  local *PGAutomation::write_json_atomic=sub {push @published,$_[0];1};
  eval 'package main; {my $state_file=q{'.$store.'/dv-state.json};my $config={};'.$sub.'} 1' or die $@;
  main::write_state(status=>'running');
- is_deeply(\@published,["$store/dv-state.json"],'write_state publishes through write_json_atomic');
+ # The state file first, then the automation poller's summary sidecar.
+ is_deeply(\@published,["$store/dv-state.json","$store/dv-state.json.summary"],'write_state publishes the state and its summary sidecar through write_json_atomic');
 }
 # H-http-listener / H-http-503
 {

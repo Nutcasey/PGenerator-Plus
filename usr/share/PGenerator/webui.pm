@@ -1892,7 +1892,7 @@ sub webui_handle_request (@) {
      print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
     }
     elsif($path=~/^\/api\/lg\//) {
-     my $result=&webui_lg_api($path,$method,$body);
+     my $result=&webui_lg_api($path,$method,$body,$request_query);
      $result=&lg_public_api_json($result) if(defined(&lg_public_api_json));
      my $len=length($result);
      print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
@@ -2095,7 +2095,7 @@ sub webui_handle_request (@) {
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
    }
    elsif($path eq "/api/meter/lg-autocal/status") {
-    my $result=&webui_meter_lg_autocal_status();
+    my $result=&webui_meter_lg_autocal_status($request_query);
     my $len=length($result);
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
    }
@@ -2120,7 +2120,7 @@ sub webui_handle_request (@) {
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
    }
    elsif($path eq "/api/meter/lg-3d-autocal/status") {
-    my $result=&webui_meter_lg_3d_autocal_status();
+    my $result=&webui_meter_lg_3d_autocal_status($request_query);
     my $len=length($result);
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
    }
@@ -6726,10 +6726,79 @@ my $_ac_target_gamma="bt1886";
 	 return $resp;
 	}
 
+# Automation polls a worker's status every two seconds and reads only a few
+# top-level keys, while the full state passes 100 KB during a greyscale stage
+# and costs the poller half a second to decode. ?view=summary serves a small
+# projection instead: the worker's .summary sidecar when it is at least as new
+# as the state file, otherwise the same keys extracted from the full state.
+# ?after=N drops activity events the poller has already seen. The projection
+# keeps every key the status fix-ups below read, so they apply to it
+# unchanged; the handlers must never write a summary back to the state file.
+my @_worker_status_summary_keys=qw(
+ status current_name current_step total_steps current_delta_e message error_code debug phase
+ automation_worker_id worker_pid worker_start_ticks activity_sequence activity_events
+ started_at completed_at elapsed_ms autocal calibration_mode
+ full_workflow full_autocal_run_id full_autocal_phase
+ final_1d_lut_uploaded final_1d_lut_upload_verified
+ upload_verified terminal_commit_verified tone_map_upload_status tone_map_upload_error_code
+);
+my $_worker_status_summary_events=60;
+
+# Returns undef when the query does not ask for the summary view, otherwise
+# the activity sequence to filter after (0 keeps every event).
+sub webui_worker_status_summary_after (@) {
+ my ($query)=@_;
+ return undef if(!defined($query) || $query!~/(?:^|&)view=summary(?:&|$)/);
+ return ($query=~/(?:^|&)after=(\d{1,15})(?:&|$)/) ? $1+0 : 0;
+}
+
+sub webui_worker_status_read_text (@) {
+ my ($path)=@_;
+ my $text="";
+ if(open(my $fh,"<",$path)) { local $/; $text=<$fh>; close($fh); }
+ return defined($text) ? $text : "";
+}
+
+# Reads a worker state file for its status route. Returns the text to serve
+# and a flag that is true when that text is the summary projection.
+sub webui_worker_status_read (@) {
+ my ($file,$query)=@_;
+ my $after=&webui_worker_status_summary_after($query);
+ return (&webui_worker_status_read_text($file),0) if(!defined($after));
+ my $state;
+ my $sidecar="$file.summary";
+ my @full=Time::HiRes::stat($file);
+ my @side=Time::HiRes::stat($sidecar);
+ if(@full && @side && $side[9]>=$full[9]) {
+  my $text=&webui_worker_status_read_text($sidecar);
+  $state=eval { JSON::PP->new->utf8(1)->decode($text) } if($text ne "");
+  $state=undef if(ref($state) ne "HASH");
+ }
+ if(ref($state) ne "HASH") {
+  # No usable sidecar: take the same keys from the full state. Text that
+  # does not decode is served whole; the summary flag still blocks write-back.
+  my $json=&webui_worker_status_read_text($file);
+  return ("",1) if($json eq "");
+  my $full=eval { JSON::PP->new->utf8(1)->decode($json) };
+  return ($json,1) if(ref($full) ne "HASH");
+  $state={};
+  foreach my $key (@_worker_status_summary_keys) { $state->{$key}=$full->{$key} if(exists($full->{$key})); }
+  if(ref($state->{activity_events}) eq "ARRAY" && @{$state->{activity_events}}>$_worker_status_summary_events) {
+   $state->{activity_events}=[ @{$state->{activity_events}}[-$_worker_status_summary_events..-1] ];
+  }
+ }
+ if($after>0 && ref($state->{activity_events}) eq "ARRAY") {
+  $state->{activity_events}=[ grep { ref($_) eq "HASH" && defined($_->{seq}) && !ref($_->{seq}) && $_->{seq}=~/^\d+$/ && $_->{seq}>$after } @{$state->{activity_events}} ];
+ }
+ return (JSON::PP->new->canonical(1)->utf8(1)->encode($state),1);
+}
+
 sub webui_meter_lg_autocal_status (@) {
- if(-f $_meter_lg_autocal_file) {
-  my $json="";
-  if(open(my $fh,"<",$_meter_lg_autocal_file)) { local $/; $json=<$fh>; close($fh); }
+ my ($query,$file)=@_;
+ # Tests pass their own state file; the daemon always uses the fixed path.
+ $file=$_meter_lg_autocal_file if(!defined($file) || $file eq "");
+ if(-f $file) {
+  my ($json,$summary)=&webui_worker_status_read($file,$query);
 	  if($json ne "") {
 	   # When the autocal worker has finished (status=complete or cancelled)
 	   # and isn't actually running anymore, the persisted state can still
@@ -6781,7 +6850,7 @@ sub webui_meter_lg_autocal_status (@) {
 		    # and the standalone-greyscale completion path. That clears
 		     # the keys exactly once, after the whole workflow (or the
 		     # standalone greyscale run) is truly done.
-		    if($changed && open(my $wf,">",$_meter_lg_autocal_file)) { print $wf $json; close($wf); chmod(0666,$_meter_lg_autocal_file); }
+		    if($changed && !$summary && open(my $wf,">",$file)) { print $wf $json; close($wf); chmod(0666,$file); }
 	   }
 	   if($json=~/"status"\s*:\s*"running"/) {
 	    # Debounce "process died". webui_meter_lg_autocal_running() is a single
@@ -6793,7 +6862,7 @@ sub webui_meter_lg_autocal_status (@) {
 	    # (across the per-request forks) and only declare death after a grace
 	    # window of sustained absence. The timer is cleared as soon as the
 	    # worker reappears or the status leaves "running".
-	    my $_dmf="$_meter_lg_autocal_file.misses";
+	    my $_dmf="$file.misses";
 	    if(!&webui_meter_lg_autocal_running()) {
 	     my $_now=int(time()*1000);
 	     my $_first_miss=0;
@@ -6803,7 +6872,10 @@ sub webui_meter_lg_autocal_status (@) {
 	      if(open(my $mf,">",$_dmf)) { print $mf $_first_miss; close($mf); chmod(0666,$_dmf); }
 	      return $json;
 	     }
-	     unlink($_dmf);
+	     # The summary view reports the death but leaves the first-miss
+	     # marker and the state file alone; the full read that follows
+	     # applies the same flip and saves it.
+	     unlink($_dmf) if(!$summary);
 	     # Explicit Stop (stop-file present) always wins over the
 	     # final-1D "looks complete" promotion. Otherwise a kill during
 	     # end-of-run upload leaves status=complete and the next page
@@ -6881,12 +6953,12 @@ sub webui_meter_lg_autocal_status (@) {
 	       $json=~s/"message"\s*:\s*"[^"]*"/"message":"LG Auto Cal stopped unexpectedly"/;
 	      }
 	     }
-	     if(open(my $wf,">",$_meter_lg_autocal_file)) { print $wf $json; close($wf); chmod(0666,$_meter_lg_autocal_file); }
+	     if(!$summary && open(my $wf,">",$file)) { print $wf $json; close($wf); chmod(0666,$file); }
 	    } else {
 	     unlink($_dmf);
 	    }
 	   } else {
-	    unlink("$_meter_lg_autocal_file.misses");
+	    unlink("$file.misses");
 	   }
 	   return $json;
   }
@@ -7389,11 +7461,15 @@ sub webui_meter_lg_3d_autocal_recover_unverified_complete (@) {
 }
 
 sub webui_meter_lg_3d_autocal_status (@) {
- if(-f $_meter_lg_3d_autocal_file) {
-  my $json="";
-  if(open(my $fh,"<",$_meter_lg_3d_autocal_file)) { local $/; $json=<$fh>; close($fh); }
+ my ($query,$file)=@_;
+ # Tests pass their own state file; the daemon always uses the fixed path.
+ $file=$_meter_lg_3d_autocal_file if(!defined($file) || $file eq "");
+ if(-f $file) {
+  my ($json,$summary)=&webui_worker_status_read($file,$query);
   if($json ne "") {
-    $json=&webui_meter_lg_3d_autocal_recover_unverified_complete($json);
+    # Recovery rewrites the state file, so only the full view runs it; the
+    # summary poller reads the full state once it sees a terminal status.
+    $json=&webui_meter_lg_3d_autocal_recover_unverified_complete($json) if(!$summary);
     if($json=~/"status"\s*:\s*"running"/) {
      # Debounce "process died" (see the 1D monitor for rationale): the worker
      # is momentarily out of pgrep's view during meter-session teardown/restart
@@ -7401,7 +7477,7 @@ sub webui_meter_lg_3d_autocal_status (@) {
      # window of sustained absence before declaring death. Persist the
      # first-miss time in a sidecar; clear it when the worker reappears or the
      # status leaves "running".
-     my $_dmf="$_meter_lg_3d_autocal_file.misses";
+     my $_dmf="$file.misses";
      if(!&webui_meter_lg_3d_autocal_running()) {
       my $_now=int(time()*1000);
       my $_first_miss=0;
@@ -7411,7 +7487,9 @@ sub webui_meter_lg_3d_autocal_status (@) {
        if(open(my $mf,">",$_dmf)) { print $mf $_first_miss; close($mf); chmod(0666,$_dmf); }
        return &webui_meter_lg_3d_autocal_compact_status_json($json);
       }
-      unlink($_dmf);
+      # The summary view leaves the first-miss marker and the state file
+      # alone; the full read that follows applies the same flip and saves it.
+      unlink($_dmf) if(!$summary);
       # The worker process is gone while still marked "running". Mirror the 1D
       # monitor's verified-marker fallback: if the 3D LUT was uploaded AND
       # verified (and the tone-map step, when present, succeeded),
@@ -7450,12 +7528,12 @@ sub webui_meter_lg_3d_autocal_status (@) {
         $json=~s/"message"\s*:\s*"[^"]*"/"message":"LG 3D LUT AutoCal stopped unexpectedly"/;
        }
       }
-      if(open(my $wf,">",$_meter_lg_3d_autocal_file)) { print $wf $json; close($wf); chmod(0666,$_meter_lg_3d_autocal_file); }
+      if(!$summary && open(my $wf,">",$file)) { print $wf $json; close($wf); chmod(0666,$file); }
      } else {
       unlink($_dmf);
      }
     } else {
-     unlink("$_meter_lg_3d_autocal_file.misses");
+     unlink("$file.misses");
     }
    return &webui_meter_lg_3d_autocal_compact_status_json($json);
   }

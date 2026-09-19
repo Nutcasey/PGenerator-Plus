@@ -58,7 +58,9 @@ like(main::_worker_progress({status=>'error',message=>'Meter disconnected',curre
   {status=>'running',current_name=>'Auto Cal 7%',message=>'Reading 7% sample 2/2',activity_events=>[$first]},
   {status=>'complete',message=>'Calibration committed',activity_events=>[$first,$final]},
  );
- local *main::_api=sub {return {status=>'ok'} if $_[1] eq '/api/lg/status';return shift(@responses) || die 'Unexpected extra worker poll'};
+ # The loop polls the summary view, then reads the full state once at the end.
+ my $full=$responses[-1];
+ local *main::_api=sub {return {status=>'ok'} if $_[1] eq '/api/lg/status';return $full if $_[1] eq '/api/meter/lg-autocal/status';return shift(@responses) || die 'Unexpected extra worker poll'};
  local *main::_refresh_control=sub {};
  local *main::_update_run=sub {my $r={};$_[0]->($r);return $r};
  local *main::_sleep_controlled=sub {1};

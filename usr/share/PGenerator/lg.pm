@@ -2948,9 +2948,13 @@ sub webui_meter_lg_dv_profile_start (@) {
 }
 
 sub webui_meter_lg_dv_profile_status (@) {
- return '{"status":"idle","message":"No Dolby Vision profile measurement has run yet","steps":[]}' if(!-f $_meter_lg_dv_profile_file);
- my $json="";
- if(open(my $fh,"<",$_meter_lg_dv_profile_file)) { local $/; $json=<$fh>; close($fh); }
+ my ($query,$file)=@_;
+ # Tests pass their own state file; the daemon always uses the fixed path.
+ $file=$_meter_lg_dv_profile_file if(!defined($file) || $file eq "");
+ return '{"status":"idle","message":"No Dolby Vision profile measurement has run yet","steps":[]}' if(!-f $file);
+ # ?view=summary serves the automation poller's projection (see
+ # webui_worker_status_read in webui.pm); nothing below writes the file.
+ my ($json)=&webui_worker_status_read($file,$query);
  return '{"status":"idle","message":"No Dolby Vision profile measurement has run yet","steps":[]}' if($json eq "");
  # The worker is a short, one-shot ~5-patch run -- a single liveness check is
  # enough to catch a killed/crashed process. The long-running greyscale/3D
@@ -3842,6 +3846,7 @@ sub webui_lg_api (@) {
  my $path=shift;
  my $method=shift;
  my $body=shift;
+ my $query=shift;
  if($method eq "POST" && $path ne "/api/lg/picture-settings") {
   my $automation_guard=&lg_automation_guard_json($body);
   return $automation_guard if($automation_guard ne "");
@@ -3901,7 +3906,7 @@ sub webui_lg_api (@) {
   return &webui_meter_lg_dv_profile_start($body);
  }
  if($path eq "/api/lg/dv-profile/status" && $method eq "GET") {
-  return &webui_meter_lg_dv_profile_status();
+  return &webui_meter_lg_dv_profile_status($query);
  }
  if($path eq "/api/lg/dv-profile/stop" && $method eq "POST") {
   return &webui_meter_lg_dv_profile_stop($body);
