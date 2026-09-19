@@ -37,6 +37,10 @@ local *main::lg_authenticated_session=sub {{
  hello_info=>{deviceOSReleaseVersion=>'9.2.2',deviceUUID=>'grouped-g3'},
 }};
 local *main::websocket_close=sub {};
+# Keep test traffic out of the appliance's live TV diagnostic log, and let
+# the tests assert which diagnostic events a readback records.
+my @diag;
+local *main::diag_log_append=sub { push(@diag,{label=>$_[0],data=>$_[1]}); };
 # A confirmed context (active input and picture mode agree with the request)
 # is what lets a read observation count for the next readback's contracts.
 local *main::lg_current_input_info=sub {{current_input=>'hdmi1',current_input_checked=>1}};
@@ -52,10 +56,11 @@ my $reply_all=sub {
 };
 
 {
- @requests=();
+ @requests=(); @diag=();
  local *main::lg_request=$reply_all;
  my $read=main::lg_picture_get_workflow('127.0.0.1','test-key',1,[@keys],'hdrCinema','hdmi1',0,'hdr10',0,'picture');
  is($read->{status},'ok','grouped read succeeds');
+ ok(!grep({ $_->{label} =~ /^picture_get:grouped-/ } @diag),'a fully grouped readback records no fallback event');
  my @grouped=grep { $_->{label} eq 'get_picture_settings' } @requests;
  is(scalar(@grouped),1,'exactly one grouped picture read');
  my %asked=map { $_=>1 } @{$grouped[0]{payload}{keys}||[]};
@@ -66,7 +71,7 @@ my $reply_all=sub {
 }
 
 {
- @requests=();
+ @requests=(); @diag=();
  my $omitted=$individual[0];
  local *main::lg_request=sub {
   my ($session,$label,$path,$payload)=@_;
@@ -84,6 +89,11 @@ my $reply_all=sub {
  is_deeply([map { $_->{label} } @singles],["get_picture_setting_$omitted"],'only the omitted key is read on its own');
  is($read->{picture_settings}{$omitted},"single-$omitted",'the omitted key takes the single-read value');
  is($read->{picture_settings}{brightness},'value-brightness','keys the grouped reply carried are not re-read');
+ my ($event)=grep { $_->{label} eq 'picture_get:grouped-fallback' } @diag;
+ ok($event,'an omission records the fallback event') or diag(join(',',map { $_->{label} } @diag));
+ is($event->{data}{single_reads},1,'with the single-read count');
+ is_deeply($event->{data}{omitted},[$omitted],'and the omitted key');
+ is($event->{data}{grouped},scalar(@keys),'and the size of the grouped call');
 }
 
 {
@@ -121,7 +131,7 @@ my $reply_all=sub {
 # block reads with an unconfirmed context and its own key, so it records no
 # observation the exclusion block below could depend on.
 {
- @requests=();
+ @requests=(); @diag=();
  my $refused=$individual[0];
  local *main::lg_request=sub {
   my ($session,$label,$path,$payload)=@_;
@@ -141,6 +151,11 @@ my $reply_all=sub {
  is_deeply([map { $_->{label} } grep { $_->{label} =~ /^get_picture_setting_/ } @requests],["get_picture_setting_$refused"],'only the refused key is read on its own');
  is($read->{picture_settings}{brightness},'value-brightness','the other keys come from the retried group');
  ok(exists($read->{unsupported_picture_keys}{$refused}) || exists($read->{picture_capabilities}{unsupported}{$refused}),'the refused key is reported unsupported');
+ my ($refused_event)=grep { $_->{label} eq 'picture_get:grouped-refused' } @diag;
+ is_deeply($refused_event->{data}{refused},[$refused],'the refusal event names the key');
+ my ($fallback)=grep { $_->{label} eq 'picture_get:grouped-fallback' } @diag;
+ is($fallback->{data}{single_reads},1,'and the fallback event counts one single read');
+ is($fallback->{data}{grouped},scalar(@keys),'for the group as first requested');
 }
 
 # The retry also covers the other refusal wordings the helper recognises.

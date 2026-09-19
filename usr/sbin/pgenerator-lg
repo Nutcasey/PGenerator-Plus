@@ -1504,6 +1504,7 @@ sub lg_picture_get_workflow (@) {
    ? (dimension=>{pictureMode=>$requested_picture_mode,($tv_input ne "" ? (input=>$tv_input,"_3dStatus"=>"2d") : ())}) : ();
   my ($failed,$message)=(0,"");
   my @omitted=();
+  my $grouped_count=scalar(@bulk_keys);
   if(@bulk_keys) {
    $response=&lg_request($session,"get_picture_settings","settings/getSystemSettings",{
     category => $category,
@@ -1541,7 +1542,11 @@ sub lg_picture_get_workflow (@) {
   # Every single read is the slow path this readback is meant to avoid: a
   # refused grouped call, an omission, or a key kept out of the group. Each
   # is recorded so a return of the 26-60 s readbacks is visible.
-  &diag_log_append("picture_get:grouped-fallback",{ ip => $ip, refused => $failed ? 1 : 0, message => $message, grouped => scalar(@bulk_keys), omitted => \@omitted, single_reads => scalar(@individual_keys) }) if(@individual_keys);
+  if(@individual_keys) {
+   my %single_seen=();
+   my @single=grep { !$single_seen{$_}++ } @individual_keys;
+   &diag_log_append("picture_get:grouped-fallback",{ ip => $ip, refused => $failed ? 1 : 0, message => $message, grouped => $grouped_count, omitted => \@omitted, single_reads => scalar(@single) });
+  }
   my %individual_seen=();
   foreach my $key (grep { !$individual_seen{$_}++ } @individual_keys) {
    my $single=&lg_request($session,"get_picture_setting_$key","settings/getSystemSettings",{
