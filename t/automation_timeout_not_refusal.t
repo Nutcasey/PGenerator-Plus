@@ -23,7 +23,17 @@ ok(main::_lg_connection_failure({status=>'error',error_code=>'lg-disconnected'})
 is(main::_lg_helper_timeout_for('/api/lg/picture-settings',{}),120,'a read gets the same headroom as a full write');
 is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{brightness=>50}}),45,'a lone control keeps the daemon default');
 is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..18}}),174,'eighteen controls get time for eighteen in-session writes');
-is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..40}}),180,'capped at 180 s');
+is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..40}}),300,'capped at 300 s');
+# 18-19 Sep 2026: the batched 18-control write ran at 10 s per control and the
+# constant 174 s budget fell back to one write at a time on every SDR job. The
+# budget follows the last measured batched write with 50% headroom.
+ok(!defined(main::_note_lg_control_seconds(1,30)),'a single-control write teaches nothing');
+ok(!defined(main::_note_lg_control_seconds(18,0)),'a zero elapsed teaches nothing');
+main::_note_lg_control_seconds(18,180);
+is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..18}}),300,'ten seconds per control measured lifts eighteen controls to the cap');
+is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..4}}),90,'the measured figure scales with the control count');
+main::_note_lg_control_seconds(18,72);
+is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..18}}),174,'a faster measurement never drops below the 8 s floor');
 ok(!defined(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{whiteBalanceRed=>[0,0],whiteBalanceMethod=>'22'}})),'white-balance arrays keep the daemon DDC default');
 ok(!defined(main::_lg_helper_timeout_for('/api/lg/3d-lut/reset',{})),'unknown actions keep the daemon default');
 

@@ -525,6 +525,16 @@ sub _lg_connection_failure {
     return 0;
 }
 
+# Seconds per control observed on the last batched write, with 50% headroom
+# so the next budget sits above it rather than on it. 0 until measured.
+my $LG_CONTROL_SECONDS = 0;
+sub _note_lg_control_seconds {
+    my ($count, $elapsed) = @_;
+    return if !$count || $count < 2 || !defined($elapsed) || $elapsed <= 0;
+    $LG_CONTROL_SECONDS = 1.5 * $elapsed / $count;
+    return $LG_CONTROL_SECONDS;
+}
+
 # Helper timeouts the runner asks the daemon for. Only paths whose daemon
 # action is known are filled in; anything else keeps the daemon's own
 # per-action default and gets the widest child timeout instead.
@@ -539,12 +549,16 @@ sub _lg_helper_timeout_for {
     my $settings = ref($payload->{settings}) eq 'HASH' ? $payload->{settings} : {};
     # White-balance arrays are the DDC path with its own daemon default.
     return undef if grep { ref($settings->{$_}) } keys %$settings;
-    # The helper writes and reads back each control inside one session at
-    # 5-7 s per control on the G3; 18 controls need ~2 min, not the 45 s the
-    # daemon assumes for a lone write.
-    my $timeout = 30 + 8 * scalar(keys %$settings);
+    # The helper writes and reads back each control inside one session. The
+    # per-control figure starts at the 5-7 s measured on the G3 on 16 Sep
+    # 2026 with headroom, and follows what this run's batched writes
+    # actually took: at 10 s per control (18-19 Sep 2026, slow readbacks)
+    # the constant 174 s budget ran out and every SDR job fell back to one
+    # write at a time.
+    my $per_control = $LG_CONTROL_SECONDS > 8 ? $LG_CONTROL_SECONDS : 8;
+    my $timeout = 30 + int($per_control + 0.5) * scalar(keys %$settings);
     $timeout = 45 if $timeout < 45;
-    $timeout = 180 if $timeout > 180;
+    $timeout = 300 if $timeout > 300;
     return $timeout;
 }
 
@@ -2082,6 +2096,7 @@ sub _apply_settings_batched {
         next if @group<2;
         _update_live(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>scalar(keys %done),total=>scalar(@$keys)+1,unit=>'settings and verification',message=>'Applying '.scalar(@group).' '.$category.' controls together'};});
         delete $item->{best_available_write_ack}{$_} for @group;
+        my $write_started=time();
         my $result=_api('POST','/api/lg/picture-settings/set',{
             settings=>{map { $_=>($_ eq 'gamma' ? _tv_gamma_value($settings->{$_}) : $settings->{$_}) } @group},
             readback_keys=>[@group,'pictureMode'],
@@ -2092,6 +2107,7 @@ sub _apply_settings_batched {
             keep_calibration_mode=>$calibration_active ? JSON::PP::true : JSON::PP::false,
             calibration_mode_active=>$calibration_active ? JSON::PP::true : JSON::PP::false,
         });
+        _note_lg_control_seconds(scalar(@group),time()-$write_started);
         my $ok=ref($result) eq 'HASH' && (($result->{status}||'') eq 'ok' || ($result->{status}||'') eq 'started')
             && (!exists($result->{verification_state}) || ($result->{verification_state}||'') eq 'verified');
         if (!$ok) {
@@ -3860,6 +3876,22 @@ sub _prepare_resume {
         return;
     }
     my $failure_stage = ref($item->{failure}) eq 'HASH' ? ($item->{failure}{stage} || '') : '';
+    # A failure in the profile stage (volume-done) or while closing the
+    # session leaves a committed, verified 1D result on disk. Keep it:
+    # recheck its settings, restore the unity 3D baseline and retry from the
+    # profile stage, the path a saved settings-recovery resume already takes.
+    # The 18 Sep 2026 batch repeated a 95-minute greyscale after a restore
+    # write timed out in the 3D stage. An earlier failure, a drift recovery
+    # or a job whose 1D artifacts do not verify still resets.
+    if (!$item->{drift_recovery_pending} && $failure_stage =~ /^(?:volume-done|session-closed)$/
+        && _checkpoint_exists($item, 'greyscale-done')
+        && _resume_calibration_artifacts_ok($item_number, $item, 'grey')) {
+        _drop_resume_checkpoints($item, { map { $_ => 1 } qw(greyscale-settings-verified volume-done session-closed apply-all-done post-readings-done item-complete) });
+        $item->{profile_baseline_needs_restore}=1 if _signal($item) ne 'dv';
+        _log_action('Resuming after a failure in the '.$failure_stage.' stage: retaining the verified 1D result; its settings are rechecked'
+            .(_signal($item) ne 'dv' ? ' and the unity 3D baseline restored' : '').' before profiling');
+        return;
+    }
     if ($item->{drift_recovery_pending} || $failure_stage =~ /^(?:reset-and-reapply-verified|panel-light-settled|greyscale-done|volume-done|session-closed)$/) {
         _drop_resume_checkpoints($item, { map { $_ => 1 } qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete) });
         return;
