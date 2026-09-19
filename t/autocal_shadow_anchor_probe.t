@@ -11,6 +11,7 @@ use warnings;
 no warnings qw(once redefine);
 use FindBin qw($Bin);
 use File::Temp qw(tempdir);
+use JSON::PP ();
 use Test::More;
 
 my $worker=$ENV{PGEN_AUTOCAL_3D_WORKER} || "$Bin/../usr/bin/meter_lg_3d_autocal.pl";
@@ -47,7 +48,7 @@ sub panel_lift {
  return (defined($panel{cancel_at_binds}) && $panel{binds} >= $panel{cancel_at_binds}) ? 1 : 0;
 };
 *main::log_line=sub { push @{$panel{log}}, $_[0]; };
-*main::hdr20_postcal_save_matrix=sub { return 1; };
+*main::hdr20_postcal_save_matrix=sub { $panel{matrix_saves}++; $panel{matrix_save_args}=[ @_ ]; return 1; };
 *main::reading_xyz=sub { my ($reading)=@_; return [0,$reading->{Y},0]; };
 *main::api_json=sub {
  my ($method,$path,$payload)=@_;
@@ -65,6 +66,9 @@ sub panel_lift {
  my ($config,$step,$state)=@_;
  my $ire=$step->{ire}+0;
  my $pass=(($state->{current_name}||"") =~ /pass (\d+)/) ? $1 : 0;
+ # A stop request during a read comes back as the error string
+ # "cancelled" from read_step, not as a die.
+ return (undef,"cancelled") if(defined($panel{cancel_read_at_pass}) && $pass == $panel{cancel_read_at_pass});
  if(ref($panel{replay}) eq "HASH") {
   # Recorded job: the lift read on this pass, whatever the DPG holds.
   my $rec=$panel{replay}{$pass};
@@ -80,20 +84,29 @@ sub panel_lift {
  return ({ Y=>$lift*$target }, undef);
 };
 
+my $run_no=0;
 sub run_panel {
  my (%opt)=@_;
  %panel=(
-  bound=>[ @base ], binds=>0, reads=>0, reestablish=>0, log=>[], peak=>800,
+  bound=>[ @base ], binds=>0, reads=>0, reestablish=>0, matrix_saves=>0, log=>[], peak=>800,
   sens=>($opt{sens}||{}), noise=>$opt{noise}, cancel_at_binds=>$opt{cancel_at_binds},
+  cancel_read_at_pass=>$opt{cancel_read_at_pass},
   baseline=>($opt{baseline}||{ %job1_baseline }), replay=>$opt{replay},
  );
  %true_idx=(ref($opt{true_idx}) eq "HASH") ? %{$opt{true_idx}} : %default_true_idx;
+ $run_no++;
+ my $matrix_path="$tmp/matrix-$run_no.json";
+ if(ref($opt{matrix}) eq "HASH") {
+  open(my $fh,">",$matrix_path) or die "cannot write $matrix_path: $!";
+  print $fh JSON::PP->new->canonical(1)->encode($opt{matrix});
+  close($fh);
+ }
  my $config={
   signal_mode=>"hdr10",
   full_workflow=>1,
   picture_mode=>"cinema",
   lg_autocal_hdr20_postcal_shadow_enable=>1,
-  lg_autocal_hdr20_postcal_shadow_matrix_path=>"$tmp/matrix.json",
+  lg_autocal_hdr20_postcal_shadow_matrix_path=>$matrix_path,
   postcal_shadow_probe_step=>{ r=>108, g=>108, b=>108, input_max=>1023 },
   pattern_signal_range=>"1",
   full_workflow_dpg_data=>[ @base ],
@@ -128,7 +141,7 @@ sub zones_of {
 sub pass_series {
  my ($state,$idx,$ire)=@_;
  my @out;
- for(my $p=1;$p<=6;$p++) {
+ for(my $p=1;$p<=10;$p++) {
   my $c=$state->{"postcal_shadow_pass_${p}_counts"};
   last if(ref($c) ne "HASH");
   push @out, sprintf("%d:%.1f->%.3f",$p,$c->{$idx},$state->{"postcal_shadow_pass_${p}_IRE_${ire}_lift"});
@@ -173,6 +186,8 @@ sub pass_series {
  cmp_ok($status->{best_worst}, '<=', $status->{tolerance}, 'worst anchor error is inside the 5% tolerance');
  cmp_ok($status->{passes}, '<=', 6, 'converged inside the pass budget');
  ok(!grep({ /^postcal_shadow_dead_anchor_/ } keys %{$state}), 'no anchor was declared dead');
+ is($panel{matrix_saves}, 1, 'converged run saves the matrix seed once');
+ is($panel{matrix_save_args}[6], 'cinema', 'saved seed records the picture mode');
 }
 
 # (3) One noisy read does not freeze a slow anchor. The 10% anchor
@@ -285,6 +300,101 @@ sub pass_series {
   ok($state->{"postcal_shadow_dead_anchor_$idx"}, "$name: dead flag recorded");
   ok(abs($c->(6)-$c->(3)) < 0.01, "$name: parked at its best pass (pass-3 counts), not its last value");
  }
+}
+
+# (9) A stop during a pass-loop anchor read returns the string
+# "cancelled" from read_step. The loop must raise it as a cancel, not
+# finalise a best effort: no matrix save, no re-establish.
+{
+ my ($status,$state,$err)=run_panel(cancel_read_at_pass=>2);
+ is($err, "cancelled\n", 'cancelled read on pass 2 propagates as cancelled');
+ ok(!defined($status), 'cancelled run returns no status');
+ is($panel{matrix_saves}, 0, 'cancelled run does not save the matrix seed');
+ is($panel{reestablish}, 0, 'cancelled run does not re-establish the held session');
+ ok(!exists($state->{postcal_shadow_pass_2_worst}), 'pass 2 never completed');
+}
+
+# (10) A live but slow anchor is not parked by the confirm gate. The
+# 10% anchor at 0.3x sensitivity takes a +0.15 read after a 60-count
+# move; its drift over the held move is negative but weaker than half
+# the peers' cumulative median, so it falls through to the median-slope
+# update instead of being declared dead, and ends closer to target than
+# the parked value would have been.
+{
+ my ($status,$state)=run_panel(sens=>{10=>0.30}, noise=>{pass=>3, ire=>10, delta=>0.15});
+ my %z=zones_of($status);
+ my $idx=$z{10};
+ diag("slow anchor run: ".pass_series($state,$idx,10).sprintf(" (best worst %.3f, %s)",$status->{best_worst},$status->{status}));
+ is(slope_src_of($state,3,$idx), 'hold', 'noisy read after the big move holds the slow anchor');
+ is(slope_src_of($state,4,$idx), 'median', 'weak but live drift falls through to the median-slope update');
+ ok(!$state->{"postcal_shadow_dead_anchor_$idx"}, 'slow anchor is not declared dead');
+ my $parked_err=abs($state->{postcal_shadow_pass_4_IRE_10_lift}-1);
+ cmp_ok($status->{best_worst}, '<', $parked_err, sprintf('best worst %.3f beats the %.3f it would have been parked at',$status->{best_worst},$parked_err));
+}
+
+# (11) Ten-pass replays of the confirm streak. The 10% anchor's reads
+# alternate a noisy rise with a real drop, so it cycles hold/confirmed
+# twice; on the third confirm the streak is exhausted and it degrades
+# to the median slope when the peers move (valid secants every pass) or
+# waits when they are silent (no peer slope at all), keeping the streak.
+{
+ my %ten=(1=>1.50,2=>1.30,3=>1.35,4=>1.20,5=>1.25,6=>1.10,7=>1.15,8=>0.90,9=>0.92,10=>0.95);
+ for my $peers ("moving","silent") {
+  my %lifts;
+  for my $p (1..10) {
+   $lifts{$p}={ 10=>$ten{$p} };
+   for my $ire (5,15,20,25,30) { $lifts{$p}{$ire}=($peers eq "moving") ? 1.30-0.02*($p-1) : 1.0; }
+  }
+  my ($status,$state)=run_panel(replay=>\%lifts, config=>{
+   lg_autocal_hdr20_postcal_shadow_zone_probe=>0,
+   lg_autocal_hdr20_postcal_shadow_max_passes=>10,
+  });
+  my $idx=51;
+  diag("$peers peers: ".pass_series($state,$idx,10));
+  my @src=map { slope_src_of($state,$_,$idx) } (3..8);
+  is(join("/",@src), "hold/confirmed/hold/confirmed/hold/".($peers eq "moving" ? "median" : "wait"), "$peers peers: streak sequence over passes 3-8");
+  ok(!$state->{"postcal_shadow_dead_anchor_$idx"}, "$peers peers: anchor never declared dead");
+  if($peers eq "silent") {
+   # Nothing else can move once the anchor waits, so the early exit
+   # ends the run there with the counts unchanged.
+   is($status->{passes}, 8, 'wait keeps the counts and the run stops early');
+   like($status->{note}, qr/early exit after pass 8/, 'early exit after the wait is noted');
+   is($state->{postcal_shadow_pass_8_confirm_streak}{$idx}, 2, 'wait keeps the confirm streak');
+  } else {
+   isnt($state->{postcal_shadow_pass_9_counts}{$idx}, $state->{postcal_shadow_pass_8_counts}{$idx}, 'median update moves the anchor');
+  }
+ }
+}
+
+# (12) The persisted seed is applied to the 5% anchor's first
+# correction when the matrix entry matches this TV's generation series
+# and picture mode, and left alone (with the reason logged) otherwise.
+{
+ my $entry=sub { { hdr20=>{ g3=>{ seed_counts=>57, picture_mode=>$_[0], band_top_ire=>25, taper_top_ire=>30, tol=>0.15 } } } };
+ my ($status,$state)=run_panel(matrix=>$entry->("cinema"), config=>{ lg_generation=>{ series=>"G3" }, lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
+ my %z=zones_of($status);
+ is($state->{postcal_shadow_pass_2_counts}{$z{5}}+0, 57, 'matching seed sets the 5% anchor first correction');
+ is(slope_src_of($state,1,$z{5}), 'seed', 'seed is recorded as the pass-1 source');
+ ok(scalar(grep { /5% anchor seeded at 57 counts from the shadow matrix \(g3, picture mode 'cinema'\)/ } @{$panel{log}}), 'seed application is logged');
+ ($status,$state)=run_panel(matrix=>$entry->("filmmaker"), config=>{ lg_generation=>{ series=>"G3" }, lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
+ %z=zones_of($status);
+ ok(abs($state->{postcal_shadow_pass_2_counts}{$z{5}}-180*(1.299-1)) < 0.5, 'mismatched picture mode leaves the gain step');
+ ok(scalar(grep { /matrix seed not applied: matrix entry for g3 is for picture mode 'filmmaker', this run is 'cinema'/ } @{$panel{log}}), 'seed rejection says why');
+ # No generation in the config: the lookup falls back to the signal-mode
+ # key, which is not TV-specific, so an entry found that way is ignored.
+ ($status,$state)=run_panel(matrix=>{ hdr20=>{ hdr10=>{ seed_counts=>57, picture_mode=>"cinema" } } }, config=>{ lg_autocal_hdr20_postcal_shadow_max_passes=>2 });
+ %z=zones_of($status);
+ ok(scalar(grep { /matrix seed not applied: matrix entry was matched by the fallback key 'hdr10'/ } @{$panel{log}}), 'seed found by the fallback key is not applied');
+ ok(abs($state->{postcal_shadow_pass_2_counts}{$z{5}}-180*(1.299-1)) < 0.5, 'fallback-key seed leaves the gain step');
+}
+
+# (13) When the 4-index spacing moves an anchor above its measured
+# bracket the override is logged. At 0.09x the 10% anchor shares the
+# narrow bracket 47..49 with 15%, which is pushed to 51.
+{
+ my ($status,$state)=run_panel(sens=>{10=>0.09}, config=>{ lg_autocal_hdr20_postcal_shadow_max_passes=>1 });
+ diag("spacing run zones: ".$status->{zone_probe});
+ ok(scalar(grep { /zone probe: IRE 15 moved from 48 to 51 to keep 4 indices above IRE 10, above its measured bracket 47\.\.49/ } @{$panel{log}}), 'spacing override above the measured bracket is logged');
 }
 
 # (6) Cancellation inside a refinement shelf propagates as "cancelled"

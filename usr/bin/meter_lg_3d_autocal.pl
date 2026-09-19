@@ -4346,10 +4346,13 @@ sub hdr20_postcal_load_matrix {
   next if($key eq "");
   if(ref($hdr->{$key}) eq "HASH" && defined($hdr->{$key}->{"seed_counts"})) {
    my $entry_seed=$hdr->{$key}->{"seed_counts"}+0;
-   return $entry_seed if($entry_seed >= 0);
+   # List context also returns the matching entry and the key it was
+   # found under, so the caller can check the entry's picture mode and
+   # whether the match was the generation series or the fallback key.
+   return (wantarray ? ($entry_seed,$hdr->{$key},$key) : $entry_seed) if($entry_seed >= 0);
   }
  }
- return $seed_counts;
+ return wantarray ? ($seed_counts,undef,"") : $seed_counts;
 }
 
 # Persist the converged M back into the matrix for this TV. Loads the
@@ -4358,7 +4361,7 @@ sub hdr20_postcal_load_matrix {
 # is best-effort: a failure is logged but never fatal -- the seed is a
 # performance optimization, not a correctness requirement.
 sub hdr20_postcal_save_matrix {
- my ($path,$lg_generation,$model,$m_counts,$band_top,$taper_top)=@_;
+ my ($path,$lg_generation,$model,$m_counts,$band_top,$taper_top,$picture_mode)=@_;
  $path="/etc/PGenerator/hdr20_postcal_shadow_matrix.json" if(!defined($path) || $path eq "");
  $m_counts=0 if(!defined($m_counts));
  $m_counts=$m_counts+0;
@@ -4388,6 +4391,8 @@ sub hdr20_postcal_save_matrix {
  $entry->{"band_top_ire"}=$band_top;
  $entry->{"taper_top_ire"}=$taper_top;
  $entry->{"tol"}=0.15;
+ # The seed only makes sense for the picture mode it was measured in.
+ $entry->{"picture_mode"}=$picture_mode if(defined($picture_mode) && $picture_mode ne "");
  $hdr->{$key}=$entry;
  $data->{"hdr20"}=$hdr;
  my $encoded=$json->encode($data);
@@ -4650,7 +4655,30 @@ sub run_hdr20_postcal_shadow_correction {
  my $target5=hdr20_postcal_target5_for_step($step,$peak);
  my $lg_generation=(ref($config->{"lg_generation"}) eq "HASH") ? $config->{"lg_generation"} : undef;
  my $model_str=(ref($state) eq "HASH") ? ($state->{"signal_mode"}||"hdr10") : "hdr10";
- my $M=hdr20_postcal_load_matrix($matrix_path,$lg_generation,$model_str,$seed_counts_cfg);
+ my ($M,$seed_entry,$seed_key)=hdr20_postcal_load_matrix($matrix_path,$lg_generation,$model_str,$seed_counts_cfg);
+ # The persisted seed is applied to the 5% anchor's first correction
+ # (the pass-2 counts) only when the matrix entry was found under this
+ # TV's generation series and records the same picture mode; pass 1
+ # must stay at zero counts because it is the baseline the self-gate
+ # and revert-if-worse compare against.
+ my $seed_apply=0;
+ my $seed_why="";
+ if($M > 0) {
+  my $series_key=(ref($lg_generation) eq "HASH") ? lc($lg_generation->{"series"}||"") : "";
+  $series_key=~s/[^a-z0-9]+//g;
+  my $run_pm=$config->{"picture_mode"}||"";
+  if(ref($seed_entry) ne "HASH") {
+   $seed_why="seed ".int($M+0.5)." is the configured fallback, not a matrix entry for this TV";
+  } elsif($series_key eq "" || $seed_key ne $series_key) {
+   $seed_why="matrix entry was matched by the fallback key '".$seed_key."', not this TV's generation series";
+  } elsif(($seed_entry->{"picture_mode"}||"") eq "") {
+   $seed_why="matrix entry for ".$seed_key." records no picture mode";
+  } elsif(lc($seed_entry->{"picture_mode"}) ne lc($run_pm)) {
+   $seed_why="matrix entry for ".$seed_key." is for picture mode '".$seed_entry->{"picture_mode"}."', this run is '".$run_pm."'";
+  } else {
+   $seed_apply=1;
+  }
+ }
 
  # Measure + converge work lives inside an inner eval so any error in
  # this block leaves $corrected = $dpg_base (revert-safe default) and
@@ -4794,6 +4822,7 @@ sub run_hdr20_postcal_shadow_correction {
    for(my $ai=0; $ai<scalar(@anchor_steps); $ai++) {
     die "cancelled\n" if(cancelled());
     my ($reading,$error)=read_step($config,$anchor_steps[$ai],$state);
+    die "cancelled\n" if(($error||"") eq "cancelled");
     next if($error || !$reading);
     my $xyz=reading_xyz($reading);
     my $y=(ref($xyz) eq "ARRAY") ? ($xyz->[1]+0) : 0;
@@ -4826,6 +4855,7 @@ sub run_hdr20_postcal_shadow_correction {
     select(undef,undef,undef,$settle_ms/1000.0);
     for my $ai (@todo) {
      my ($reading,$error)=read_step($config,$anchor_steps[$ai],$state);
+     die "cancelled\n" if(($error||"") eq "cancelled");
      next if($error || !$reading);
      my $xyz=reading_xyz($reading);
      my $y=(ref($xyz) eq "ARRAY") ? ($xyz->[1]+0) : 0;
@@ -4884,6 +4914,7 @@ sub run_hdr20_postcal_shadow_correction {
      for my $ai (@{$members}) {
       die "cancelled\n" if(cancelled());
       my ($reading,$error)=read_step($config,$anchor_steps[$ai],$state);
+      die "cancelled\n" if(($error||"") eq "cancelled");
       next if($error || !$reading);
       my $xyz=reading_xyz($reading);
       my $y=(ref($xyz) eq "ARRAY") ? ($xyz->[1]+0) : 0;
@@ -4956,7 +4987,15 @@ sub run_hdr20_postcal_shadow_correction {
      $probe_note.=$anchor_ire[$ai]."% unresolved(prior kept) ";
     }
     $zone=int($zone+0.5);
-    $zone=$probed_idx[-1]+4 if(scalar(@probed_idx) && $zone < $probed_idx[-1]+4);
+    if(scalar(@probed_idx) && $zone < $probed_idx[-1]+4) {
+     my $spaced=$probed_idx[-1]+4;
+     my $above="";
+     if(exists($resolved{$ai}) && $spaced > $bracket_hi{$ai}+0) {
+      $above=", above its measured bracket ".((defined($bracket_lo{$ai}) ? $bracket_lo{$ai} : 13)+1)."..".$bracket_hi{$ai};
+     }
+     log_line("HDR20 post-cal shadow zone probe: IRE ".$anchor_ire[$ai]." moved from $zone to $spaced to keep 4 indices above IRE ".$anchor_ire[$ai-1].$above);
+     $zone=$spaced;
+    }
     push @probed_idx, $zone;
     $state->{"postcal_shadow_zone_IRE_".$anchor_ire[$ai]}=$zone;
    }
@@ -5010,8 +5049,22 @@ sub run_hdr20_postcal_shadow_correction {
    # keeps the array ascending per channel block.
    my @anchor_list;
    for my $idx (@anchor_idx) { push @anchor_list, [$idx,$counts{$idx}]; }
-   my $candidate=hdr20_postcal_apply_profile($dpg_base,\@anchor_list);
-   $candidate=hdr20_postcal_monotone_clamp($candidate);
+   my $profile=hdr20_postcal_apply_profile($dpg_base,\@anchor_list);
+   my $candidate=hdr20_postcal_monotone_clamp($profile);
+   # The 4-index spacing leaves about 128 counts of headroom between
+   # neighbours on an identity-slope base; say so if the clamp still
+   # had to move the profile at an anchor index.
+   for(my $ai=0; $ai<scalar(@anchor_idx); $ai++) {
+    my $idx=$anchor_idx[$ai];
+    my @delta;
+    for(my $channel=0;$channel<3;$channel++) {
+     my $d=$candidate->[$channel*1024+$idx]-$profile->[$channel*1024+$idx];
+     push @delta, $d if($d != 0);
+    }
+    if(scalar(@delta)) {
+     log_line("HDR20 post-cal shadow correction pass $pass: monotone clamp raised anchor index $idx (IRE ".$anchor_ire[$ai].") by ".join("/",@delta)." counts");
+    }
+   }
 
    $state->{"phase"}="postcal_shadow";
    $state->{"current_name"}="HDR20 post-cal shadow correction pass $pass";
@@ -5035,6 +5088,10 @@ sub run_hdr20_postcal_shadow_correction {
     my $atarget=$anchor_targets[$ai];
     my ($reading,$error)=read_step($config,$astep,$state);
     if($error || !$reading) {
+     # A cancelled read comes back as the string "cancelled", not a
+     # die; raise it here (inside the eval, whose handler rethrows) so
+     # the job ends cancelled instead of finalising a best effort.
+     die "cancelled\n" if(($error||"") eq "cancelled" || cancelled());
      $status->{"note"}=($status->{"note"}||"")." pass $pass anchor ".$astep->{"ire"}."%: read failed (".($error||"no reading")."); ";
      last;
     }
@@ -5190,15 +5247,14 @@ sub run_hdr20_postcal_shadow_correction {
     if($hold{$idx}) {
      # Confirm pass: the anchor was held at the same counts after a
      # rejected secant, so this fresh read gives the drift over the
-     # held move without the single read that rejected it. Usable when
-     # negative, at least 0.0002 in magnitude and at least half the
-     # median of the other anchors' cumulative slopes when they have
-     # one. Otherwise the anchor's zone estimate is wrong for this
-     # panel: declare it dead and park it at the counts of its best
-     # pass so far (lift closest to the target), not its last value,
-     # so the frozen anchor leaves no bump in the DPG (the first
-     # zone-table run pushed a dead 15% anchor to 101 counts with zero
-     # effect).
+     # held move without the single read that rejected it. A drift
+     # that is negative and at least 0.0002 in magnitude proves the
+     # anchor alive; a flat or positive one means its zone estimate is
+     # wrong for this panel: declare it dead and park it at the counts
+     # of its best pass so far (lift closest to the target), not its
+     # last value, so the frozen anchor leaves no bump in the DPG (the
+     # first zone-table run pushed a dead 15% anchor to 101 counts
+     # with zero effect).
      $hold{$idx}=0;
      my $dc=$counts{$idx}-$hold_counts{$idx};
      my $confirm=(abs($dc) >= 1) ? ($lift-$hold_lifts{$idx})/$dc : 0;
@@ -5208,8 +5264,8 @@ sub run_hdr20_postcal_shadow_correction {
       my @ss=sort { $a <=> $b } @peer_cum;
       $peer_median=$ss[int(scalar(@ss)/2)];
      }
-     my $usable=($confirm <= -0.0002 && (!defined($peer_median) || abs($confirm) >= 0.5*abs($peer_median))) ? 1 : 0;
-     if(!$usable) {
+     if($confirm > -0.0002) {
+      # Flat or positive drift over a held move: the anchor is dead.
       $dead_anchor{$idx}=1;
       $state->{"postcal_shadow_dead_anchor_".$idx}=json_true();
       $prev_counts{$idx}=$counts{$idx};
@@ -5218,11 +5274,16 @@ sub run_hdr20_postcal_shadow_correction {
       $slope_src{$idx}="dead";
       next;
      }
+     # A live drift weaker than half the peers' cumulative median is
+     # treated like a flat secant on the ordinary path: the median
+     # slope drives the update instead (the anchor is slow, not dead).
+     my $weak=(defined($peer_median) && abs($confirm) < 0.5*abs($peer_median)) ? 1 : 0;
      if(($confirm_streak{$idx}||0) >= 2) {
       # Two confirm-driven updates without an ordinary pass between
       # them: the anchor is live, but its own slope is not trusted any
       # further. Degrade to the median-slope update, or sit this pass
-      # out when no peer has one; never declare it dead here.
+      # out when no peer has one; never declare it dead here. Waiting
+      # keeps the streak so the hold/confirm cycle does not restart.
       if(defined($median_slope)) {
        $slope=$median_slope;
        $src="median";
@@ -5230,9 +5291,11 @@ sub run_hdr20_postcal_shadow_correction {
        $prev_counts{$idx}=$counts{$idx};
        $prev_lifts{$idx}=$lift;
        $slope_src{$idx}="wait";
-       $confirm_streak{$idx}=0;
        next;
       }
+     } elsif($weak && defined($median_slope)) {
+      $slope=$median_slope;
+      $src="median";
      } else {
       $slope=$confirm;
       $src="confirmed";
@@ -5269,8 +5332,18 @@ sub run_hdr20_postcal_shadow_correction {
     my $next;
     if(defined($slope)) {
      $next=$counts{$idx} + ($target_lift-$lift)/$slope;
+    } elsif($pass == 1 && $ai == 0 && $seed_apply && $M > 0) {
+     # First correction of the 5% anchor: start from the persisted
+     # seed (last converged count for this TV and picture mode)
+     # instead of the coarse gain step.
+     $next=$M;
+     $slope_src{$idx}="seed";
+     log_line("HDR20 post-cal shadow correction: 5% anchor seeded at ".int($M+0.5)." counts from the shadow matrix (".$seed_key.", picture mode '".($config->{"picture_mode"}||"")."')");
     } else {
      $next=$counts{$idx} + $gain*($lift-$target_lift);
+     if($pass == 1 && $ai == 0 && $M > 0 && !$seed_apply) {
+      log_line("HDR20 post-cal shadow correction: matrix seed not applied: ".$seed_why."; 5% anchor takes the gain step");
+     }
     }
     # Cap the secant move per pass; the pass-1 gain step stays uncapped
     # (it is the coarse jump and $slope is never defined on pass 1).
@@ -5285,6 +5358,7 @@ sub run_hdr20_postcal_shadow_correction {
     $counts{$idx}=$next+0;
    }
    $state->{"postcal_shadow_pass_".$pass."_slope_src"}={ %slope_src };
+   $state->{"postcal_shadow_pass_".$pass."_confirm_streak"}={ %confirm_streak };
    # Early exit: when no anchor's counts changed by a whole count
    # (every anchor frozen, floored or converged) another pass would
    # only cost a bind and six low-light reads for the same result.
@@ -5336,7 +5410,7 @@ sub run_hdr20_postcal_shadow_correction {
    $corrected=hdr20_postcal_monotone_clamp($corrected);
    my $seed=$best_counts{$anchor_idx[0]};
    if(defined($seed) && $seed+0 > 0) {
-    my $saved=hdr20_postcal_save_matrix($matrix_path,$lg_generation,$model_str,$seed,$band_top_ire,$taper_top_ire);
+    my $saved=hdr20_postcal_save_matrix($matrix_path,$lg_generation,$model_str,$seed,$band_top_ire,$taper_top_ire,$config->{"picture_mode"}||"");
     $state->{"postcal_shadow_matrix_saved"}=$saved ? json_true() : json_false();
    }
    my $best_status=hdr20_postcal_best_status($improved,$best_worst,$baseline_worst,$tol);
