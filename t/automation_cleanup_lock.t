@@ -205,7 +205,7 @@ for my $change (qw(firmware input)) {
  PGAutomation::with_lock($run_file,sub {$_[0]{stop_cleanup}={verified=>JSON::PP::false,completed_at=>time(),message=>'TV calibration exit unconfirmed'};return $_[0];});
  main::_finish('stopped');
  my $run=run_json();
- ok($run->{viewing_restore_required},'viewing restoration waits while CAL_END is unconfirmed');
+ ok(!$run->{viewing_restore_required},'Stop skips viewing restoration even when calibration exit needs retry');
  is($modes{hdr10},'hdrFilmMaker','no picture mode is switched back yet');
  is($run->{status},'interrupted','and cleanup is still required');
 }

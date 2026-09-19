@@ -45,8 +45,11 @@ for my $fault (qw(none result-write crash initial-write)) {
         local *main::_ensure_lg_connection=sub {1};
         local *main::_update_run=sub {
             $writes++;
+            my $preview=PGAutomation::read_json_file($path);
+            my $was_verified=$preview->{stop_cleanup}{verified};
+            $_[0]->($preview);
             return undef if ($fault eq 'initial-write' && $writes==1)
-                || ($fault eq 'result-write' && $writes==2);
+                || ($fault eq 'result-write' && !$was_verified && $preview->{stop_cleanup}{verified});
             return $real_update->(@_);
         };
         local *main::_api=sub {

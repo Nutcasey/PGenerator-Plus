@@ -2010,8 +2010,8 @@ sub webui_lg_calibration_mode (@) {
   ip => $ip,
   client_key => $client_key,
   enable => $enabled,
-  picture_mode => $payload->{"picture_mode"}||"",
-  signal_mode => $payload->{"signal_mode"}||"",
+  picture_mode => !$enabled && $payload->{current_picture_mode} ? "" : $payload->{"picture_mode"}||"",
+  signal_mode => !$enabled && $payload->{current_picture_mode} ? "" : $payload->{"signal_mode"}||"",
   connect_timeout => 5,
  });
  if(($result->{"status"}||"") eq "ok") {
@@ -4136,8 +4136,8 @@ sub lg_close_calibration_mode_at_run_end (@) {
   ip => $ip,
   client_key => $client_key,
   enable => 0,
-  picture_mode => $clients->{"calibration_picture_mode"}||"",
-  signal_mode => $payload->{"signal_mode"}||"",
+  picture_mode => $payload->{current_picture_mode} ? "" : $clients->{"calibration_picture_mode"}||"",
+  signal_mode => $payload->{current_picture_mode} ? "" : $payload->{"signal_mode"}||"",
   helper_timeout => 75,
   connect_timeout => 5,
  });

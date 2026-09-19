@@ -14,6 +14,9 @@ my $path=PGAutomation::run_dir($id).'/run.json';my $execution=PGAutomation::base
 {local @ARGV=($id,$token);do "$Bin/../usr/bin/pgen_automation_runner.pl";die $@ if $@;}
 my ($meter_ok,$launched)=(1,0);
 local *main::_log=sub{};
+# This suite supplies completed cleanup evidence directly; the separate
+# Stop tests exercise reacting to control requests and running cleanup.
+local *main::_control=sub {{request=>'none'}};
 local *main::_api=sub {is($_[1],'/api/meter/session/stop','finish only releases the meter after recorded TV cleanup');return $meter_ok?{status=>'ok'}:{status=>'error',message=>'USB still held'};};
 local *main::webui_automation_reap_dead_runner=sub{0};
 sub save {

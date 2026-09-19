@@ -178,8 +178,8 @@ fixture();$cancel=1;%original_modes=%modes;
 $r=run_check();
 ok(!$r->{ready},'cancelled preflight cannot become ready');
 is($prepares,2,'Stop prevents checking the remaining jobs');
-ok($r->{restored},'Stop still runs reversible restoration');
-is_deeply(\%modes,\%original_modes,'cancel restores signal family modes');
+ok(!$r->{restored} && $r->{restore_skipped} eq 'stop','Stop records that original modes were not restored');
+is_deeply(\%modes,{%original_modes,sdr=>'cinema',dv=>'dolbyVisionFilmMaker'},'Stop leaves modes where the interrupted checks left them');
 # A check-only run restores now; a failed restoration must block it.
 fixture();$restore_fail=1;
 PGAutomation::with_lock($run_file,sub {$_[0]{preflight_only}=JSON::PP::true;return $_[0];});
@@ -332,21 +332,20 @@ for my $limited (0,1) {
  }
  is(scalar(grep {$_->[1]=~/reset|lut|autocal/} @calls),0,'viewing restoration never overwrites newly calibrated LUTs');
 }
-# A Stop in the window between the check and job 1 still returns the TV:
-# the deferred restoration is owed by the batch, not by the check.
+# Stop between the check and job 1 keeps the current modes and signal too.
 {
  fixture();my %saved_config=%config;my %saved_modes=%modes;
  ok(run_check()->{ready},'stop window: the queue was checked');
+ my %current_config=%config;my %current_modes=%modes;
  local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
  main::_finish('stopped',{stage=>'queue-preflight',message=>'Automation stopped'});
  my $stopped=PGAutomation::read_json_file($run_file);
  is($stopped->{status},'stopped','stop window: the run stops cleanly');
- is_deeply(\%modes,\%saved_modes,'stop window: every picture mode the check changed is put back');
- is_deeply({map {$_=>$config{$_}} keys %saved_config},\%saved_config,'stop window: the generator output is put back');
+ is_deeply(\%modes,\%current_modes,'stop window: modes stay where the check left them');
+ is_deeply(\%config,\%current_config,'stop window: the generator output stays unchanged');
  ok(!$stopped->{viewing_restore_required},'stop window: nothing is left owed');
 }
-# keep-last: the last job's output and mode stay; what the batch still owes
-# are the signals the check switched and no job then selected.
+# Stop takes the same short path regardless of the normal finish policy.
 {
  fixture();my %saved_modes=%modes;
  PGAutomation::with_lock($run_file,sub {$_[0]{finish_policy}='keep-last';return $_[0];});
@@ -358,10 +357,10 @@ for my $limited (0,1) {
  main::_finish('stopped',{stage=>'item',message=>'Automation stopped'});
  my $kept=PGAutomation::read_json_file($run_file);
  is($modes{sdr},'filmMaker','keep-last: the mode a job selected is kept');
- is($modes{hdr10},$saved_modes{hdr10},'keep-last: a signal only the check changed goes back to its original mode');
- is($modes{dv},$saved_modes{dv},'keep-last: and so does the other one');
+ is($modes{hdr10},'hdrFilmMaker','keep-last Stop does not revisit HDR10');
+ is($modes{dv},'dolbyVisionFilmMaker','keep-last Stop does not revisit DV');
  is($config{signal_mode},'sdr','keep-last: the generator returns to the output the last job left');
- is($kept->{viewing_restore_outcome},'kept-last','keep-last: the outcome says the last job\'s context was kept');
+ is($kept->{viewing_restore_outcome},'skipped-on-stop','keep-last Stop records skipped restoration');
  ok(!$kept->{viewing_restore_required},'keep-last: nothing is left owed');
 }
 {

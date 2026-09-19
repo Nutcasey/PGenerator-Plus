@@ -670,6 +670,10 @@ sub _request_not_sent {
 
 sub _api {
     my ($method, $path, $payload, $allow_stop, $retry_window) = @_;
+    # A Stop may arrive during normal end-of-batch restoration. Finish the
+    # request already on the wire, then abandon further mode/settings work.
+    die "Original mode restoration cancelled by Stop\n"
+        if $RESTORING_PREFLIGHT && _current_mode_stop_requested();
     $allow_stop = $RESTORING_PREFLIGHT ? 1 : 0 if !defined($allow_stop);
     $allow_stop = 1 if $RESTORING_PREFLIGHT;
     my $lg_action = _lg_action_path($path);
@@ -694,6 +698,8 @@ sub _api {
     my $lg_reconnects = 0;
     while (1) {
         $attempt++;
+        die "Original mode restoration cancelled by Stop\n"
+            if $RESTORING_PREFLIGHT && _current_mode_stop_requested();
         _refresh_control() unless $allow_stop;
         if ($STOP_REQUESTED && !$allow_stop) {
             return { status => 'error', error_code => 'stopped', message => 'Automation stop requested' };
@@ -3748,11 +3754,54 @@ sub _park_interrupted {
     _log('runner parked an interrupted run for resume');
 }
 
+sub _current_mode_stop_requested {
+    _refresh_control();
+    return 0 if !$STOP_REQUESTED;
+    my $run=_run();
+    # Retry cleanup for a failed Pause still preserves that Pause's intent.
+    return !($run->{pause_park_pending} && ($run->{pending_terminal_status}||'') eq 'paused');
+}
+
+sub _keep_current_mode_on_stop {
+    my $run=_run();
+    return $run if ($run->{stop_restore_policy}||'') eq 'current-mode-only'
+        && !$run->{preflight_restore_required} && !$run->{viewing_restore_required};
+    my $saved=_update_run(sub {
+        my ($state)=@_;
+        $state->{stop_restore_policy}='current-mode-only';
+        for my $kind (qw(preflight viewing)) {
+            next if !$state->{$kind.'_restore_required'};
+            $state->{$kind.'_restore_required'}=JSON::PP::false;
+            $state->{$kind.'_restore_outcome'}='skipped-on-stop';
+        }
+        # Stop owes CAL_END and panel protection, not restoration of the
+        # batch's saved picture preferences or a tour of checked signals.
+        $state->{hazard_restore_outcome}='skipped-on-stop';
+        $state->{skipped_hazard_restore_failures}=$state->{hazard_restore_failures}
+            if @{$state->{hazard_restore_failures}||[]};
+        $state->{hazard_restore_failures}=[];
+        $state->{hazard_restore_pending}=JSON::PP::false;
+    });
+    die 'Unable to persist Stop policy; ownership retained' if !ref($saved);
+    _log_action('Stop | Keeping current signal and picture mode; skipping original settings restoration');
+    return $saved;
+}
+
+sub _stop_progress {
+    my ($message)=@_;
+    my $saved=eval {_update_run(sub {
+        $_[0]{worker_status}={message=>$message};
+    })};
+    _log('Stop progress could not be saved; continuing required cleanup') if !ref($saved);
+    _log_action($message);
+}
+
 sub _stop_active {
     my ($parking) = @_;
     return if $STOP_HANDLED++;
     $STOPPING = 1;
     $CLEANUP_DEADLINE = time() + $CLEANUP_RETRY_BUDGET;
+    _keep_current_mode_on_stop() if !$parking && _current_mode_stop_requested();
     # Journal an unfinished cleanup before issuing device commands. A process
     # interruption or a failed result write must not expose an older successful
     # cleanup as proof that this attempt safely released the TV and meter.
@@ -3763,7 +3812,7 @@ sub _stop_active {
         $_[0]{worker_status}={message=>'Stopping all workers and closing TV calibration mode'};
     });
     die 'Unable to persist pending cleanup; ownership retained' if !ref($pending);
-    _log_action('Stop requested: cancelling all measurement and calibration workers');
+    _stop_progress('Stop 1/4 | Stopping measurement and calibration workers');
     my %paths = (
         series=>'/api/meter/series', grey=>'/api/meter/lg-autocal',
         '3d'=>'/api/meter/lg-3d-autocal', dv=>'/api/lg/dv-profile',
@@ -3788,20 +3837,23 @@ sub _stop_active {
         _snapshot_series($ACTIVE_ITEM->{item_number} || 0, $ACTIVE_SERIES_PHASE, $ACTIVE_SERIES_KEY, $partial)
             if ref($partial) eq 'HASH';
     }
+    _stop_progress('Stop 2/4 | Releasing meter');
     my $meter_session=_api('POST','/api/meter/session/stop',{},1,_cleanup_window());
     my $item=ref($ACTIVE_ITEM) eq 'HASH' ? $ACTIVE_ITEM : {};
-    _log_action('Workers cancelled; sending TV calibration exit even if no job is active');
+    _stop_progress('Stop 3/4 | Exiting calibration mode on the current picture mode');
     # Reconnect using the saved pairing when needed; never initiate pairing.
     _ensure_lg_connection();
     # CAL_END is the call that releases the TV: it keeps its own idempotent
     # window even after the worker stops have spent the shared budget.
     my $off=_api('POST','/api/lg/calibration-mode',{
         enabled=>JSON::PP::false,
+        current_picture_mode=>JSON::PP::true,
         picture_mode=>_picture_mode($item),signal_mode=>_signal($item),
     },1,_cleanup_window() || $CLEANUP_RETRY_WINDOW);
     my $saved=_run();
     my $end=$parking ? {} : _api('POST','/api/lg/autocal/run/end',{
         status=>'aborted',note=>'Automation stopped',
+        current_picture_mode=>JSON::PP::true,
         run_id=>$saved->{lg_run_id}||'',client_run_token=>$TOKEN,
     },1,_cleanup_window());
     my $status=_api('GET','/api/lg/status',undef,1,_cleanup_window());
@@ -3820,7 +3872,7 @@ sub _stop_active {
         $_[0]{worker_status}={message=>($cleanup->{verified}?'Cleanup complete: ':'Cleanup failed: ').$cleanup->{message}};
     });
     die 'Unable to persist cleanup verification; ownership retained' if !ref($verified_cleanup);
-    _log_action(($cleanup->{verified}?'Stop cleanup complete: ':'Stop cleanup FAILED: ').$cleanup->{message});
+    _log_action(($cleanup->{verified}?'Worker, meter and calibration cleanup complete: ':'Stop cleanup FAILED: ').$cleanup->{message});
     if (!$parking && ref($ACTIVE_ITEM) eq 'HASH') {
         my $number=$item->{item_number}||0;
         my $preserve_failure=ref($item->{failure}) eq 'HASH' && !$STOP_REQUESTED;
@@ -3846,6 +3898,12 @@ sub _stop_active {
 
 sub _finish {
     my ($status, $failure) = @_;
+    if (_current_mode_stop_requested() && !$STOP_HANDLED) {
+        _stop_active();
+        _restore_run_hazards(_run(),_run()->{items});
+        $status='stopped';
+    }
+    _keep_current_mode_on_stop() if $status eq 'stopped';
     my $meter = _api('POST', '/api/meter/session/stop', {}, 1, _cleanup_window());
     my $run = _run();
     my $cleanup = $run->{stop_cleanup};
@@ -3854,6 +3912,16 @@ sub _finish {
     if ($run->{viewing_restore_required} && !(ref($cleanup) eq 'HASH' && !$cleanup->{verified})) {
         _restore_preflight_context('viewing');
         $run = _run();
+    }
+    # Stop can interrupt a normal finish while it is restoring modes. Run
+    # the same safety cleanup instead of reporting normal completion.
+    if (_current_mode_stop_requested()) {
+        _keep_current_mode_on_stop();
+        if (!$STOP_HANDLED) {
+            return _finish('stopped',$failure);
+        }
+        $status='stopped';
+        $run=_run();
     }
     my @problems = @{PGAutomation::restoration_problems($run)};
     push @problems, 'Meter release failed: '.(ref($meter) eq 'HASH' ? ($meter->{message}||'no acknowledgement') : 'no acknowledgement')
@@ -3891,6 +3959,11 @@ sub _finish {
         $state->{completed_at} = time() if $status =~ /^(?:complete(?:-with-warnings)?|failed|stopped)$/;
         $state->{runner_pid} = 0;
         $state->{active_stage} = '';
+        if ($status eq 'stopped') {
+            my $panel=$state->{panel_protection}||{};
+            $state->{worker_status}={message=>'Stopped | Calibration mode off; meter released'
+                .(($panel->{restore_outcome}||'') eq 'sent-unverified' ? '; TPC/GSR re-enable sent (no readback)' : '')};
+        }
         $state->{failure} = $failure if ref($failure) eq 'HASH';
         delete $state->{failure} if ($status eq 'stopped' || $status eq 'paused') && $state->{cleanup_required};
         $state->{preflight_in_progress} = JSON::PP::false;
@@ -3914,6 +3987,7 @@ sub _restore_hazards {
     my $restore = ref($item->{hazard_restore}) eq 'HASH' ? $item->{hazard_restore} : {};
     my @failed;
     foreach my $key (keys %$restore) {
+        last if _current_mode_stop_requested();
         my $record = $restore->{$key};
         next if $key eq 'energySaving' || $key eq 'aiPicture';
         my ($value,$category);
@@ -3949,6 +4023,7 @@ sub _restore_hazards {
 
 sub _restore_run_hazards {
     my ($run, $items) = @_;
+    $run=_keep_current_mode_on_stop() if _current_mode_stop_requested();
     my %restore;
     if (ref($run) eq 'HASH' && ref($run->{hazard_restore}) eq 'HASH') {
         %restore = %{$run->{hazard_restore}};
@@ -3965,7 +4040,9 @@ sub _restore_run_hazards {
     my $context = ref($ACTIVE_ITEM) eq 'HASH' ? $ACTIVE_ITEM
         : (ref($items) eq 'ARRAY' && ref($items->[0]) eq 'HASH' ? $items->[0] : {});
     my @unverified;
-    my $failed = %restore ? _restore_hazards({ %$context, hazard_restore => \%restore }, \@unverified) : [];
+    my $current_only=($run->{stop_restore_policy}||'') eq 'current-mode-only';
+    my $failed = %restore && !$current_only ? _restore_hazards({ %$context, hazard_restore => \%restore }, \@unverified) : [];
+    _stop_progress('Stop 4/4 | Restoring TPC/GSR') if $current_only;
     my $panel_failure = _restore_panel_protection($run);
     push @$failed, $panel_failure if $panel_failure;
     # A TV left with its power-off, screen-saver or panel protection disabled
@@ -4594,6 +4671,7 @@ sub _preflight_config_subset {
 sub _restore_preflight_context {
     my ($kind)=@_; $kind='preflight' if !defined($kind);
     die 'Invalid restoration context' if $kind ne 'preflight' && $kind ne 'viewing';
+    if (_current_mode_stop_requested()) { _keep_current_mode_on_stop(); return 1; }
     my $flag=$kind.'_restore_required';
     return 1 if !_run()->{$flag};
     my $context=PGAutomation::read_json_file($RUN_DIR.'/'.$kind.'-context.json');
@@ -4723,6 +4801,11 @@ sub _restore_preflight_context {
         1;
     };
     my $error=$@;
+    if (_current_mode_stop_requested()) {
+        ($ACTIVE_ITEM,$STOPPING,$RESTORING_PREFLIGHT)=($old_item,$old_stopping,$old_restoring);
+        _keep_current_mode_on_stop();
+        return 1;
+    }
     if (!$ok && $identity_changed) {
         # A different input or a changed TV (firmware, capability library,
         # device) can never match the saved context again, so retrying would
@@ -4992,7 +5075,8 @@ sub _preflight_queue {
     }
     # A batch that passed keeps the TV where the check left it (on the first
     # job's signal and mode) and restores the original modes when it finishes.
-    # A check-only run, a blocked queue and a Stop restore them now.
+    # A check-only run or blocked queue restores now. Stop keeps the current
+    # mode and skips the saved viewing context, like Stop during calibration.
     my $passed=!$STOP_REQUESTED && @pending && $result->{checked_items}==@pending
         && !grep {!$_->{ok} && ($_->{level}||'error') eq 'error'} @{$result->{checks}};
     my $restored;
@@ -5002,8 +5086,11 @@ sub _preflight_queue {
         push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-restore',message=>$::LAST_ERROR||'Unable to hand restoration over to the batch'} if !$restored;
     } else {
         # A display-state write failure must not prevent restoration.
-        eval {_preflight_progress($result,undef,'Restoring original output and picture modes after queue checks');};
+        eval {_preflight_progress($result,undef,$STOP_REQUESTED
+            ? 'Stopping queue checks; keeping current signal and picture mode'
+            : 'Restoring original output and picture modes after queue checks');};
         $restored=_restore_preflight_context();
+        $result->{restore_skipped}='stop' if $STOP_REQUESTED;
         # Restoration abandoned because the TV changed under the check: the queue
         # was not checked against the TV it will run on (P16).
         push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-tv-changed',
@@ -5016,7 +5103,7 @@ sub _preflight_queue {
     my @errors=grep {!$_->{ok} && ($_->{level}||'error') eq 'error'} @{$result->{checks}};
     my @warnings=grep {!$_->{ok} && ($_->{level}||'') eq 'warning'} @{$result->{checks}};
     $result->{ready}=!@errors && $restored && $result->{checked_items}==@pending ? 1 : 0;
-    $result->{restored}=$restored?1:0;$result->{completed_at}=time();
+    $result->{restored}=$restored && !$result->{restore_skipped}?1:0;$result->{completed_at}=time();
     $result->{message}=$result->{ready}
         ? (($result->{verification_state}||'') eq 'limited'
             ? 'All '.scalar(@pending).' pending jobs passed limited scoped checks. Signal and picture modes were not changed or independently verified.'
@@ -5431,7 +5518,7 @@ sub _main {
     }
     _restore_run_hazards($latest, $items);
     _refresh_control();
-    if ($STOP_REQUESTED) { _stop_active(); _finish('stopped'); return; }
+    if ($STOP_REQUESTED) { _stop_active(); _restore_run_hazards(_run(),$items); _finish('stopped'); return; }
     _update_run(sub {
         my ($state) = @_;
         $state->{active_item} = undef;

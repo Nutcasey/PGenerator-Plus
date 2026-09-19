@@ -15376,7 +15376,8 @@ sub webui_automation_control_body (@) {
   &webui_automation_with_manifest($run_id,sub {
    my ($state)=@_;return undef if(ref($state) ne "HASH" || !&webui_automation_active_status($state->{status}));
    $state->{status}="stopping";
-   $state->{worker_status}={message=>"Stopping all workers, releasing the meter and closing TV calibration mode."};
+   $state->{worker_status}={message=>"Stop requested | Exit calibration mode; restore TPC/GSR; keep current picture mode"}
+    if(($state->{worker_status}{message}||'') !~ /^Stop [1-4]\/4 \|/);
    $run=$state;return $state;
   });
   return &webui_automation_json({status=>"ok",message=>"Automation stop requested",run=>&webui_automation_public_run($run)});
