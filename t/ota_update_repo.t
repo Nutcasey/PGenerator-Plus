@@ -159,6 +159,10 @@ sub bash_norm {
  # plus the dot-only segment refusal), so the comparison is against the
  # RESOLVED value on both sides (the Perl sub validates internally; the
  # bash function is validation-free).
+ # MIRROR OF THE SCRIPT'S VALIDATOR: if the validator in pgenerator-update
+ # or webui_ota_repo_normalize changes, edit this helper in lockstep or
+ # the parity test keeps validating the stale rule (the dot-segment round
+ # showed drift cuts both ways).
  return '' unless $out =~ m{^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$};
  my ($o,$r2) = split m{/}, $out, 2;
  return '' if $o =~ /^\.+$/ || $r2 =~ /^\.+$/;

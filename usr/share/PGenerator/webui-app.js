@@ -3597,8 +3597,14 @@ async function saveOtaRepo(){
  const btn=document.getElementById('saveOtaRepoBtn');
  const raw=(input&&input.value||'').trim();
  // Factory-trusted sources (official default, upstream BigShoots) need no
- // root-trust confirm; anything else does. The allowlist comes from the
- // server so both sides stay in sync; server enforces regardless.
+ // root-trust confirm; anything else does. Read the allowlist fresh from
+ // the server now rather than trusting the last-load snapshot, which may
+ // predate a default/allowlist change (a server-side OTA update can swap
+ // the factory default between page load and save). Fetch failure keeps
+ // the snapshot and fails closed: unknown repos get the scary confirm.
+ // The server enforces the trust key regardless of this prompt.
+ const ar=await fetchJSON('/api/update/repo',{_quiet:true,_timeoutMs:8000});
+ if(ar&&ar.status==='ok'&&typeof ar.allowlist==='string') window._otaRepoAllowlist=ar.allowlist;
  const allow=((window._otaRepoAllowlist)||'').split(',');
  if(raw&&!allow.includes(raw)&&!confirm('Use '+raw+' as the update source?\n\nReleases are not code-signed: installing from a custom repo means fully trusting its owner with root on this device.')){
   return;
