@@ -3518,8 +3518,8 @@ function meterGreyTvColumnHtml(channelKey,label,color,tvValue,liveEntry,halfRang
 	 const noiseOpacity=isNoise?'opacity:.45;':'';
 	 // Hover explanation for a dimmed fill; plain text, no quotes introduced.
 	 const noiseTitleAttr=isNoise
-	 	? ' title="Deviation is within the meter noise floor (±'+meterFormatNoiseFloorValue(liveEntry.floor)+' L* pre-gain) — noise, not a real error."'
-	 	: '';
+	 	 ? ' title="Deviation is within the meter noise floor (±'+meterFormatNoiseFloorValue(liveEntry.floor)+' L* pre-gain'+(liveEntry.floorNote||'')+') — noise, not a real error."'
+	 	 : '';
 	 const fillStyle=(delta==null)
 	 	  ? 'display:none;'
 	 	  : 'top:'+(delta>=0?(50-magnitude):50)+'%;height:'+magnitude+'%;background:'+color+';color:'+color+';border-radius:'+(delta>=0?'4px 4px 0 0':'0 0 4px 4px')+';'+noiseOpacity;
@@ -18528,7 +18528,7 @@ function chartHandleHover(e,canvasId){
     const parts=[['R',bal.R],['G',bal.G],['B',bal.B]]
      .map(e=>{const d=Math.abs(e[1]-100)/pg;return (Number.isFinite(e[1])&&d<=pointFloor)?e[0]+' '+d.toFixed(2):null;})
      .filter(Boolean);
-    if(parts.length) html+='<br><span style="opacity:.75">'+parts.join(' · ')+' L* pre-gain — within meter noise (±'+meterFormatNoiseFloorValue(pointFloor)+' floor)</span>';
+    if(parts.length) html+='<br><span style="opacity:.75">'+parts.join(' · ')+' L* pre-gain — within meter noise (±'+meterFormatNoiseFloorValue(pointFloor)+' floor'+meterNoiseFloorSourceNote(rd)+')</span>';
    }
   }
  }

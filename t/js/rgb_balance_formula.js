@@ -51,6 +51,7 @@ const FN_NAMES = [
   'meterRecordReadingNoise',
   'meterStepNoiseSigma',
   'meterEmpiricalNoiseFloorFor',
+  'meterNoiseFloorSourceNote',
   'meterInvalidateStepNoise',
   'meterInvalidateAllStepNoise',
   'meterLgTrimKeyAffectsPatch',
@@ -1100,6 +1101,19 @@ test('empirical_floor_from_repeat_scatter', () => {
   const store = S.meterNoiseHistoryStore();
   store.set('45%', { vals: [[0, 0, 0], [0.1, -0.1, 0]] });
   assert(S.meterStepNoiseSigma('45%') > 0, 'store is shared module state');
+
+  // Floor-source annotation: the same ±number must say whether it came
+  // from measured scatter or the typed fallback (UX: same-number ambiguity).
+  globalThis.__noiseMode = { value: 'empirical' };
+  store.set('note%', { vals: [[0, 0, 0], [0.1, -0.1, 0], [0, 0.1, -0.1], [-0.1, 0, 0.1]] });
+  assert(S.meterNoiseFloorSourceNote({ name: 'note%' }) === ' · measured scatter (4 readings)',
+    'measured point names its sample count');
+  assert(S.meterNoiseFloorSourceNote({ name: 'nope%' }) ===
+    ' · no scatter history at this point yet — using typed floor; re-read this patch to measure it',
+    'fallback point says typed + names the repair');
+  globalThis.__noiseMode = { value: 'flat' };
+  assert(S.meterNoiseFloorSourceNote(step) === '', 'flat mode: no source note');
+  globalThis.__noiseMode = { value: 'empirical' };
 
   // Cap: k·sigma must never exceed the control's 10-point maximum, or
   // 'within noise' would swallow the entire plot (review #22 item 3).

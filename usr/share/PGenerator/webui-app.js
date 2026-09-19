@@ -14143,6 +14143,21 @@ function meterRgbBalanceEffectiveNoiseFloor(stepOrReading){
  if(empirical!=null) return empirical;
  return meterRgbBalanceNoiseFloor();
 }
+// Says WHERE the point's displayed floor came from. Same-number ambiguity is
+// the defect: in empirical mode a point with <2 samples silently falls back
+// to the typed constant, and the tooltip rendered "±0.30 floor" identically
+// for a measured scatter and for the operator's own guess — the operator
+// cannot tell which points the meter has actually characterized. Pure
+// (returns '' in flat mode), so the harness pins all three states.
+function meterNoiseFloorSourceNote(stepOrReading){
+ if(meterRgbBalanceNoiseFloorMode()!=='empirical') return '';
+ const n=(()=>{try{
+  const h=meterNoiseHistoryStore().get(meterStepNoiseKey(stepOrReading));
+  return h&&Array.isArray(h.vals)?h.vals.length:0;
+ }catch(e){return 0;}})();
+ if(n>=2) return ' · measured scatter ('+n+' readings)';
+ return ' · no scatter history at this point yet — using typed floor; re-read this patch to measure it';
+}
 
 function meterReadingHasChromaticity(rd){
  meterNormalizeMeasuredReading(rd);
@@ -14746,10 +14761,13 @@ function meterRgbDeltasForLive(reading,bal,includeDeltaE){
  // entry so every dimming surface (canvas title, LG column title) states the
  // floor it actually judged against instead of re-reading the flat field.
  const liveFloor=meterRgbBalanceEffectiveNoiseFloor(reading);
+ // Where that floor came from ('' in flat mode): the dimming-title surfaces
+ // append it so 'measured scatter' and 'typed fallback' read differently.
+ const liveFloorNote=meterNoiseFloorSourceNote(reading);
  const entries=[
-  {key:'R',label:'R',color:'#f44',v:(bal.R!=null)?bal.R-center:null,labelV:(bal.R!=null)?(isDelta?(bal.R-center):bal.R):null,showPlus:isDelta,noise:!!(noise&&noise[0]),floor:liveFloor},
-  {key:'G',label:'G',color:'#4caf50',v:(bal.G!=null)?bal.G-center:null,labelV:(bal.G!=null)?(isDelta?(bal.G-center):bal.G):null,showPlus:isDelta,noise:!!(noise&&noise[1]),floor:liveFloor},
-  {key:'B',label:'B',color:'#42a5f5',v:(bal.B!=null)?bal.B-center:null,labelV:(bal.B!=null)?(isDelta?(bal.B-center):bal.B):null,showPlus:isDelta,noise:!!(noise&&noise[2]),floor:liveFloor}
+  {key:'R',label:'R',color:'#f44',v:(bal.R!=null)?bal.R-center:null,labelV:(bal.R!=null)?(isDelta?(bal.R-center):bal.R):null,showPlus:isDelta,noise:!!(noise&&noise[0]),floor:liveFloor,floorNote:liveFloorNote},
+  {key:'G',label:'G',color:'#4caf50',v:(bal.G!=null)?bal.G-center:null,labelV:(bal.G!=null)?(isDelta?(bal.G-center):bal.G):null,showPlus:isDelta,noise:!!(noise&&noise[1]),floor:liveFloor,floorNote:liveFloorNote},
+  {key:'B',label:'B',color:'#42a5f5',v:(bal.B!=null)?bal.B-center:null,labelV:(bal.B!=null)?(isDelta?(bal.B-center):bal.B):null,showPlus:isDelta,noise:!!(noise&&noise[2]),floor:liveFloor,floorNote:liveFloorNote}
  ];
  if(includeDeltaE&&reading){
   let de=null;
@@ -14842,7 +14860,7 @@ function drawDeltaBarsVertical(canvasId,spec){
   if(spec&&spec.kind==='rgb'&&Array.isArray(spec.entries)){
    const flagged=spec.entries.filter(e=>e.noise&&e.v!=null);
    c.title=flagged.length
-    ? flagged.map(e=>e.label).join(', ')+' within meter noise floor (±'+meterFormatNoiseFloorValue(flagged[0].floor)+' L* pre-gain) — noise, not a real error.'
+    ? flagged.map(e=>e.label).join(', ')+' within meter noise floor (±'+meterFormatNoiseFloorValue(flagged[0].floor)+' L* pre-gain'+(flagged[0].floorNote||'')+') — noise, not a real error.'
     : '';
   } else if(c.title&&c.title.indexOf('within meter noise floor')>=0){
    c.title='';
