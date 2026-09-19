@@ -3940,12 +3940,12 @@ sub _gamut_warning_only_recovery {
 sub _prepare_resume {
     my ($item_number, $item, $context_ready) = @_;
     die($::LAST_ERROR || 'Unable to restore the queued signal format') if !$context_ready && !_apply_signal($item);
-    my $last = _last_checkpoint($item);
-    return if !ref($last);
     # Only this resume's decision arms the baseline restore; a flag left by an
     # earlier attempt that then failed at job readiness must not stall every
     # later resume on the same missing curve.
     delete $item->{profile_baseline_needs_restore};
+    my $last = _last_checkpoint($item);
+    return if !ref($last);
     if (ref($item->{settings_recovery}) eq 'HASH') {
         my $from = $item->{settings_recovery}{resume_from} || '';
         if (_gamut_warning_only_recovery($item_number, $item)) {
@@ -3964,6 +3964,7 @@ sub _prepare_resume {
         }
         # Reusing the 1D result means restoring its curve before profiling.
         if ($from =~ /^(?:greyscale-settings-verified|volume-done)$/ && !_profile_baseline_data_ok($item_number, $item)) {
+            _log_action('The saved 1D curve is missing, so the calibration restarts from its reset instead of resuming at '._stage_label($from));
             $from = 'greyscale-done';
         }
         # Recheck before reusing a completed 1D stage, even if its prior menu

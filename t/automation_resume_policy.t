@@ -159,9 +159,11 @@ sub grey_state {
 {
  grey_state(11,{status=>'complete',ddc_upload_verified=>JSON::PP::true});
  my $item=item(settings_recovery=>{resume_from=>'volume-done',point=>'c7'});
+ @actions=();
  main::_prepare_resume(11,$item,1);
  is_deeply(names($item),[qw(item-started tv-setup-verified)],'a recovery plan without the curve resets from the calibration start');
  ok(!$item->{profile_baseline_needs_restore},'and arms no restore');
+ like(join("\n",@actions),qr/saved 1D curve is missing/,'and the operator is told why');
  grey_state(12,{status=>'complete',ddc_upload_verified=>JSON::PP::true,hdr20_1d_dpg_data=>[(0) x 3072]});
  my $kept=item(settings_recovery=>{resume_from=>'volume-done',point=>'c7'});
  main::_prepare_resume(12,$kept,1);
