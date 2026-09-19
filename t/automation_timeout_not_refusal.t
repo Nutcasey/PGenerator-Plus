@@ -20,20 +20,64 @@ ok(main::_lg_connection_failure({status=>'error',error_code=>'lg-disconnected'})
 
 # Helper timeouts the runner asks for: only where the daemon action is known.
 # 18 Sep 2026: a 19-key readback took 59 s on the G3 against a 60 s budget.
-is(main::_lg_helper_timeout_for('/api/lg/picture-settings',{}),120,'a read gets the same headroom as a full write');
+is(main::_lg_helper_timeout_for('/api/lg/picture-settings',{}),120,'a read with no key list keeps the 120 s floor');
+is(main::_lg_helper_timeout_for('/api/lg/picture-settings',{keys=>[1..19]}),182,'a 19-key read budgets the 8 s floor per key');
 is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{brightness=>50}}),45,'a lone control keeps the daemon default');
 is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..18}}),174,'eighteen controls get time for eighteen in-session writes');
 is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..40}}),300,'capped at 300 s');
 # 18-19 Sep 2026: the batched 18-control write ran at 10 s per control and the
 # constant 174 s budget fell back to one write at a time on every SDR job. The
-# budget follows the last measured batched write with 50% headroom.
+# budget follows the slowest of the last three measured batched writes with
+# 50% headroom, clamped to the budget a write was given.
+my $set='/api/lg/picture-settings/set';
+sub set_payload { return {settings=>{map {$_=>1} 1..$_[0]}} }
+main::_reset_lg_control_seconds();
 ok(!defined(main::_note_lg_control_seconds(1,30)),'a single-control write teaches nothing');
 ok(!defined(main::_note_lg_control_seconds(18,0)),'a zero elapsed teaches nothing');
 main::_note_lg_control_seconds(18,180);
-is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..18}}),300,'ten seconds per control measured lifts eighteen controls to the cap');
-is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..4}}),90,'the measured figure scales with the control count');
+is(main::_lg_helper_timeout_for($set,set_payload(18)),300,'ten seconds per control measured lifts eighteen controls to the cap');
+is(main::_lg_helper_timeout_for($set,set_payload(4)),90,'the measured figure scales with the control count');
+is(main::_lg_helper_timeout_for('/api/lg/picture-settings',{keys=>[1..19]}),300,'reads follow the measured figure, capped');
 main::_note_lg_control_seconds(18,72);
-is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..18}}),174,'a faster measurement never drops below the 8 s floor');
+is(main::_lg_helper_timeout_for($set,set_payload(18)),300,'one faster write does not discard the slower figure');
+main::_note_lg_control_seconds(18,72);
+main::_note_lg_control_seconds(18,72);
+is(main::_lg_helper_timeout_for($set,set_payload(18)),174,'three faster writes let the figure fall, never below the 8 s floor');
+main::_reset_lg_control_seconds();
+main::_note_lg_control_seconds(2,900,60);
+is(main::_lg_helper_timeout_for($set,set_payload(4)),210,'a write that ran out of time teaches at most its own budget');
+is(main::_reset_lg_control_seconds(15,'x',-1,undef),1,'seeding keeps only positive numeric samples');
+is(main::_lg_control_seconds(),15,'and the seeded figure is used');
+
+# The batched write itself measures, carries its budget, and stamps the
+# samples into the manifest for a resumed run.
+{
+ main::_reset_lg_control_seconds();
+ my $now=1000; my $step=30;
+ local *main::time=sub { $now };
+ my @calls; my $reply={status=>'ok'};
+ local *main::_api=sub { my ($method,$path,$payload)=@_; push(@calls,$payload); $now+=$step; return $reply; };
+ local *main::_update_live=sub {};
+ local *main::_log_action=sub {};
+ my @saved;
+ local *main::_update_run=sub { my ($cb)=@_; my $run={}; $cb->($run); push(@saved,$run); return $run; };
+ my $item={signal_format=>'sdr',picture_mode=>'cinema',tv_input=>'hdmi1'};
+ my $settings={brightness=>50,contrast=>85,color=>50};
+ my $done=main::_apply_settings_batched(0,$item,'c4',[sort keys %$settings],$settings,0);
+ is(scalar(keys %$done),3,'three controls written together');
+ is($calls[0]{helper_timeout},54,'the batched write carries its budget (30 s plus 8 s per control)');
+ is(main::_lg_control_seconds(),15,'a confirmed 30 s write of three controls teaches 15 s per control');
+ is_deeply($saved[-1]{lg_control_samples},[15],'the sample is stamped into the manifest');
+ $reply={status=>'error',message=>'Unable to connect to LG WebOS TV at 192.168.50.28'};
+ main::_apply_settings_batched(0,$item,'c4',[sort keys %$settings],$settings,0);
+ is(main::_lg_control_seconds(),15,'a refused connection teaches nothing');
+ is($calls[-1]{helper_timeout},75,'the next budget follows the measured figure');
+ $reply={status=>'error',message=>'LG TV did not finish writing 3 picture controls within 75s.'};
+ $step=400;
+ main::_apply_settings_batched(0,$item,'c4',[sort keys %$settings],$settings,0);
+ is(main::_lg_control_seconds(),37.5,'a helper that ran out of time teaches at most the budget it was given');
+ main::_reset_lg_control_seconds();
+}
 ok(!defined(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{whiteBalanceRed=>[0,0],whiteBalanceMethod=>'22'}})),'white-balance arrays keep the daemon DDC default');
 ok(!defined(main::_lg_helper_timeout_for('/api/lg/3d-lut/reset',{})),'unknown actions keep the daemon default');
 

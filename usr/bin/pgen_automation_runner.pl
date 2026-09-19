@@ -525,14 +525,34 @@ sub _lg_connection_failure {
     return 0;
 }
 
-# Seconds per control observed on the last batched write, with 50% headroom
-# so the next budget sits above it rather than on it. 0 until measured.
-my $LG_CONTROL_SECONDS = 0;
+# Seconds per control observed on recent batched writes, each with 50%
+# headroom. The budget follows the slowest of the last three samples, so one
+# quick refusal cannot discard a correctly learned figure. A sample comes
+# only from a write that reached the TV (a reply, or a helper that ran out
+# of time) and is clamped to the budget that was requested, so a daemon
+# outage or a pairing refresh cannot pin the figure at the cap. Samples are
+# kept in the manifest so a resumed run starts from what its TV measured,
+# not from the floor that ran out on 18-19 Sep 2026.
+my @LG_CONTROL_SAMPLES;
+sub _lg_control_seconds {
+    my $slowest = 0;
+    foreach my $sample (@LG_CONTROL_SAMPLES) { $slowest = $sample if $sample > $slowest; }
+    return $slowest;
+}
+sub _reset_lg_control_seconds {
+    @LG_CONTROL_SAMPLES = grep { defined($_) && !ref($_) && $_ =~ /^\d+(?:\.\d+)?$/ && $_ > 0 } @_;
+    shift @LG_CONTROL_SAMPLES while @LG_CONTROL_SAMPLES > 3;
+    return scalar(@LG_CONTROL_SAMPLES);
+}
 sub _note_lg_control_seconds {
-    my ($count, $elapsed) = @_;
+    my ($count, $elapsed, $budget) = @_;
     return if !$count || $count < 2 || !defined($elapsed) || $elapsed <= 0;
-    $LG_CONTROL_SECONDS = 1.5 * $elapsed / $count;
-    return $LG_CONTROL_SECONDS;
+    $elapsed = $budget if defined($budget) && $budget > 0 && $elapsed > $budget;
+    push @LG_CONTROL_SAMPLES, 1.5 * $elapsed / $count;
+    shift @LG_CONTROL_SAMPLES while @LG_CONTROL_SAMPLES > 3;
+    my @samples = @LG_CONTROL_SAMPLES;
+    eval { _update_run(sub { $_[0]{lg_control_samples} = [@samples]; }); };
+    return _lg_control_seconds();
 }
 
 # Helper timeouts the runner asks the daemon for. Only paths whose daemon
@@ -541,21 +561,29 @@ sub _note_lg_control_seconds {
 sub _lg_helper_timeout_for {
     my ($path, $payload) = @_;
     $payload = {} if ref($payload) ne 'HASH';
-    # A 19-key readback took 59 s on the G3 (18 Sep 2026, c1 of job 1) with a
-    # 60 s budget: one second from failing a job during setup. The helper
-    # reads per control, so give the read the same headroom as a full write.
-    return 120 if $path eq '/api/lg/picture-settings';
-    return undef if $path ne '/api/lg/picture-settings/set';
-    my $settings = ref($payload->{settings}) eq 'HASH' ? $payload->{settings} : {};
-    # White-balance arrays are the DDC path with its own daemon default.
-    return undef if grep { ref($settings->{$_}) } keys %$settings;
-    # The helper writes and reads back each control inside one session. The
-    # per-control figure starts at the 5-7 s measured on the G3 on 16 Sep
+    # The per-control figure starts at the 5-7 s measured on the G3 on 16 Sep
     # 2026 with headroom, and follows what this run's batched writes
     # actually took: at 10 s per control (18-19 Sep 2026, slow readbacks)
     # the constant 174 s budget ran out and every SDR job fell back to one
     # write at a time.
-    my $per_control = $LG_CONTROL_SECONDS > 8 ? $LG_CONTROL_SECONDS : 8;
+    my $measured = _lg_control_seconds();
+    my $per_control = $measured > 8 ? $measured : 8;
+    if ($path eq '/api/lg/picture-settings') {
+        # A 19-key readback took 59 s on the G3 (18 Sep 2026, c1 of job 1)
+        # with a 60 s budget: one second from failing a job during setup.
+        # Reads follow the same measured figure per key, never below the
+        # 120 s that covered that readback.
+        my $keys = ref($payload->{keys}) eq 'ARRAY' ? scalar(@{$payload->{keys}}) : 0;
+        my $read = 30 + int($per_control + 0.5) * $keys;
+        $read = 120 if $read < 120;
+        $read = 300 if $read > 300;
+        return $read;
+    }
+    return undef if $path ne '/api/lg/picture-settings/set';
+    my $settings = ref($payload->{settings}) eq 'HASH' ? $payload->{settings} : {};
+    # White-balance arrays are the DDC path with its own daemon default.
+    return undef if grep { ref($settings->{$_}) } keys %$settings;
+    # The helper writes and reads back each control inside one session.
     my $timeout = 30 + int($per_control + 0.5) * scalar(keys %$settings);
     $timeout = 45 if $timeout < 45;
     $timeout = 300 if $timeout > 300;
@@ -2096,9 +2124,12 @@ sub _apply_settings_batched {
         next if @group<2;
         _update_live(sub {$_[0]{operation_progress}={stage=>$ACTIVE_STAGE,completed=>scalar(keys %done),total=>scalar(@$keys)+1,unit=>'settings and verification',message=>'Applying '.scalar(@group).' '.$category.' controls together'};});
         delete $item->{best_available_write_ack}{$_} for @group;
+        my %values=map { $_=>($_ eq 'gamma' ? _tv_gamma_value($settings->{$_}) : $settings->{$_}) } @group;
+        my $budget=_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>\%values});
         my $write_started=time();
         my $result=_api('POST','/api/lg/picture-settings/set',{
-            settings=>{map { $_=>($_ eq 'gamma' ? _tv_gamma_value($settings->{$_}) : $settings->{$_}) } @group},
+            settings=>\%values,
+            ($budget ? (helper_timeout=>$budget) : ()),
             readback_keys=>[@group,'pictureMode'],
             picture_mode=>_picture_mode($item),
             tv_input=>$item->{tv_input}||'',
@@ -2107,7 +2138,12 @@ sub _apply_settings_batched {
             keep_calibration_mode=>$calibration_active ? JSON::PP::true : JSON::PP::false,
             calibration_mode_active=>$calibration_active ? JSON::PP::true : JSON::PP::false,
         });
-        _note_lg_control_seconds(scalar(@group),time()-$write_started);
+        # Only a write that reached the TV measures the TV: a reply of any
+        # kind, or the daemon's helper running out of its budget. A refused
+        # connection or an unreachable daemon measures nothing.
+        my $reached=ref($result) eq 'HASH' && !_lg_connection_failure($result)
+            && (($result->{status}||'') =~ /^(?:ok|started)$/ || ($result->{message}||'') =~ /did not finish/i);
+        _note_lg_control_seconds(scalar(@group),time()-$write_started,$budget) if $reached;
         my $ok=ref($result) eq 'HASH' && (($result->{status}||'') eq 'ok' || ($result->{status}||'') eq 'started')
             && (!exists($result->{verification_state}) || ($result->{verification_state}||'') eq 'verified');
         if (!$ok) {
@@ -5041,6 +5077,7 @@ sub _main {
     return if ($run->{status} || '') eq 'paused';
     return if ($run->{status} || '') =~ /^(?:complete(?:-with-warnings)?|failed|stopped)$/;
     $ETA_HISTORY=eval {PGAutomationETA::history($RUN_ID)} || [];
+    _reset_lg_control_seconds(@{$run->{lg_control_samples}}) if ref($run->{lg_control_samples}) eq 'ARRAY';
     _heartbeat(1);
     _log_action('Automation runner started');
     if (_control()->{request} eq 'stop') {
