@@ -531,7 +531,10 @@ sub _lg_connection_failure {
 sub _lg_helper_timeout_for {
     my ($path, $payload) = @_;
     $payload = {} if ref($payload) ne 'HASH';
-    return 60 if $path eq '/api/lg/picture-settings';
+    # A 19-key readback took 59 s on the G3 (18 Sep 2026, c1 of job 1) with a
+    # 60 s budget: one second from failing a job during setup. The helper
+    # reads per control, so give the read the same headroom as a full write.
+    return 120 if $path eq '/api/lg/picture-settings';
     return undef if $path ne '/api/lg/picture-settings/set';
     my $settings = ref($payload->{settings}) eq 'HASH' ? $payload->{settings} : {};
     # White-balance arrays are the DDC path with its own daemon default.

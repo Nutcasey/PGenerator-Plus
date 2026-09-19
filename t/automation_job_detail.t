@@ -27,6 +27,15 @@ my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],
  is($detail->{item}{name},'First','selected job returned');
  ok(!exists $detail->{item}{token},'item token removed');
  is(scalar @{$detail->{checks}},1,'complete evidence lines survive an in-progress append');
+ # 18 Sep 2026: the check rows and snapshots are decoded once per file change,
+ # not once per poll; an appended row must still appear on the next poll.
+ my $again=main::webui_automation_job_detail($id,0);
+ is_deeply($again->{checks},$detail->{checks},'an unchanged evidence file is served from the memo');
+ is_deeply($again->{snapshots},$detail->{snapshots},'unchanged snapshots are served from the cache');
+ open(my $append,'>>',"$dir/settings-checks.ndjson") or die $!;
+ print {$append} "\n".PGAutomation::encode_json({key=>'contrast',expected=>80,observed=>80,verified=>1})."\n";
+ close($append);
+ is(scalar @{main::webui_automation_job_detail($id,0)->{checks}},2,'a newly appended evidence row is seen on the next poll');
  is_deeply([map {$_->{message}} @{$detail->{readiness_issues}}],['TV cannot expose AI Picture'],'manual readiness limitations are scoped to selected job');
  is($detail->{snapshots}[0]{phase},'pre','before readings returned');
  is($detail->{live}{snapshot}{readings}[0]{Y},90,'owned worker measurements returned');

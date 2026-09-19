@@ -19,7 +19,8 @@ ok(main::_lg_connection_failure({status=>'error',message=>'Unable to connect to 
 ok(main::_lg_connection_failure({status=>'error',error_code=>'lg-disconnected'}),'a disconnect code still is');
 
 # Helper timeouts the runner asks for: only where the daemon action is known.
-is(main::_lg_helper_timeout_for('/api/lg/picture-settings',{}),60,'a read asks for the read default');
+# 18 Sep 2026: a 19-key readback took 59 s on the G3 against a 60 s budget.
+is(main::_lg_helper_timeout_for('/api/lg/picture-settings',{}),120,'a read gets the same headroom as a full write');
 is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{brightness=>50}}),45,'a lone control keeps the daemon default');
 is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..18}}),174,'eighteen controls get time for eighteen in-session writes');
 is(main::_lg_helper_timeout_for('/api/lg/picture-settings/set',{settings=>{map {$_=>1} 1..40}}),180,'capped at 180 s');

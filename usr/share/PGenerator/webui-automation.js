@@ -1587,7 +1587,11 @@ function pgAutomationShowJob(view,runId,index,force=false){
  list?.querySelectorAll('[data-job-index]').forEach(button=>button.setAttribute('aria-pressed',String(Number(button.dataset.jobIndex)===index)));
  const saved=view!=='live'||pgAutomationTerminal(pgAutomation.current?.run);
  target.querySelector('[data-job-nav]').innerHTML=view==='live'&&!saved&&!pgAutomation.followLive?'<button class="btn btn-sm btn-primary" onclick="pgAutomationBackToLive()">Back to live job</button>':'<span class="auto-muted">'+(saved?'Saved job results':'Following live job')+'</span>';
- if(!state.loading&&(force||Date.now()-state.lastFetch>(view==='calibration'?2500:10000)))pgAutomationFetchJob(view,state);
+ // 18 Sep 2026: a job-detail fetch costs 1.4-3 s on the appliance (472 KB with
+ // snapshots and checks), so two open tabs at the old 2.5 s / 10 s cadence
+ // kept the daemon at two thirds of a core. The chart refreshes every 5 s,
+ // the saved-job card every 30 s; the 2 s status poll still drives the rest.
+ if(!state.loading&&(force||Date.now()-state.lastFetch>(view==='calibration'?5000:30000)))pgAutomationFetchJob(view,state);
 }
 async function pgAutomationFetchJob(view,state){
  state.loading=true;state.lastFetch=Date.now();

@@ -36,7 +36,7 @@ const root=path.resolve(__dirname,'../../usr/share/PGenerator');
   }
   // Let native device/cache restoration finish before setting up the deliberately
   // conflicting manual selector. It is independent of snapshot rendering.
-  await page.waitForNetworkIdle({idleTime:700,timeout:30000});
+  await page.waitForNetworkIdle({idleTime:700,timeout:45000});
   // Do not edit the manual selector in the middle of an automatic snapshot.
   await page.waitForFunction(()=>!pgAutomation.reportBusy,{timeout:60000});
   await page.evaluate(current=>{
@@ -62,7 +62,7 @@ const root=path.resolve(__dirname,'../../usr/share/PGenerator');
   const desktop=await check();
   const oldSignature=await page.evaluate(()=>pgAutomation.jobViews.calibration.graphSignature);
   await page.setViewport({width:2200,height:1100,deviceScaleFactor:2});
-  await page.waitForFunction(old=>!pgAutomation.reportBusy&&pgAutomation.jobViews.calibration.graphSignature!==old,{timeout:30000},oldSignature);
+  await page.waitForFunction(old=>!pgAutomation.reportBusy&&pgAutomation.jobViews.calibration.graphSignature!==old,{timeout:45000},oldSignature);
   const wide=await check();
   // Exercise changing measurements through normal browser polling, not just
   // initial image loading. Browser-only replay; never sends TV/meter writes.
@@ -70,7 +70,7 @@ const root=path.resolve(__dirname,'../../usr/share/PGenerator');
   for(const view of ['live','calibration']){
    await page.evaluate(view=>{pgSelectDesktopWorkspace(view==='live'?'automation':'calibration');if(view==='live')pgAutomationTab('live');},view);
    const selector=view==='live'?'#pgAutomationLiveDetail img':'#pgAutomationCalibrationDetail img';
-   await page.waitForFunction(selector=>document.querySelectorAll(selector).length>=5&&!pgAutomation.reportBusy,{timeout:30000},selector);
+   await page.waitForFunction(selector=>document.querySelectorAll(selector).length>=5&&!pgAutomation.reportBusy,{timeout:45000},selector);
    for(const level of [20,25]){
     const previous=await page.$$eval(selector,els=>els.map(e=>e.src));
     const white=snapshot.readings.find(r=>Number(r.ire)===100);
@@ -79,8 +79,8 @@ const root=path.resolve(__dirname,'../../usr/share/PGenerator');
     detail.live.snapshot={...snapshot,status:'running',current_name:'Auto Cal 20%',current_step:3,current_delta_e:level,
      readings:[...snapshot.readings.filter(r=>Number(r.ire)!==20),{...white,ire:20,plot_ire:20,nominal_ire:20,stimulus:20,patch_ire:20,name:'20%',timestamp,
       signal_r_pct:20,signal_g_pct:20,signal_b_pct:20,X:white.X*fraction,Y:white.Y*fraction,Z:white.Z*fraction,luminance:white.Y*fraction,autocal_reference_only:false,autocal_white_reference:false}]};
-    await page.waitForFunction((view,timestamp)=>pgAutomation.jobViews[view]?.data?.live?.snapshot?.readings.some(r=>r.timestamp===timestamp)&&!pgAutomation.jobViews[view].loading&&!pgAutomation.reportBusy,{timeout:30000},view,timestamp);
-    await page.waitForFunction((selector,previous)=>[...document.querySelectorAll(selector)].some((e,i)=>e.src!==previous[i]),{timeout:30000},selector,previous);
+    await page.waitForFunction((view,timestamp)=>pgAutomation.jobViews[view]?.data?.live?.snapshot?.readings.some(r=>r.timestamp===timestamp)&&!pgAutomation.jobViews[view].loading&&!pgAutomation.reportBusy,{timeout:45000},view,timestamp);
+    await page.waitForFunction((selector,previous)=>[...document.querySelectorAll(selector)].some((e,i)=>e.src!==previous[i]),{timeout:45000},selector,previous);
     updates.push({view,level,changed:true});
    }
   }

@@ -13468,6 +13468,45 @@ sub webui_automation_fresh_worker (@) {
  return PGAutomation::read_json_file($path);
 }
 
+# Decoded rows of a job's settings-checks.ndjson, keyed by inode, size and
+# mtime so an appended line is seen on the next poll. Rows are returned by
+# reference and never modified by the caller. At most a few jobs are open
+# at once, so the memo holds eight paths, each under the shared cache's
+# per-file ceiling; a larger file is decoded straight through.
+our %WEBUI_JOB_CHECKS_MEMO;
+sub webui_automation_job_checks_cached (@) {
+ my ($path)=@_;
+ my @st=Time::HiRes::stat($path);
+ return [] if(!@st);
+ # Same per-file ceiling as the shared JSON cache: a file that has outgrown
+ # it is decoded straight through rather than pinned in every worker.
+ if($st[7] > $PGAutomation::JSON_CACHE_MAX_BYTES) {
+  delete $WEBUI_JOB_CHECKS_MEMO{$path};
+  return &webui_automation_job_checks_read($path);
+ }
+ my $key=join(':',$st[1],$st[7],$st[9]);
+ my $entry=$WEBUI_JOB_CHECKS_MEMO{$path};
+ if(ref($entry) eq "HASH" && $entry->{key} eq $key) {
+  $entry->{used}=time();
+  return $entry->{rows};
+ }
+ my $rows=&webui_automation_job_checks_read($path);
+ if(keys(%WEBUI_JOB_CHECKS_MEMO) >= 8) {
+  my ($oldest)=sort { $WEBUI_JOB_CHECKS_MEMO{$a}{used} <=> $WEBUI_JOB_CHECKS_MEMO{$b}{used} } keys %WEBUI_JOB_CHECKS_MEMO;
+  delete $WEBUI_JOB_CHECKS_MEMO{$oldest} if(defined($oldest));
+ }
+ $WEBUI_JOB_CHECKS_MEMO{$path}={key=>$key,rows=>$rows,used=>time()};
+ return $rows;
+}
+sub webui_automation_job_checks_read (@) {
+ my ($path)=@_;
+ my @rows;
+ return [] if(!open(my $fh,"<",$path));
+ while(my $line=<$fh>) { my $row=eval { JSON::PP::decode_json($line) }; push @rows,$row if(ref($row) eq "HASH"); }
+ close($fh);
+ return \@rows;
+}
+
 sub webui_automation_job_detail (@) {
  my ($id,$index)=@_;
  # Polled every few seconds by every open tab; the manifest is decoded once
@@ -13476,21 +13515,23 @@ sub webui_automation_job_detail (@) {
  return undef if(ref($run) ne "HASH" || $index !~ /^\d+$/ || $index >= scalar(@{$run->{items}||[]}));
  my $item=PGAutomation::clone($run->{items}[$index]);
  my $dir=PGAutomation::item_dir($run->{id},$index);
- my @checks;
- if(open(my $fh,"<",$dir."/settings-checks.ndjson")) {
-  while(my $line=<$fh>) { my $row=eval { JSON::PP::decode_json($line) }; push @checks,$row if(ref($row) eq "HASH"); }
-  close($fh);
- }
+ # 18 Sep 2026: with the manifest cached, this call still cost 2.2-2.5 s on
+ # the G3 per poll: 106 KB of settings checks decoded line by line and up to
+ # 313 KB of series and calibration snapshots decoded from disk every time.
+ # Two open tabs kept the daemon at two thirds of a core with no run active.
+ # Decode each file once per change; the snapshots go through the shared
+ # cache, the check rows through a small per-worker memo keyed like it.
+ my @checks=@{&webui_automation_job_checks_cached($dir."/settings-checks.ndjson")};
  my @snapshots;
  foreach my $phase (qw(pre post)) {
   foreach my $key (@{$item->{$phase."_series"}||[qw(greyscale-21 colors-30 saturations-24)]}) {
    next if($key !~ /^(?:greyscale-21|colors-30|saturations-24)$/);
-   my $snapshot=PGAutomation::read_json_file("$dir/$phase/$key.json");
+   my $snapshot=PGAutomation::read_json_cached("$dir/$phase/$key.json");
    push @snapshots,{phase=>$phase,key=>$key,snapshot=>$snapshot} if(ref($snapshot) eq "HASH");
   }
  }
  foreach my $key (qw(grey 3d dv-profile)) {
-  my $snapshot=PGAutomation::read_json_file("$dir/calibration/$key-state.json");
+  my $snapshot=PGAutomation::read_json_cached("$dir/calibration/$key-state.json");
   push @snapshots,{phase=>"calibration",key=>$key,snapshot=>$snapshot} if(ref($snapshot) eq "HASH");
  }
  my %sources=("greyscale-done"=>["grey","/tmp/meter_lg_autocal.json"],
