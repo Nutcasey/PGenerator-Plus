@@ -42,8 +42,9 @@ ok(!main::_worker_full_status_usable($summary,undef),'nothing is not a usable fu
 ok(!main::_worker_full_status_usable($summary,{status=>'error',error_code=>'daemon-unreachable',_transport_error=>1}),'a transport failure is not');
 ok(!main::_worker_full_status_usable($summary,{status=>'error',error_code=>'invalid-daemon-response'}),'nor an undecodable reply');
 ok(!main::_worker_full_status_usable($summary,{status=>'error',error_code=>'stopped'}),'nor a stop interrupting the request');
-ok(!main::_worker_full_status_usable($summary,{status=>'running',automation_worker_id=>'w1'}),'nor a state that is not terminal');
 ok(!main::_worker_full_status_usable($summary,{status=>'complete',automation_worker_id=>'w2'}),'nor another worker\'s result');
+ok(main::_worker_full_status_usable($summary,{status=>'running',automation_worker_id=>'w1'}),'a same-worker state that is not terminal is adopted so polling continues');
+ok(main::_worker_full_status_usable($summary,{status=>'idle'}),'an unstamped read is adopted too');
 
 my $event=sub {my ($seq)=@_;return {seq=>$seq,time=>100+$seq,message=>"event $seq"}};
 {
@@ -101,7 +102,6 @@ for my $case (
  ['daemon unreachable',{status=>'error',error_code=>'daemon-unreachable',_transport_error=>1}],
  ['invalid JSON',{status=>'error',error_code=>'invalid-daemon-response',message=>'The daemon returned invalid JSON'}],
  ['no reply',undef],
- ['still running for the same worker',{status=>'running',automation_worker_id=>'w1'}],
  ['another worker',{status=>'complete',automation_worker_id=>'w2'}],
 ) {
  my ($name,$reply)=@$case;
@@ -117,6 +117,42 @@ for my $case (
  is($result->{status},'complete',"$name: the terminal summary stands as the result");
  is($result->{message},'done',"$name: with the summary's own fields");
  is(scalar(grep {/full status could not be read/} @lines),1,"$name: the fallback is logged once");
+}
+# A same-worker full read that is not terminal is adopted and polling goes
+# on: the daemon's liveness check saw the worker again after the summary
+# flipped it, so the stage is not failed while the worker still measures.
+{
+ @lines=();
+ my @summaries=({status=>'error',automation_worker_id=>'w1',current_name=>'Auto Cal process died'},
+                {status=>'complete',automation_worker_id=>'w1'});
+ my @fulls=({status=>'running',automation_worker_id=>'w1',current_name=>'Auto Cal 7%',current_step=>7,total_steps=>37},
+            {status=>'complete',automation_worker_id=>'w1',full=>1});
+ my @seen;
+ local *main::_api=sub {
+  my ($m,$p)=@_;
+  return {status=>'ok'} if $p eq '/api/lg/status';
+  push @seen,$p;
+  return shift(@fulls) || die 'extra full read' if $p eq '/api/meter/lg-autocal/status';
+  return shift(@summaries) || die 'extra poll';
+ };
+ my $result=main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{});
+ ok($result->{full},'the wait ends on a later full state');
+ is_deeply(\@seen,['/api/meter/lg-autocal/status?view=summary&after=0','/api/meter/lg-autocal/status',
+  '/api/meter/lg-autocal/status?view=summary&after=0','/api/meter/lg-autocal/status'],'a running full read is adopted and summary polling resumes');
+ is(scalar(grep {/full status could not be read/} @lines),0,'a live worker is not a failed read');
+ ok(scalar(grep {/Auto Cal 7%.*Patch 7 \/ 37/} @lines),'the adopted running state is logged as progress');
+ ok(!scalar(grep {/process died/} @lines),'the flipped summary never reaches the log as an outcome');
+}
+{
+ my @summaries=({status=>'complete',automation_worker_id=>'w1'},{status=>'complete',automation_worker_id=>'w1'});
+ my @fulls=({status=>'idle'},{status=>'complete',automation_worker_id=>'w1',full=>1});
+ local *main::_api=sub {
+  my ($m,$p)=@_;
+  return {status=>'ok'} if $p eq '/api/lg/status';
+  return shift(@fulls) || die 'extra full read' if $p eq '/api/meter/lg-autocal/status';
+  return shift(@summaries) || die 'extra poll';
+ };
+ ok(main::_wait_worker('/api/meter/lg-autocal/status','greyscale AutoCal',{})->{full},'an unstamped idle full read is adopted and polling continues');
 }
 {
  my @summaries=({status=>'idle'},{status=>'running',automation_worker_id=>'w1'},{status=>'complete',automation_worker_id=>'w1'});

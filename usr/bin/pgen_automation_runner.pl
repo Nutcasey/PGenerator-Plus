@@ -1225,15 +1225,18 @@ sub _worker_status_poll_path {
     return $status_path . '?view=summary&after=' . $after;
 }
 
-# After a terminal summary the full state is read once. A read that fails or
-# disagrees with the summary is not this worker's result, so the caller keeps
-# the summary rather than turning a finished stage into a transport failure.
+# After a terminal summary the full state is read once. A read that failed
+# (transport error, undecodable or stopped reply, no reply) or that belongs
+# to another worker is not this worker's result, so the summary stands. A
+# same-worker or unstamped read is adopted even when it is not terminal: the
+# daemon's own liveness check may have seen the worker again after the
+# summary flipped it, and the loop then keeps polling.
 sub _worker_full_status_usable {
     my ($summary, $full) = @_;
     return 0 if ref($full) ne 'HASH' || $full->{_transport_error};
     return 0 if ($full->{error_code} || '') =~ /^(?:daemon-unreachable|invalid-daemon-response|stopped)$/;
-    return 0 if !_status_terminal($full->{status} || '');
-    return PGAutomation::worker_id($full) eq PGAutomation::worker_id($summary) ? 1 : 0;
+    my $full_id = PGAutomation::worker_id($full);
+    return ($full_id eq '' || $full_id eq PGAutomation::worker_id($summary)) ? 1 : 0;
 }
 
 sub _wait_worker {

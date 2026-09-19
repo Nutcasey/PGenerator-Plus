@@ -22,9 +22,11 @@ my $events='[map {{seq=>$_,time=>$_,message=>"e$_"}} 1..'.($limit+6).']';
 for my $w (
  ['grey','meter_lg_autocal.pl','$main::LG_AUTOCAL_CONFIG={automation_worker_id=>"'.$id.'"};'
    .'main::write_state({status=>"running",message=>"x",current_step=>3,total_steps=>37,phase=>"greyscale",activity_sequence=>'.($limit+6).','
-   .'activity_events=>'.$events.',hdr20_1d_dpg_anchor_history=>[1..5000],readings=>[1..500]});'],
+   .'activity_events=>'.$events.',hdr20_1d_dpg_anchor_history=>[1..5000],readings=>[1..500],'
+   .'ddc_upload_verified=>JSON::PP::true,failure_detail=>"meter timeout",automation_processing_checks=>[{name=>"c1",ok=>1}],automation_processing_warnings=>["w1"]});'],
  ['3d','meter_lg_3d_autocal.pl','$main::LG_3D_REQUEST_CONTEXT={automation_worker_id=>"'.$id.'"};'
-   .'main::write_state({status=>"running",message=>"x",current_step=>3,total_steps=>33,upload_verified=>JSON::PP::false,hdr20_postcal_shadow_dpg_data=>[1..3072]});'],
+   .'main::write_state({status=>"running",message=>"x",current_step=>3,total_steps=>33,upload_verified=>JSON::PP::false,hdr20_postcal_shadow_dpg_data=>[1..3072],'
+   .'upload_retry_available=>JSON::PP::true,automation_processing_checks=>[{name=>"c2",ok=>0}],automation_processing_warnings=>[]});'],
 ) {
  my $state="$dir/$w->[0].json";
  my ($rc,$out)=run_perl(qq{\@ARGV=("$dir/none-config.json","$state","$dir/stop");
@@ -56,6 +58,16 @@ for my $w (
  is($sum->{activity_events}[-1]{seq},$limit+6,'grey: the newest event is kept');
  ok($sum->{autocal},'grey: the autocal flag write_state sets is in the sidecar');
  is($sum->{phase},'greyscale','grey: the phase is in the sidecar');
+ # The stage callers gate on these when a summary has to stand in for the
+ # full state, so the sidecar must carry them.
+ ok($sum->{ddc_upload_verified},'grey: ddc_upload_verified is in the sidecar');
+ is($sum->{failure_detail},'meter timeout','grey: failure_detail is in the sidecar');
+ is_deeply($sum->{automation_processing_checks},[{name=>'c1',ok=>1}],'grey: automation_processing_checks are in the sidecar');
+ is_deeply($sum->{automation_processing_warnings},['w1'],'grey: automation_processing_warnings are in the sidecar');
+ my $three=load_json("$dir/3d.json.summary")||{};
+ ok($three->{upload_retry_available},'3d: upload_retry_available is in the sidecar');
+ is_deeply($three->{automation_processing_checks},[{name=>'c2',ok=>0}],'3d: automation_processing_checks are in the sidecar');
+ is_deeply($three->{automation_processing_warnings},[],'3d: an empty warnings list is kept, not dropped');
 }
 # The worker's own event buffer uses the same cap.
 {

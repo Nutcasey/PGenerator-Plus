@@ -6785,12 +6785,24 @@ sub webui_worker_status_read (@) {
 # "phase" in the text, and canonical order puts activity_events (whose
 # entries carry a message) ahead of those keys. Empty the array while the
 # fix-ups run and put the events back before the text is served or saved,
-# in both views. Events are flat objects, so the first bare ] closes the
-# array; a text without the key round-trips unchanged.
+# in both views. The array is found by bracket depth, skipping strings and
+# their escapes, so nested values inside an event are kept whole; a text
+# without the key, or with an unterminated array, round-trips unchanged.
 sub webui_worker_status_detach_events (@) {
  my ($json)=@_;
- my $events="";
- $events=$1 if(defined($json) && $json=~s/("activity_events"\s*:\s*\[(?:"(?:[^"\\]|\\.)*"|[^"\]])*\])/"activity_events":[]/);
+ return ($json,"") if(!defined($json) || $json!~/"activity_events"\s*:\s*\[/g);
+ my $start=$-[0];
+ my $depth=1;
+ while($depth>0) {
+  next if($json=~/\G"(?:[^"\\]|\\.)*"/gc);
+  next if($json=~/\G[^"\[\]]+/gc);
+  if($json=~/\G\[/gc) { $depth++; next; }
+  if($json=~/\G\]/gc) { $depth--; next; }
+  return ($json,"");
+ }
+ my $length=pos($json)-$start;
+ my $events=substr($json,$start,$length);
+ substr($json,$start,$length)='"activity_events":[]';
  return ($json,$events);
 }
 

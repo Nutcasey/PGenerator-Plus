@@ -25,9 +25,11 @@ ok(scalar(@summary_keys)>20,'the shared summary key list is exported by PGAutoma
 sub summary_of { my ($state)=@_; my %s; $s{$_}=$state->{$_} for grep { exists $state->{$_} } @summary_keys; return \%s; }
 sub expected_keys { my ($state)=@_; return [sort grep { exists $state->{$_} } @summary_keys]; }
 
-# Event 3 carries a bracket, escaped quotes and a backslash so the text
-# splice around the fix-ups is proved on the awkward cases.
-my @events=map {{seq=>$_,time=>100+$_,message=>$_==3 ? '7% | codes [1,2] "quoted" \\ back' : "event $_"}} 1..5;
+# Event 3 carries a bracket, escaped quotes and a backslash, and event 4 a
+# nested array and object, so the text splice around the fix-ups is proved
+# on the awkward cases.
+my @events=map {{seq=>$_,time=>100+$_,message=>$_==3 ? '7% | codes [1,2] "quoted" \\ back' : "event $_",
+ $_==4 ? (detail=>{codes=>[1,[2,3]],note=>'a]b',message=>'nested message'}) : ()}} 1..5;
 sub full_state {
  my (%over)=@_;
  return {
@@ -60,6 +62,17 @@ is(main::webui_worker_status_summary_after('view=summary&after=x'),0,'a malforme
  my ($same,$none)=main::webui_worker_status_detach_events('{"message":"top"}');
  is($same,'{"message":"top"}','a text without events is untouched');
  is(main::webui_worker_status_attach_events($same,$none),'{"message":"top"}','and attaches nothing');
+ my $nested='{"activity_events":[{"detail":{"codes":[1,[2,3]],"list":[],"note":"a]b\\"]"},"message":"inner","seq":1}],"message":"top","phase":"x"}';
+ my ($d,$f)=main::webui_worker_status_detach_events($nested);
+ is($d,'{"activity_events":[],"message":"top","phase":"x"}','a nested array and object inside an event are taken out whole');
+ is(main::webui_worker_status_attach_events($d,$f),$nested,'and restored byte for byte');
+ my $open='{"activity_events":[{"message":"never closed"';
+ my ($o,$of)=main::webui_worker_status_detach_events($open);
+ is($o,$open,'an unterminated array leaves the text alone');
+ is($of,'','and yields no fragment');
+ my $torn='{"activity_events":[{"message":"no end';
+ my ($t,$tf)=main::webui_worker_status_detach_events($torn);
+ is($t,$torn,'an unterminated string leaves the text alone');
 }
 
 my $running=1;
