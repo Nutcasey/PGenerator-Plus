@@ -11860,7 +11860,10 @@ function meterUpdateNoiseFloorModeStatus(){
   }
  }catch(e){}
  el.textContent=text;
- el.style.display=text?'':'none';
+ // inline-block, not the default inline: max-width and the ellipsis are
+ // no-ops on inline boxes (measured live: 22ch cap declared, 150px
+ // rendered). Round-2 cap only works once the box honors it.
+ el.style.display=text?'inline-block':'none';
 }
 
 function meterOnRgbBalanceFormulaChange(){

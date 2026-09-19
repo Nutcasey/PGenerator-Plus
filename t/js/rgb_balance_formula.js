@@ -1222,7 +1222,7 @@ test('empirical_mode_control_wiring', () => {
   S.meterNoiseHistoryStore().clear();
   S.meterUpdateNoiseFloorModeStatus();
   assert(statusEl.textContent === '· no scatter yet — re-read patches', 'empty store names the repair');
-  assert(statusEl.style.display === '', 'empty-store hint is visible');
+  assert(statusEl.style.display === 'inline-block', 'empty-store hint is visible as inline-block (max-width applies)');
   S.meterNoiseHistoryStore().set('a', { vals: [[0, 0, 0], [0.1, 0, 0]] });
   S.meterUpdateNoiseFloorModeStatus();
   assert(statusEl.textContent === '· 1 point measured', 'one point: singular count');
@@ -1236,6 +1236,17 @@ test('empirical_mode_control_wiring', () => {
   // Markup must carry the element the updater writes to (id + aria-live).
   const statusTag = /<span[^>]*id="meterNoiseFloorModeStatus"[^>]*aria-live="polite"[^>]*>/.exec(html);
   assert(!!statusTag, 'status span exists in the mode row with aria-live');
+  // Rendered-measured pin (live bench): the span's max-width cap was inert
+  // because inline boxes ignore max-width, and a clipped tail needs the
+  // ellipsis trio. Markup must carry all three + max-width...
+  assert(/max-width/.test(statusTag[0]) && /text-overflow:ellipsis/.test(statusTag[0])
+    && /overflow:hidden/.test(statusTag[0]) && /white-space:nowrap/.test(statusTag[0]),
+    'status span caps with a working ellipsis (max-width+overflow+ellipsis+nowrap)');
+  // ...and the updater must reveal it as inline-block (inline ignores
+  // max-width; 'block' would force the row to wrap every time).
+  const updSrc = extractFunction(srcText, 'meterUpdateNoiseFloorModeStatus');
+  assert(/display\s*=\s*text\?'inline-block'\:'none'/.test(updSrc),
+    'updater shows the span as inline-block, not inline/block');
   globalThis.__noiseMode = null;
   globalThis.__modeStatus = null;
   S.meterNoiseHistoryStore().clear();
