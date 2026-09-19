@@ -13876,7 +13876,7 @@ sub webui_automation_graph_snapshot (@) {
 # The TV capability profile, setting contracts, checkpoint evidence and the
 # passing checks belong to the manifest and the artifact download.
 our @WEBUI_AUTOMATION_JOB_EVIDENCE_KEYS=qw(setting_contracts generation_profile capability_profile preflight_contract best_available_settings best_available_write_ack tv_input hazards hazard_capabilities hazard_restore device_identity supported_picture_keys calibration_settings_recipe);
-my %WEBUI_AUTOMATION_JOB_EVIDENCE=map { ($_=>1) } @WEBUI_AUTOMATION_JOB_EVIDENCE_KEYS;
+our %WEBUI_AUTOMATION_JOB_EVIDENCE=map { ($_=>1) } @WEBUI_AUTOMATION_JOB_EVIDENCE_KEYS;
 sub webui_automation_job_view_item (@) {
  my ($record)=@_;
  return {} if(ref($record) ne "HASH");
