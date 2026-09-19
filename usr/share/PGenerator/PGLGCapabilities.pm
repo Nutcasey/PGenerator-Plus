@@ -75,7 +75,7 @@ sub _library_signature {
   push(@rows,join(':',substr($_,length($root)),$st[7],$st[9]));
  }},$root);
  my @self=Time::HiRes::stat(__FILE__);
- push(@rows,join(':','PGLGCapabilities.pm',$self[7],$self[9])) if(@self);
+ push(@rows,join(':','PGLGCapabilities.pm',(@self ? ($self[7],$self[9]) : ('schema',$RESOLVED_CACHE_SCHEMA))));
  return join("\n",sort @rows);
 }
 

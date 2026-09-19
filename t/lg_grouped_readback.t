@@ -103,8 +103,8 @@ my $reply_all=sub {
  is($read->{picture_settings}{$_},"single-$_","$_ value comes from its single read") for @keys;
 }
 
-# pictureMode is grouped like any other key; the authoritative mode comes
-# from its own read (lg_current_picture_mode), which is unchanged.
+# pictureMode joins the grouped call like any other key and its grouped
+# value is returned.
 {
  @requests=();
  local *main::lg_request=$reply_all;
@@ -114,12 +114,15 @@ my $reply_all=sub {
  is(scalar(@grouped),1,'one grouped call');
  ok(grep({ $_ eq 'pictureMode' } @{$grouped[0]{payload}{keys}||[]}),'pictureMode is asked for in the grouped call');
  ok(!grep({ $_->{label} eq 'get_picture_setting_pictureMode' } @requests),'and not read on its own');
+ is($read->{picture_settings}{pictureMode},'value-pictureMode','its value comes from the grouped reply');
 }
 
-# A grouped call refused for a key it names is retried once without it.
+# A grouped call refused for a key it names is retried once without it. This
+# block reads with an unconfirmed context and its own key, so it records no
+# observation the exclusion block below could depend on.
 {
  @requests=();
- my $refused=$individual[1];
+ my $refused=$individual[0];
  local *main::lg_request=sub {
   my ($session,$label,$path,$payload)=@_;
   push(@requests,{label=>$label,path=>$path,payload=>$payload});
@@ -138,6 +141,26 @@ my $reply_all=sub {
  is_deeply([map { $_->{label} } grep { $_->{label} =~ /^get_picture_setting_/ } @requests],["get_picture_setting_$refused"],'only the refused key is read on its own');
  is($read->{picture_settings}{brightness},'value-brightness','the other keys come from the retried group');
  ok(exists($read->{unsupported_picture_keys}{$refused}) || exists($read->{picture_capabilities}{unsupported}{$refused}),'the refused key is reported unsupported');
+}
+
+# The retry also covers the other refusal wordings the helper recognises.
+{
+ @requests=();
+ my $refused=$individual[0];
+ local *main::lg_request=sub {
+  my ($session,$label,$path,$payload)=@_;
+  push(@requests,{label=>$label,path=>$path,payload=>$payload});
+  if($path eq 'settings/getSystemSettings' && grep { $_ eq $refused } @{$payload->{keys}||[]}) {
+   return {type=>'error',error=>"No matched extended item: $refused"};
+  }
+  return {type=>'response',payload=>{settings=>{map { $_=>"value-$_" } @{$payload->{keys}||[]}}}}
+   if($path eq 'settings/getSystemSettings');
+  return {type=>'response',payload=>{}};
+ };
+ my $read=main::lg_picture_get_workflow('127.0.0.1','test-key',1,[@keys],'hdrCinema','hdmi1',0,'hdr10',0,'picture');
+ is($read->{status},'ok','a "no matched" refusal naming one key still completes');
+ ok(grep({ $_->{label} eq 'get_picture_settings_retry' } @requests),'and the group is retried without it');
+ is_deeply([map { $_->{label} } grep { $_->{label} =~ /^get_picture_setting_/ } @requests],["get_picture_setting_$refused"],'only the named key is read on its own');
 }
 
 # A key observed unsupported (in a confirmed context) stays out of the next

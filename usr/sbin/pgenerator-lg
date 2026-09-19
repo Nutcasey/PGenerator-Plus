@@ -1503,6 +1503,7 @@ sub lg_picture_get_workflow (@) {
   my %scope=($category eq "picture" && $requested_picture_mode ne "")
    ? (dimension=>{pictureMode=>$requested_picture_mode,($tv_input ne "" ? (input=>$tv_input,"_3dStatus"=>"2d") : ())}) : ();
   my ($failed,$message)=(0,"");
+  my @omitted=();
   if(@bulk_keys) {
    $response=&lg_request($session,"get_picture_settings","settings/getSystemSettings",{
     category => $category,
@@ -1513,7 +1514,7 @@ sub lg_picture_get_workflow (@) {
    # A grouped call refused for a key it names is retried once without
    # that key, which then takes the single read that records it as
    # unsupported for the next readback.
-   if($failed && &lg_settings_error_is_unsupported_key($message)) {
+   if($failed && (&lg_settings_error_is_unsupported_key($message) || ($message||"") =~ /(?:no matched|undefined|-1000|invalid key)/i)) {
     my @refused=grep { my $key=$_; ($message||"") =~ /(?:^|[^A-Za-z0-9_])\Q$key\E(?:[^A-Za-z0-9_]|$)/ } @bulk_keys;
     if(@refused && scalar(@refused) < scalar(@bulk_keys)) {
      my %drop=map { $_=>1 } @refused;
@@ -1533,13 +1534,14 @@ sub lg_picture_get_workflow (@) {
     %settings=%{$response->{"payload"}{"settings"}};
    }
    # LG firmware can return a successful grouped response while silently
-   # omitting context-sensitive keys. Retry every omission individually. A
-   # refused grouped call sends every key that way, which is the slow path
-   # this readback is meant to avoid, so both are recorded.
-   my @omitted=grep { !exists($settings{$_}) } @bulk_keys;
-   &diag_log_append("picture_get:grouped-fallback",{ ip => $ip, refused => $failed ? 1 : 0, message => $message, omitted => \@omitted, single_reads => scalar(@omitted)+scalar(@individual_keys) }) if(@omitted);
+   # omitting context-sensitive keys. Retry every omission individually.
+   @omitted=grep { !exists($settings{$_}) } @bulk_keys;
    push(@individual_keys,@omitted);
   }
+  # Every single read is the slow path this readback is meant to avoid: a
+  # refused grouped call, an omission, or a key kept out of the group. Each
+  # is recorded so a return of the 26-60 s readbacks is visible.
+  &diag_log_append("picture_get:grouped-fallback",{ ip => $ip, refused => $failed ? 1 : 0, message => $message, grouped => scalar(@bulk_keys), omitted => \@omitted, single_reads => scalar(@individual_keys) }) if(@individual_keys);
   my %individual_seen=();
   foreach my $key (grep { !$individual_seen{$_}++ } @individual_keys) {
    my $single=&lg_request($session,"get_picture_setting_$key","settings/getSystemSettings",{
