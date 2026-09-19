@@ -59,8 +59,13 @@ function pgAutomationReferenceItems(ids,context){
    display_type:'oled_generic',ccss_override:meter.ccss_override||'',observer:'1931_2',
    delay_ms:1000,patch_size:10,settle_seconds:8,refresh_rate:meter.refresh_rate||'',
    low_light:{enabled:true,mode:'a',trigger:1},
-   patch_insert:true,patch_insert_time_enabled:true,patch_insert_time_frequency_ms:sdr?45000:5000,
-   patch_insert_time_duration_ms:5000,patch_insert_time_level:25,patch_insert_patch_enabled:!sdr,
+   // 19 Sep 2026: SDR used to skip the per-patch grey field and insert the
+   // 25% field only every 45 s, so an SDR colour profile read 63 saturated
+   // patches back to back with a 1.8 s settle. The owner wants SDR treated
+   // like HDR and DV on the OLED; pgAutomationUpgradeInsertion lifts saved
+   // jobs that still carry the old SDR values.
+   patch_insert:true,patch_insert_time_enabled:true,patch_insert_time_frequency_ms:5000,
+   patch_insert_time_duration_ms:5000,patch_insert_time_level:25,patch_insert_patch_enabled:true,
    patch_insert_patch_every:1,patch_insert_patch_duration_ms:1000,patch_insert_patch_level:10,
    display_use_case:'keep',color_format:dv?'0':'1',max_bpc:dv?8:10,colorimetry:sdr?'2':'9',
    ...(hdr?{primaries:'2',eotf:'2'}:{}),
@@ -148,11 +153,21 @@ function pgAutomationSnapshot(source){
  delete item.settings_recovery;
  ['readiness','setting_contracts','generation_profile','capability_profile','preflight_contract','best_available_settings','best_available_write_ack','tv_input','worker_status','started_at','completed_at'].forEach(key=>delete item[key]);
  pgAutomationUpgradeReference(item);
+ pgAutomationUpgradeInsertion(item);
  ['item_number','status','checkpoints','checkpoint','checkpoint_status','active_stage','stage_started_at','failure','warnings','recheck','hazards','hazard_capabilities','hazard_restore','device_identity','fault_injected','drift_recovery_attempts','drift_recovery_pending','series','apply-all','panel-light'].forEach(key=>delete item[key]);
  // Run evidence merged into history items (webui_automation_item_artifacts);
  // the server strips it again on save, but it must not sit in the draft either.
  if(item.calibration&&typeof item.calibration==='object'){['reset','grey-state','3d-state','dv-profile-state','dv-profile-measurements','dv-profile-upload'].forEach(key=>delete item.calibration[key]);}
  return item;
+}
+// An SDR job carrying exactly the old SDR defaults (no per-patch grey field,
+// 25% field every 45 s) is lifted to the HDR/DV insertion. A job whose
+// insertion was set by hand to anything else is left alone.
+function pgAutomationUpgradeInsertion(item){
+ if((item.signal_format||'')!=='sdr')return;
+ if(item.patch_insert_patch_enabled!==false||Number(item.patch_insert_time_frequency_ms)!==45000)return;
+ item.patch_insert_patch_enabled=true;
+ item.patch_insert_time_frequency_ms=5000;
 }
 function pgAutomationUpgradeReference(item){
  if(!/^(reference-settings-v[123]|colourstrue-six-modes-v1)$/.test(item.template_id||''))return;

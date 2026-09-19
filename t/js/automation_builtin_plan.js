@@ -73,8 +73,22 @@ for (const item of items) {
   assert.equal(item.calibration.profile_source, 'hybrid3');
   assert.equal(item.settings.contrast, 85);
   assert.equal(item.settings.peakBrightness, 'off');
-  assert.equal(item.patch_insert_patch_enabled, false);
- } else assert.equal(item.patch_insert_patch_enabled, true);
+ }
+ // 19 Sep 2026: SDR gets the same grey-field insertion as HDR and DV.
+ assert.equal(item.patch_insert_patch_enabled, true, item.name+' inserts a grey field before every patch');
+ assert.equal(item.patch_insert_time_frequency_ms, 5000, item.name+' inserts the 25% field every 5 s');
+}
+{
+ // A saved SDR job that still carries the old SDR defaults is lifted on load;
+ // one set by hand to anything else keeps its values.
+ const lifted=evaluate('pgAutomationSnapshot({signal_format:"sdr",name:"Old SDR",patch_insert_patch_enabled:false,patch_insert_time_frequency_ms:45000})');
+ assert.equal(lifted.patch_insert_patch_enabled, true, 'legacy SDR insertion is lifted');
+ assert.equal(lifted.patch_insert_time_frequency_ms, 5000, 'legacy SDR time insertion is lifted');
+ const custom=evaluate('pgAutomationSnapshot({signal_format:"sdr",name:"Custom SDR",patch_insert_patch_enabled:false,patch_insert_time_frequency_ms:30000})');
+ assert.equal(custom.patch_insert_patch_enabled, false, 'a hand-set SDR insertion is kept');
+ assert.equal(custom.patch_insert_time_frequency_ms, 30000, 'a hand-set SDR frequency is kept');
+ const hdr=evaluate('pgAutomationSnapshot({signal_format:"hdr10",name:"HDR",patch_insert_patch_enabled:false,patch_insert_time_frequency_ms:45000})');
+ assert.equal(hdr.patch_insert_patch_enabled, false, 'non-SDR jobs are not touched');
 }
 assert.deepEqual(saved['pgen.automation.queueDraft'].queue.items, items, 'the added plan survives draft reload');
 assert.deepEqual(items.map(x=>x.panel_light.fixed_value), [100,100,100,100,95,100]);
