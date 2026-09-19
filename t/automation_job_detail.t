@@ -1,5 +1,6 @@
 use strict;
 use warnings;
+no warnings qw(once redefine);
 use FindBin qw($Bin);
 use File::Path qw(make_path);
 use File::Temp qw(tempdir);
@@ -46,6 +47,16 @@ my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],
  }
  ok(!exists $detail->{live}{snapshot}{token},'worker response is allowlisted');
  ok(!main::webui_automation_job_detail($id,1)->{live},'pending job never borrows active worker');
+ {
+  # The live view does not say which sweep is running; the worker's state
+  # names its type and point count, which is the series key the graphs use.
+  $run->{active_stage}='pre-readings-done';PGAutomation::write_json_atomic($path,$run);
+  local *main::webui_automation_fresh_worker=sub{return {type=>'colors',points=>30,status=>'running',readings=>[{Y=>5}]}};
+  my $sweep=main::webui_automation_job_detail($id,0);
+  is($sweep->{live}{key},'colors-30','a live sweep is keyed from the worker state');
+  is($sweep->{live}{phase},'pre','in its phase');
+  $run->{active_stage}='greyscale-done';PGAutomation::write_json_atomic($path,$run);
+ }
  $worker->{full_autocal_run_id}='another-run';
  ok(!main::webui_automation_job_detail($id,0)->{live},'another run worker rejected');
  $worker->{full_autocal_run_id}=$id;
@@ -148,6 +159,59 @@ my $worker={full_autocal_run_id=>$id,token=>'must-not-leak',readings=>[{Y=>90}],
  cmp_ok($rows_bytes,'<',$raw*0.8,"the trimmed rows are at least a fifth smaller than the saved lines ($rows_bytes of $raw)");
  cmp_ok($total,'<',250000,"a 781-row job is under 250 KB with every row kept ($total)");
  cmp_ok($total-$rows_bytes,'<',20000,'and everything but the rows is under 20 KB');
+}
+# 19 Sep 2026: a six-job manifest is 612 KB, so an eleven-job one passes the
+# shared cache's per-file ceiling and was decoded and deep-copied on every
+# job-detail poll. The poll now reads the live view for the run and the
+# job's own record for the job; the manifest only when the record is gone.
+{
+ my $id='job-record';my $rdir=PGAutomation::run_dir($id);
+ my @jobs=map {{name=>"Job $_",status=>$_==0?'running':'queued',signal_format=>'sdr',settings=>{brightness=>50},padding=>'p'x40000}} 0..10;
+ my $manifest={id=>$id,token=>'rec',status=>'running',active_item=>0,active_stage=>'tv-setup-verified',stage_started_at=>time(),items=>\@jobs,readiness=>{checks=>[{item_number=>0,ok=>0,message=>'Look at job 1'}]}};
+ PGAutomation::write_json_atomic("$rdir/run.json",$manifest);
+ for my $n (0..10) { PGAutomation::write_json_atomic(PGAutomation::item_dir($id,$n).'/item.json',{%{$jobs[$n]},name=>"Record $n"}); }
+ PGAutomation::write_json_atomic(PGAutomation::item_dir($id,3).'/apply-all.json',{outcome=>'sent-unconfirmed',confirmation_unavailable=>JSON::PP::true(),confirmed=>JSON::PP::false(),message=>'Confirmation unavailable',generation_profile=>{big=>'g'x40000}});
+ PGAutomation::write_json_atomic("$rdir/status.json",PGAutomation::compact_run($manifest));
+ local $PGAutomation::JSON_CACHE_MAX_BYTES=(-s "$rdir/run.json")-1;
+ my %reads;my $real_read=\&PGAutomation::read_json_file;
+ no warnings 'redefine';
+ local *PGAutomation::read_json_file=sub { my ($p)=@_;$reads{$p=~m{/([^/]+)$} ? $1 : $p}++;$real_read->(@_) };
+ my $detail=main::webui_automation_job_detail($id,3);
+ is($detail->{item}{name},'Record 3','the job comes from its own record');
+ is($detail->{run_status},'running','and the run state from the live view');
+ is_deeply($detail->{item}{'apply-all'},{outcome=>'sent-unconfirmed',confirmation_unavailable=>JSON::PP::true(),confirmed=>JSON::PP::false(),message=>'Confirmation unavailable'},'the apply-to-all outcome reaches the view without its capability profile');
+ is_deeply([map {$_->{message}} @{main::webui_automation_job_detail($id,0)->{readiness_issues}}],['Look at job 1'],'run-level readiness issues still reach the job from the live view');
+ %reads=();
+ main::webui_automation_job_detail($id,3);
+ is($reads{'run.json'}||0,0,'a second poll of a manifest over the cache ceiling does not decode it');
+ is($reads{'item.json'}||0,0,'nor the record');
+ is($reads{'status.json'}||0,0,'nor the live view');
+ unlink(PGAutomation::item_dir($id,3).'/item.json');
+ %reads=();
+ is(main::webui_automation_job_detail($id,3)->{item}{name},'Job 3','a job without a record falls back to the manifest');
+ ok($reads{'run.json'},'which is decoded for it');
+ ok(!main::webui_automation_job_detail($id,11),'a job the live view does not list is rejected');
+}
+# The check-row memo is bounded by bytes held as well as by entries.
+{
+ my $id='memo-budget';
+ my @files=map { my $d=PGAutomation::item_dir($id,$_);make_path($d);my $p="$d/settings-checks.ndjson";
+  PGAutomation::append_line_locked($p,join('',map { PGAutomation::encode_json({key=>"k$_",expected=>1,observed=>1,verified=>1})."\n" } 1..50));$p } 0..2;
+ local $main::WEBUI_JOB_CHECKS_MEMO_BUDGET=(-s $files[0])+(-s $files[1]);
+ my $decoded=0;my $real=\&main::webui_automation_job_checks_read;
+ no warnings 'redefine';
+ local *main::webui_automation_job_checks_read=sub { $decoded++;$real->(@_) };
+ main::webui_automation_job_checks_cached($_) for @files[0,1];
+ main::webui_automation_job_checks_cached($files[0]);
+ main::webui_automation_job_checks_cached($files[2]);
+ ok(!exists $main::WEBUI_JOB_CHECKS_MEMO{$files[1]},'over the byte budget the least recently used file leaves the memo');
+ ok(exists $main::WEBUI_JOB_CHECKS_MEMO{$files[0]} && exists $main::WEBUI_JOB_CHECKS_MEMO{$files[2]},'the others stay');
+ my $held=0;$held+=$main::WEBUI_JOB_CHECKS_MEMO{$_}{bytes} for keys %main::WEBUI_JOB_CHECKS_MEMO;
+ cmp_ok($held,'<=',$main::WEBUI_JOB_CHECKS_MEMO_BUDGET,'and the memo stays within its budget');
+ $decoded=0;main::webui_automation_job_checks_cached($files[0]);
+ is($decoded,0,'a file still in the memo is not decoded again');
+ main::webui_automation_job_checks_cached($files[1]);
+ is($decoded,1,'an evicted one is');
 }
 ok(!main::webui_automation_job_detail($id,99),'invalid job rejected');
 ok(!main::webui_automation_job_detail('../no',0),'invalid run rejected');

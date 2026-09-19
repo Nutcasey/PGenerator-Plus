@@ -13842,6 +13842,10 @@ sub webui_automation_fresh_worker (@) {
 # at once, so the memo holds eight paths, each under the shared cache's
 # per-file ceiling; a larger file is decoded straight through.
 our %WEBUI_JOB_CHECKS_MEMO;
+# Bounded by bytes of check files held as well as by count, per worker; the
+# least recently used entries go first.
+our $WEBUI_JOB_CHECKS_MEMO_ENTRIES=8;
+our $WEBUI_JOB_CHECKS_MEMO_BUDGET=4194304;
 sub webui_automation_job_checks_cached (@) {
  my ($path)=@_;
  my @st=Time::HiRes::stat($path);
@@ -13855,15 +13859,19 @@ sub webui_automation_job_checks_cached (@) {
  my $key=join(':',$st[1],$st[7],$st[9]);
  my $entry=$WEBUI_JOB_CHECKS_MEMO{$path};
  if(ref($entry) eq "HASH" && $entry->{key} eq $key) {
-  $entry->{used}=time();
+  $entry->{used}=Time::HiRes::time();
   return $entry->{rows};
  }
  my $rows=&webui_automation_job_checks_read($path);
- if(keys(%WEBUI_JOB_CHECKS_MEMO) >= 8) {
-  my ($oldest)=sort { $WEBUI_JOB_CHECKS_MEMO{$a}{used} <=> $WEBUI_JOB_CHECKS_MEMO{$b}{used} } keys %WEBUI_JOB_CHECKS_MEMO;
-  delete $WEBUI_JOB_CHECKS_MEMO{$oldest} if(defined($oldest));
+ delete $WEBUI_JOB_CHECKS_MEMO{$path};
+ my $held=0;
+ $held+=$WEBUI_JOB_CHECKS_MEMO{$_}{bytes} for keys %WEBUI_JOB_CHECKS_MEMO;
+ foreach my $oldest (sort { $WEBUI_JOB_CHECKS_MEMO{$a}{used} <=> $WEBUI_JOB_CHECKS_MEMO{$b}{used} } keys %WEBUI_JOB_CHECKS_MEMO) {
+  last if(keys(%WEBUI_JOB_CHECKS_MEMO) < $WEBUI_JOB_CHECKS_MEMO_ENTRIES && $held+$st[7] <= $WEBUI_JOB_CHECKS_MEMO_BUDGET);
+  $held-=$WEBUI_JOB_CHECKS_MEMO{$oldest}{bytes};
+  delete $WEBUI_JOB_CHECKS_MEMO{$oldest};
  }
- $WEBUI_JOB_CHECKS_MEMO{$path}={key=>$key,rows=>$rows,used=>time()};
+ $WEBUI_JOB_CHECKS_MEMO{$path}={key=>$key,rows=>$rows,used=>Time::HiRes::time(),bytes=>$st[7]};
  return $rows;
 }
 # Every row is kept: the job view lists all setting checks and counts them.
@@ -13925,16 +13933,30 @@ sub webui_automation_job_view_item (@) {
 
 sub webui_automation_job_detail (@) {
  my ($id,$index)=@_;
- # Polled every few seconds by every open tab; the manifest is decoded once
- # per change, not once per poll.
- my $run=&webui_automation_read_run_cached($id);
- return undef if(ref($run) ne "HASH" || $index !~ /^\d+$/ || $index >= scalar(@{$run->{items}||[]}));
- # The cached manifest is this worker's own deep copy, so the view is built
- # by selecting from the record: a JSON round trip of the whole 92 KB item
- # before dropping 86 KB of it cost 37 ms per poll on a desktop.
- my $record=ref($run->{items}[$index]) eq "HASH" ? $run->{items}[$index] : {};
- my $item=&webui_automation_job_view_item($record);
+ return undef if(!defined($index) || $index !~ /^\d+$/);
+ # Polled every few seconds by every open tab. The run-level fields come
+ # from the live view (a few KB, republished on every manifest write and
+ # heartbeat, the manifest when there is none) and the job from its own
+ # record, items/N/item.json, which the runner and the queue editor keep in
+ # step with the manifest. The manifest itself is read only when the record
+ # is missing: a six-job manifest is 612 KB, so an eleven-job one passes the
+ # shared cache's per-file ceiling and would be decoded on every poll.
+ my $run=&webui_automation_read_live($id);
+ return undef if(ref($run) ne "HASH" || $index >= scalar(@{$run->{items}||[]}));
  my $dir=PGAutomation::item_dir($run->{id},$index);
+ my $record=PGAutomation::read_json_cached("$dir/item.json");
+ if(ref($record) ne "HASH") {
+  my $manifest=&webui_automation_read_run_cached($id);
+  $record=ref($manifest) eq "HASH" && ref($manifest->{items}[$index]) eq "HASH" ? $manifest->{items}[$index] : {};
+ }
+ # Both reads are this worker's own copies, so the view is built by selecting
+ # from the record: a JSON round trip of the whole 92 KB item before dropping
+ # 86 KB of it cost 37 ms per poll on a desktop.
+ my $item=&webui_automation_job_view_item($record);
+ # The note the view shows for an apply-to-all-inputs write that could not be
+ # confirmed reads the outcome; the rest of the record is a capability profile.
+ my $apply=PGAutomation::read_json_cached("$dir/apply-all.json");
+ $item->{"apply-all"}={map { exists($apply->{$_}) ? ($_=>$apply->{$_}) : () } qw(outcome confirmed confirmation_unavailable message)} if(ref($apply) eq "HASH");
  # 18 Sep 2026: with the manifest cached, this call still cost 2.2-2.5 s on
  # the G3 per poll: 106 KB of settings checks decoded line by line and up to
  # 313 KB of series and calibration snapshots decoded from disk every time.
@@ -13971,7 +13993,12 @@ sub webui_automation_job_detail (@) {
   if(ref($state) eq "HASH" && ($source->[0] eq "series" || ($state->{full_autocal_run_id}||"") eq $run->{id}) && ref($after) eq "HASH" && ($after->{status}||"") eq "running"
     && defined($after->{active_item}) && $after->{active_item} == $index && ($after->{active_stage}||"") eq $stage
     && ($after->{stage_started_at}||0) == $run->{stage_started_at}) {
-   $live={key=>$source->[0] eq "series" ? ($run->{active_series}{key}||"series") : $source->[0],phase=>$stage eq "pre-readings-done" ? "pre" : $stage eq "post-readings-done" ? "post" : "calibration",snapshot=>&webui_automation_graph_snapshot($state)};
+   # The live view does not carry the active series; the worker's state
+   # names its own type and point count, which is the series key.
+   my $series_key=$run->{active_series}{key};
+   $series_key=($state->{type}||"")."-".($state->{points}||"") if(!$series_key);
+   $series_key="series" if($series_key !~ /^(?:greyscale-21|colors-30|saturations-24)$/);
+   $live={key=>$source->[0] eq "series" ? $series_key : $source->[0],phase=>$stage eq "pre-readings-done" ? "pre" : $stage eq "post-readings-done" ? "post" : "calibration",snapshot=>&webui_automation_graph_snapshot($state)};
   }
  }
  &webui_automation_scrub_credentials($item);
