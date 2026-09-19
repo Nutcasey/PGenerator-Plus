@@ -1854,14 +1854,50 @@ sub webui_handle_request (@) {
     my $len=length($result);
     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
    }
+   elsif($path eq "/api/update/repo") {
+    # OTA / release-notification source repo (operator-selectable).
+    # POST is a root-trust change, so it requires the same-origin write
+    # confirmation (see webui_write_confirmed) before touching the conf.
+    if($method eq "POST") {
+     my $werr=&webui_write_confirmed($req);
+     if($werr) {
+      my $r='{"status":"error","message":"'.$werr.'"}';
+      print $client "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: ".length($r)."\r\n$cors\r\n$r";
+     }
+     else {
+      my $result=&webui_update_repo_set($body);
+      my $len=length($result);
+      print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
+     }
+    }
+    else {
+     my $result=&webui_update_repo_get();
+     my $len=length($result);
+     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$result";
+    }
+   }
    elsif($path eq "/api/update/apply" && $method eq "POST") {
-    my $r='{"status":"ok","message":"Update started. PGenerator+ will restart shortly."}';
-    my $len=length($r);
-    print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$r";
-    close($client);
-    undef $client;
-    my $cmd_b64=encode_base64("BASH_CMD","")." ".encode_base64("PGPLUS_APPLY","");
-    system("(sleep 2 && PG_CMD=\"$cmd_b64\" sudo -E /usr/bin/PGenerator_cmd.pl) &");
+    # Drive-by install protection, three layers (PR-20 finding #1):
+    # same-origin write confirmation here, a trust-key precheck here,
+    # and the same trust check re-run by pgenerator-update as root.
+    my $werr=&webui_write_confirmed($req);
+    if($werr) {
+     my $r='{"status":"error","message":"'.$werr.'"}';
+     print $client "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: ".length($r)."\r\n$cors\r\n$r";
+    }
+    elsif(&webui_ota_apply_blocked()) {
+     my $r='{"status":"error","message":"Update source is not trusted. Save it from the Software Update card and confirm the trust prompt."}';
+     print $client "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: ".length($r)."\r\n$cors\r\n$r";
+    }
+    else {
+     my $r='{"status":"ok","message":"Update started. PGenerator+ will restart shortly."}';
+     my $len=length($r);
+     print $client "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: $len\r\n$cors\r\n$r";
+     close($client);
+     undef $client;
+     my $cmd_b64=encode_base64("BASH_CMD","")." ".encode_base64("PGPLUS_APPLY","");
+     system("(sleep 2 && PG_CMD=\"$cmd_b64\" sudo -E /usr/bin/PGenerator_cmd.pl) &");
+    }
    }
    elsif($path eq "/api/boot/memory") {
     # Pi 4 (BiasiLinux): the firmware GPU split (gpu_mem) is the graphics
@@ -9831,6 +9867,117 @@ sub webui_config_json (@) {
  return $json;
 }
 
+# ── Same-origin write confirmation ──
+# Shared guard for endpoints whose POST is a security-boundary change
+# (OTA source repo, update apply). Two independent checks:
+#  1. The browser-supplied Origin header, when present, must match the
+#     request Host. Cross-origin form posts always carry Origin (POST is
+#     never CORS-simple for a different origin without preflight passing,
+#     and our OPTIONS handler never allows it) — a mismatch is a drive-by.
+#  2. A custom X-PGenerator-Write header. Even if a future firewall/proxy
+#     mangles Origin, a cross-origin fetch cannot add this header without
+#     a preflight our CORS (Content-Type only) refuses.
+# Returns "" when the write is confirmed, otherwise a JSON-safe message.
+sub webui_write_confirmed ($) {
+ my ($req)=@_;
+ my $origin="";
+ $origin=$1 if($req=~/^Origin:\s*(\S*)\s*$/mi);
+ my $host="";
+ $host=$1 if($req=~/^Host:\s*([A-Za-z0-9._\-\[\]:]+)\s*$/mi);
+ if($origin ne "") {
+  my $expected="";
+  $expected=$1 if($origin=~/^https?:\/\/([^\/]+)$/i);
+  if($expected eq "" || lc($expected) ne lc($host)) {
+   return "Cross-origin write refused";
+  }
+ }
+ return "Write confirmation header missing" unless($req=~/^X-PGenerator-Write:/mi);
+ return "";
+}
+
+# ── OTA / release-notification source repo ──
+# Operators can point the updater at a different GitHub repo (fork or
+# channel). The value persists as ota_repo=owner/name in
+# PGenerator.conf; /usr/sbin/pgenerator-update reads it at check/apply
+# time. An empty value clears the key and restores the factory default.
+# A custom repo is a full root-trust decision (apply extracts an unsigned
+# tarball at / as root), so a custom save also sets ota_repo_trusted=1 --
+# the gate pgenerator-update apply checks before downloading anything.
+# Single source of truth for the factory default: keep in sync with
+# DEFAULT_GITHUB_REPO in usr/sbin/pgenerator-update.
+my $ota_repo_default="oldgithubman/PGenerator-Plus";
+# Repos apply accepts without the per-device ota_repo_trusted key: the
+# factory default plus upstream BigShoots (original project home).
+# Keep in sync with TRUSTED_REPO_ALLOWLIST in usr/sbin/pgenerator-update.
+my @ota_repo_trusted_allowlist=($ota_repo_default,"BigShoots/PGenerator-Plus");
+sub webui_ota_repo_is_allowlisted ($) {
+ my ($repo)=@_;
+ return scalar(grep { $_ eq $repo } @ota_repo_trusted_allowlist) ? 1 : 0;
+}
+# Byte-for-byte parity with normalize_repo() in /usr/sbin/pgenerator-update
+# (same trims, same strip order, case-insensitive, quotes NOT stripped --
+# a quoted value is rejected on both sides). If you change either copy,
+# change the other and re-run the parity block in t/ota_update_repo.t.
+sub webui_ota_repo_normalize ($) {
+ my ($raw)=@_;
+ $raw="" unless defined $raw;
+ $raw=~s/^\s+|\s+$//g;
+ $raw=~s{^https?://github\.com/}{}i;
+ $raw=~s{^git\@github\.com:}{}i;
+ $raw=~s{/releases(/latest)?/?$}{}i;
+ $raw=~s{/+$}{};
+ $raw=~s/\.git$//i;
+ return "" if($raw eq "");
+ return undef unless($raw=~/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/);
+ # Dot-only segments ('..', '.') match the charset but URL-join; refuse.
+ my ($o,$r)=split m{/}, $raw, 2;
+ return undef if($o=~/^[.]+$/ || $r=~/^[.]+$/);
+ return $raw;
+}
+
+sub webui_ota_apply_blocked (@) {
+ # True when /api/update/apply must be refused: a repo outside the
+ # factory trust allowlist that lacks the operator's ota_repo_trusted=1
+ # confirm. Empty/invalid repo means the factory default (always
+ # applyable). pgenerator-update repeats this check as root at apply time.
+ &webui_reload_pgenerator_conf();
+ my $er=&webui_ota_repo_normalize($pgenerator_conf{"ota_repo"}||"");
+ return 0 if(!defined $er || $er eq "");
+ return 0 if(&webui_ota_repo_is_allowlisted($er));
+ return ($pgenerator_conf{"ota_repo_trusted"}||"") ne "1";
+}
+
+sub webui_update_repo_get (@) {
+ &webui_reload_pgenerator_conf();
+ my $repo=&webui_ota_repo_normalize($pgenerator_conf{"ota_repo"} || "");
+ my $custom=(defined $repo && $repo ne "");
+ $repo=$ota_repo_default if(!$custom);
+ my $trusted=(&webui_ota_repo_is_allowlisted($repo) || ($pgenerator_conf{"ota_repo_trusted"}||"") eq "1") ? "true" : "false";
+ $repo=&_webui_json_escape($repo);
+ my $allow=join(",", map { &_webui_json_escape($_) } \@ota_repo_trusted_allowlist);
+ return "{\"status\":\"ok\",\"repo\":\"$repo\",\"default_repo\":\"$ota_repo_default\",\"custom\":".($custom?"true":"false").",\"trusted\":$trusted,\"allowlist\":\"$allow\"}";
+}
+
+sub webui_update_repo_set (@) {
+ my ($body)=@_;
+ # Same no-backslash body pattern as the rest of this file.
+ my ($raw)=$body=~/"repo"\s*:\s*"([^"\\]*)"/;
+ return '{"status":"error","message":"repo field required"}' unless defined $raw;
+ my $repo=&webui_ota_repo_normalize($raw);
+ if(!defined $repo){
+  return '{"status":"error","message":"Invalid repo: use owner/name or a github.com repo URL"}';
+ }
+ my $res=&sudo("SET_PGENERATOR_CONF","ota_repo",$repo);
+ return '{"status":"error","message":"Failed to write PGenerator.conf"}' unless(defined $res && $res=~/^OK/);
+ # Trust key tracks the repo: a custom source needs the operator's
+ # explicit confirm (see the applyUpdate trust gate in webui-app.js and
+ # custom_repo_trusted() in pgenerator-update); default clears it.
+ $res=&sudo("SET_PGENERATOR_CONF","ota_repo_trusted",(&webui_ota_repo_is_allowlisted($repo))?"":"1");
+ return '{"status":"error","message":"Failed to write PGenerator.conf"}' unless(defined $res && $res=~/^OK/);
+ &webui_reload_pgenerator_conf();
+ return &webui_update_repo_get();
+}
+
 sub webui_apply_config (@) {
  my $body=shift;
  my $need_restart=0;
@@ -9984,6 +10131,13 @@ sub webui_apply_config (@) {
 
   foreach my $k (sort keys %changes) {
    next if($k eq "ip_pattern" || $k eq "port_pattern"); # read-only
+   # ota_repo / ota_repo_trusted are owned by the write-confirmed
+   # /api/update/repo endpoint: letting the generic config writer set
+   # them would let a CORS-simple cross-origin form post plant both the
+   # attacker repo AND the trust key, defeating the apply root-trust
+   # gate (deferred drive-by install). Any new security-gated conf key
+   # must be denied here too.
+   next if($k eq "ota_repo" || $k eq "ota_repo_trusted"); # gated keys
    my $cur=defined($pgenerator_conf{$k}) ? "$pgenerator_conf{$k}" : "";
    my $value_changed=("$changes{$k}" ne $cur);
    &sudo("SET_PGENERATOR_CONF",$k,$changes{$k});

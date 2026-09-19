@@ -1832,8 +1832,15 @@ __PG_LOGO_DARK__
     <div class="info-item"><div class="label">Published</div><div class="value" id="updatePublished">-</div></div>
    </div>
    <div id="updateChangelog" style="margin-top:8px;font-size:.75rem;color:var(--text2);max-height:80px;overflow-y:auto"></div>
+   <div class="field" style="margin-top:10px;max-width:520px">
+    <label for="otaRepo">Update Source Repo</label>
+    <input type="text" id="otaRepo" placeholder="owner/repo or https://github.com/owner/repo" autocomplete="off" spellcheck="false"
+     title="GitHub repo used for OTA updates and new release notifications. Leave as default to track official releases. Clear to restore the default.">
+    <div style="margin-top:4px;font-size:.68rem;color:var(--text2)" id="otaRepoNote">Checking update source…</div>
+   </div>
    <div class="btn-row" style="margin-top:10px">
     <button class="btn btn-sm btn-secondary" onclick="checkUpdate()">Check for Updates</button>
+    <button class="btn btn-sm btn-success" id="saveOtaRepoBtn" onclick="saveOtaRepo()">Save Repo</button>
     <button class="btn btn-sm btn-success" id="applyUpdateBtn" style="display:none" onclick="applyUpdate()">Install Update</button>
     <button class="btn btn-sm btn-secondary" id="submitLogsBtn" onclick="submitLogs()" title="Download a diagnostic log bundle">&#128230; Submit Logs</button>
     <button class="btn btn-sm btn-secondary" id="exportSystemSettingsBtn" onclick="exportSystemSettings()" title="Download PGenerator+ settings, profiles, calibration history and custom diagnostic media">Export System Settings</button>
@@ -1852,7 +1859,7 @@ __PG_LOGO_DARK__
  <div class="site-footer-inner">
   <div class="site-footer-note">PGenerator+ is free software released under the GNU GPL. Provided as-is, without warranty. Support helps ongoing development.</div>
   <div class="btn-row" style="margin-left:auto;justify-content:flex-end">
-   <a class="btn btn-sm btn-secondary" href="https://github.com/BigShoots/PGenerator-Plus" target="_blank" rel="noopener noreferrer">GitHub</a>
+   <a class="btn btn-sm btn-secondary" href="https://github.com/oldgithubman/PGenerator-Plus" target="_blank" rel="noopener noreferrer">GitHub</a>
    <a class="btn btn-sm btn-coffee" href="https://buymeacoffee.com/bigshoots" target="_blank" rel="noopener noreferrer">&#9749; Buy Me a Coffee</a>
   </div>
  </div>
