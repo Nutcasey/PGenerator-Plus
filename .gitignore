@@ -51,3 +51,8 @@ data/
 local-deployer/
 
 .DS_Store
+
+# Release/image tooling from BigShoots (local only)
+tools/
+release-draft/
+tools-testing/

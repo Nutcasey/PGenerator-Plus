@@ -349,6 +349,35 @@ pointer-events:none;color:var(--text);font-size:.82rem;line-height:1;white-space
 padding:4px 24px 4px 8px;border-radius:6px;font-size:.74rem;outline:none;transition:border .2s,box-shadow .2s;min-height:28px}
 .inline-select:focus{outline:none}
 .inline-select:focus-visible{border-color:var(--accent);box-shadow:0 0 0 1px rgba(91,127,255,.35)}
+/* Touch targets: the noise-floor control row (input, preset buttons, ×,
+   hint) is compact by design and every target is well under 44px, which
+   F-04 flags on the bench touch screens. Under a coarse pointer, grow the
+   interactive members of this row to 44px hit height/width. min-* is used
+   rather than a padding override because the compact padding lives in each
+   element's inline style; min-height wins the box regardless. Scoped to the
+   labeled row so no other compact control changes.
+   NOTE: the inactive hint is never dimmed via a parent opacity — opacity
+   inherits multiplicatively (a child cannot exceed its parent's 0.45), so
+   meterUpdateNoiseFloorControlAvailability dims the input/presets directly
+   and keeps #meterNoiseFloorControl itself at full opacity. */
+@media(pointer:coarse){
+ #meterNoiseFloorControl .noise-floor-preset,
+ #meterNoiseFloorControl #meterRgbBalanceNoiseFloorClear,
+ #meterNoiseFloorControl #meterRgbBalanceNoiseFloorHint{
+  min-height:44px;min-width:44px
+ }
+ /* Belt and braces: the input's declared width (10ch, ~66px) already
+    exceeds 44px at the current font size; min-width holds the floor if the
+    declared width ever shrinks again (it measured 39px back at 6ch). */
+ #meterNoiseFloorControl #meterRgbBalanceNoiseFloor{min-height:44px;min-width:44px}
+}
+/* Preset button look lives here, not inline: the highlight reset in
+   meterUpdateNoiseFloorControlAvailability sets style.color='' /
+   borderColor='' on inactive buttons (and on all of them at first load),
+   which deletes the inline longhands — with no author rule to fall back to,
+   the UA's button{color:ButtonText} wins and the row renders near-white on
+   the dark theme. An author class rule restores the tokens on reset. */
+.noise-floor-preset{appearance:none;background:var(--surface-inset,rgba(255,255,255,.06));border:1px solid var(--border);border-radius:4px;color:var(--text2);font-size:.62rem;line-height:1;padding:3px 5px;cursor:pointer}
 #meterSettingsGrid{display:flex;flex-wrap:wrap;gap:10px 12px;align-items:flex-start}
 #meterSettingsGrid .field{flex:0 0 auto;min-width:0}
 #meterSettingsGrid > .field > label:first-child{min-height:18px;display:flex;align-items:center}

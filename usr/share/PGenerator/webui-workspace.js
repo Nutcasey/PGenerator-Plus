@@ -3508,9 +3508,19 @@ function syncMeterLgRgbBusyIndicator(){
 function meterGreyTvColumnHtml(channelKey,label,color,tvValue,liveEntry,halfRange,disabled,readOnly){
 	 const delta=(liveEntry&&liveEntry.v!=null)?Number(liveEntry.v):null;
  const magnitude=(delta!=null&&halfRange>0)?Math.min(50,Math.abs(delta)/halfRange*50):0;
+	 // liveEntry.noise: deviation is inside the meter noise floor (Perceptual)
+	 // — dim the fill so it reads as "not a real error", same convention as the
+	 // canvas live-RGB bars. The dim alone is cryptic, so also carry a hover
+	 // title naming the floor: without it the faded bar looks like a render bug.
+	 const isNoise=!!(liveEntry&&liveEntry.noise);
+	 const noiseOpacity=isNoise?'opacity:.45;':'';
+	 // Hover explanation for a dimmed fill; plain text, no quotes introduced.
+	 const noiseTitleAttr=isNoise
+	 	? ' title="Deviation is within the meter noise floor (±'+meterRgbBalanceNoiseFloor()+' L* pre-gain) — noise, not a real error."'
+	 	: '';
 	 const fillStyle=(delta==null)
-		  ? 'display:none;'
-		  : 'top:'+(delta>=0?(50-magnitude):50)+'%;height:'+magnitude+'%;background:'+color+';color:'+color+';border-radius:'+(delta>=0?'4px 4px 0 0':'0 0 4px 4px')+';';
+	 	  ? 'display:none;'
+	 	  : 'top:'+(delta>=0?(50-magnitude):50)+'%;height:'+magnitude+'%;background:'+color+';color:'+color+';border-radius:'+(delta>=0?'4px 4px 0 0':'0 0 4px 4px')+';'+noiseOpacity;
 	 const inputValue=meterGreyTvFormatInputValue(tvValue);
 	 if(readOnly){
 		 return `
@@ -3518,7 +3528,7 @@ function meterGreyTvColumnHtml(channelKey,label,color,tvValue,liveEntry,halfRang
 		   <div class="meter-lg-rgb-label" style="color:${color}">${label}</div>
 		   <div class="meter-lg-rgb-bar">
 		    <div class="meter-lg-rgb-zero"></div>
-		    <div class="meter-lg-rgb-fill" style="${fillStyle}"></div>
+		    <div class="meter-lg-rgb-fill"${noiseTitleAttr} style="${fillStyle}"></div>
 		   </div>
 		   <div class="meter-lg-rgb-live">${meterGreyTvFormatLiveValue(liveEntry)}</div>
 			  </div>`;
@@ -3529,7 +3539,7 @@ function meterGreyTvColumnHtml(channelKey,label,color,tvValue,liveEntry,halfRang
 	   <button class="btn btn-sm btn-secondary meter-lg-rgb-button" title="${label} up ${meterGreyTvChannelStep(channelKey)}" onclick="meterGreyAdjustCurrentStepChannel('${channelKey}',1)" ${disabled?'disabled':''}>&#9650;</button>
 	   <div class="meter-lg-rgb-bar">
 	    <div class="meter-lg-rgb-zero"></div>
-	    <div class="meter-lg-rgb-fill" style="${fillStyle}"></div>
+	    <div class="meter-lg-rgb-fill"${noiseTitleAttr} style="${fillStyle}"></div>
 	   </div>
 	   <button class="btn btn-sm btn-secondary meter-lg-rgb-button" title="${label} down ${meterGreyTvChannelStep(channelKey)}" onclick="meterGreyAdjustCurrentStepChannel('${channelKey}',-1)" ${disabled?'disabled':''}>&#9660;</button>
 	   <div class="meter-lg-rgb-tv"><input class="meter-lg-rgb-tv-input" data-channel="${channelKey}" type="text" inputmode="decimal" value="${inputValue}" title="Set ${label} value" aria-label="Set ${label} LG RGB value" onkeydown="meterGreyTvInputKeydown(event,'${channelKey}',this)" ${disabled?'disabled':''}><button class="btn btn-sm btn-secondary meter-lg-rgb-apply" title="Apply ${label} value" aria-label="Apply ${label} LG RGB value" onclick="meterGreyTvApplyInput('${channelKey}',this)" ${disabled?'disabled':''}>&#10003;</button></div>
@@ -15191,8 +15201,11 @@ function drawRGBChart(gs,allSteps,readingMap){
  const blackLevel=meterChartBlackLevel(gs);
  gs.forEach(rd=>{balMap[rd.ire]=rgbBalance(rd,effectiveWhiteRGB,greyMode,blackLevel);});
  // Keep the exact plotted values on the canvas. Hover registration consumes
- // this same map instead of independently recalculating RGB balance.
- ctx.canvas._meterRgbBalancePlot={formula:meterRgbBalanceFormula(),balanceByIre:balMap};
+ // this same map instead of independently recalculating RGB balance. The key
+ // is the full input tuple (formula, grey-ref mode, black level, gamut,
+ // readings generation, white ref, entry count), not the formula alone —
+ // see meterRgbBalancePlotKey.
+ ctx.canvas._meterRgbBalancePlot={key:meterRgbBalancePlotIdentity(gs,greyMode,blackLevel,effectiveWhiteRGB),balanceByIre:balMap};
  // Auto-scale Y axis based on actual data, but keep the chart centered on 100
  // with the conventional +/-5% minimum span in every RGB balance mode.
  const allVals=Object.values(balMap).filter(b=>b&&!b.noChroma).flatMap(b=>[b.R,b.G,b.B]);
@@ -15218,7 +15231,73 @@ function drawRGBChart(gs,allSteps,readingMap){
  // Reference line at 100%
  const refY=(100-yMin)/(yMax-yMin);
  drawDashedLine(ctx,chart,[[0,refY],[1,refY]],'#555');
+ // Noise-floor zone: under Perceptual the 'within meter noise' threshold at
+ // each IRE is floor x that point's shadow gain, so the zone widens toward
+ // black. Shading it shows where the hover tooltip will say 'within meter
+ // noise' before the operator has to hover. Pure annotation — plotted values
+ // and the axis scale are untouched; clipping keeps it inside the plot under
+ // a box-zoom.
+ const noiseFloor=meterRgbBalanceActiveNoiseFloor();
+ if(noiseFloor>0){
+  // chart.toX/toY take NORMALIZED [0,1] view coordinates (same convention as
+  // refY and the rPts/gPts/bPts points above), not data values — convert.
+  const toNorm=v=>(v-yMin)/(yMax-yMin);
+  const zone=[];
+  xSteps.forEach((step,idx)=>{
+   const bal=balMap[step.ire];
+   // Same point set as the trace: a noChroma (zero-light) step has no
+   // balance, so its noise threshold would annotate nothing.
+   if(!bal||bal.noChroma) return;
+   // Gain must come from the READING (the analysis_ire/patch stamps live on
+   // readings), same object rgbBalance and the hover tooltip divide by — a
+   // step definition can carry a different slot IRE and skew the envelope,
+   // so a point with no reading is skipped, not graded against the step.
+   const rdZone=readingMap&&readingMap[step.ire];
+   if(!rdZone) return;
+   const gain=meterPerceptualRgbBalanceGain(rdZone);
+   const dev=noiseFloor*gain;
+   zone.push({x:meterGreyCategoryChartX(xSteps,idx),hi:toNorm(100+dev),lo:toNorm(100-dev)});
+  });
+  if(zone.length>1){
+   ctx.save();
+   ctx.beginPath();ctx.rect(chart.pad.l,chart.pad.t,chart.w,chart.h);ctx.clip();
+   ctx.beginPath();
+   zone.forEach((p,i)=>{const X=chart.toX(p.x),Y=chart.toY(p.hi);if(i)ctx.lineTo(X,Y);else ctx.moveTo(X,Y);});
+   for(let i=zone.length-1;i>=0;i--)ctx.lineTo(chart.toX(zone[i].x),chart.toY(zone[i].lo));
+   ctx.closePath();
+   ctx.fillStyle='rgba(160,190,255,0.14)';
+   ctx.fill();
+   // Hairline edges so the band edge stays readable over the grid lines.
+   ctx.strokeStyle='rgba(160,190,255,0.35)';
+   ctx.lineWidth=1;
+   [ 'hi','lo' ].forEach(edge=>{
+    ctx.beginPath();
+    zone.forEach((p,i)=>{const X=chart.toX(p.x),Y=chart.toY(p[edge]);if(i)ctx.lineTo(X,Y);else ctx.moveTo(X,Y);});
+    ctx.stroke();
+   });
+   // Name the band where it is widest (the leftmost plotted step sits toward
+   // black): without this the shading reads as an unexplained watermark until
+   // the operator hovers a point. Pill style matches the EOTF '0% =' label.
+   const zp=zone[0];
+   const zText='±'+noiseFloor+' L* noise';
+   ctx.font='bold 9px sans-serif';
+   const zW=ctx.measureText(zText).width;
+   // Clamp keeps the whole pill inside the plot rect on both axes.
+   const zx=Math.min(chart.pad.l+chart.w-zW-6,chart.toX(zp.x)+6);
+   const zy=Math.max(chart.pad.t+10,Math.min(chart.pad.t+chart.h-6,chart.toY(zp.hi)-6));
+   ctx.fillStyle='rgba(160,190,255,0.9)';
+   ctx.fillRect(zx-3,zy-9,zW+6,12);
+   ctx.fillStyle='#1a1a22';
+   ctx.textAlign='left';ctx.textBaseline='alphabetic';
+   ctx.fillText(zText,zx,zy+1);
+   ctx.restore();
+  }
+ }
  const rPts=[],gPts=[],bPts=[];
+ // Off-scale tracking: a clamped point must never read as "error == axis
+ // limit". The marker shows DIRECTION of the overflow; hover keeps the exact
+ // value (balMap carries it un-clamped).
+ const offScale=[];
  xSteps.forEach((step,idx)=>{
   const x=meterGreyCategoryChartX(xSteps,idx);
   const bal=balMap[step.ire];
@@ -15226,12 +15305,52 @@ function drawRGBChart(gs,allSteps,readingMap){
   // Skipping the point keeps the trace honest; the luminance/EOTF and Delta E
   // charts still carry the node and show the size of the error.
   if(bal&&!bal.noChroma){
-   rPts.push([x,Math.max(0,Math.min(1,(bal.R-yMin)/(yMax-yMin)))]);
-   gPts.push([x,Math.max(0,Math.min(1,(bal.G-yMin)/(yMax-yMin)))]);
-   bPts.push([x,Math.max(0,Math.min(1,(bal.B-yMin)/(yMax-yMin)))]);
+   const norm=[bal.R,bal.G,bal.B].map(v=>(v-yMin)/(yMax-yMin));
+   rPts.push([x,Math.max(0,Math.min(1,norm[0]))]);
+   gPts.push([x,Math.max(0,Math.min(1,norm[1]))]);
+   bPts.push([x,Math.max(0,Math.min(1,norm[2]))]);
+   // Off-scale is relative to the VISIBLE window: under a box-zoom the view
+   // covers a sub-range [view.y0,view.y1] of the axis, so values inside 0..1
+   // but outside the view are clamped by the clip and must be flagged too.
+   const vLo=chart.view.y0, vHi=chart.view.y1;
+   const flags=norm.map(n=>meterRgbBalanceOffScaleDir(n,vLo,vHi));
+   if(flags.some(f=>f!==0)) offScale.push({x:x,flags:flags,norm:norm,vLo:vLo,vHi:vHi});
   }
  });
  if(rPts.length>1){drawLine(ctx,chart,rPts,'#f44',2);drawLine(ctx,chart,gPts,'#4caf50',2);drawLine(ctx,chart,bPts,'#42a5f5',2);}
+ if(offScale.length>0&&rPts.length>1){
+  // Triangle at the clamped edge pointing outward from the view, one per
+  // overflowing channel. True value stays available on hover. Gated on the
+  // same rPts.length>1 as the trace: a lone marker with no line behind it
+  // reads as a rendering artifact.
+  const colors=['#f44','#4caf50','#42a5f5'];
+  ctx.save();
+  // Clip to the plot rect like the band does — the apex sits s+1 px beyond
+  // the edge value, which without clipping bleeds into the x-labels/header.
+  ctx.beginPath();ctx.rect(chart.pad.l,chart.pad.t,chart.w,chart.h);ctx.clip();
+  ctx.globalAlpha=0.9;
+  offScale.forEach(pt=>{
+   // A horizontal box-zoom can push the whole column out of view; the axis
+   // grid skips those x positions, so must the markers.
+   if(pt.x<chart.view.x0||pt.x>chart.view.x1) return;
+   pt.flags.forEach((f,ch)=>{
+    if(f===0) return;
+    // Pin the marker to the visible edge for that channel: clamp the value to
+    // the view window before toY (rPts coordinates are full-range clamped,
+    // which lands OUTSIDE the plot under a box-zoom).
+    const n=pt.norm[ch];
+    const edge=(n<pt.vLo)?pt.vLo:((n>pt.vHi)?pt.vHi:n);
+    const px=chart.toX(pt.x), py=chart.toY(edge);
+    const s=4;
+    ctx.fillStyle=colors[ch];
+    ctx.beginPath();
+    if(f>0){ctx.moveTo(px,py-s-1);ctx.lineTo(px-s,py+2);ctx.lineTo(px+s,py+2);}
+    else   {ctx.moveTo(px,py+s+1);ctx.lineTo(px-s,py-2);ctx.lineTo(px+s,py-2);}
+    ctx.closePath();ctx.fill();
+   });
+  });
+  ctx.restore();
+ }
  // R/G/B label at right
  if(rPts.length>0){
   const last=rPts.length-1;
@@ -18453,10 +18572,10 @@ function chartRegisterInteraction(){
    if(visibleX<0||visibleX>1) return;
    const cx=pad.l+xInset+visibleX*dw;
    const plotted=(cid==='chartRGB'&&canvas._meterRgbBalancePlot
-    &&canvas._meterRgbBalancePlot.formula===meterRgbBalanceFormula())
+    &&canvas._meterRgbBalancePlot.key===meterRgbBalancePlotIdentity(gs,greyMode,rgbBlackLevel,effectiveWhiteRGB))
     ? canvas._meterRgbBalancePlot.balanceByIre[rd.ire]
     : null;
-   const bal=plotted||(effectiveWhiteRGB?rgbBalance(rd,effectiveWhiteRGB,greyMode,rgbBlackLevel):{R:100,G:100,B:100});
+   const bal=plotted||(effectiveWhiteRGB?rgbBalance(rd,effectiveWhiteRGB,greyMode,rgbBlackLevel):{R:100,G:100,B:100,noChroma:true});
    _chartHitZones.push({canvasId:cid, cx:cx, cy:cH/2, radius:isBarChart?18:8, ire:step.ire, reading:rd,
     rgbBalance:bal, deSelected:deSelected[rd.ire], de2000:de2000[rd.ire], deChroma:sepLum?deChroma[rd.ire]:null, deLabel:deLabel});
   });
@@ -18509,10 +18628,27 @@ function chartHandleHover(e,canvasId){
  if(targetY!=='--') html+=' &nbsp; <span>Target Y: '+targetY+' cd/m\u00B2</span>';
  if(rd.cct) html+='<br>CCT: '+rd.cct+'K';
  html+='<br>x: '+(rd.x!=null?rd.x.toFixed(4):'--')+' &nbsp;y: '+(rd.y!=null?rd.y.toFixed(4):'--');
- html+='<br>R: '+bal.R.toFixed(3)+' &nbsp;G: '+bal.G.toFixed(3)+' &nbsp;B: '+bal.B.toFixed(3);
+ if(bal.noChroma) html+='<br>R/G/B: — (no chroma at this level)';
+ else html+='<br>R: '+bal.R.toFixed(3)+' &nbsp;G: '+bal.G.toFixed(3)+' &nbsp;B: '+bal.B.toFixed(3);
  if(meterRgbBalanceFormula()==='perceptual'){
   const perceptualGain=meterPerceptualRgbBalanceGain(rd);
   if(perceptualGain>1.0005) html+='<br>Perceptual gain: '+perceptualGain.toFixed(2)+'x';
+  // Noise annotation applies at EVERY gain, including 1x at 100% IRE: an
+  // operator who selected a floor wants small deviations contextualized on
+  // all points, not just the shadow-magnified ones. Show the pre-gain L*
+  // deviation next to the flag so the operator can judge HOW deep into the
+  // noise the point sits instead of trusting the floor blindly.
+  // noChroma (zero-light) points are excluded: their 100/100/100 sentinel
+  // computes deviation 0 and would read "within meter noise" for a patch
+  // that emitted no measurable light — the chart omits the point for the
+  // same reason (PR-16 review finding).
+  if(meterRgbBalanceNoiseFloor()>0&&!bal.noChroma){
+   const pg=(Number.isFinite(perceptualGain)&&perceptualGain>0)?perceptualGain:1;
+   const parts=[['R',bal.R],['G',bal.G],['B',bal.B]]
+    .map(e=>{const d=Math.abs(e[1]-100)/pg;return (Number.isFinite(e[1])&&d<=meterRgbBalanceNoiseFloor())?e[0]+' '+d.toFixed(2):null;})
+    .filter(Boolean);
+   if(parts.length) html+='<br><span style="opacity:.75">'+parts.join(' · ')+' L* pre-gain — within meter noise</span>';
+  }
  }
  if(gammaAtClip) html+='<br>Gamma: at panel clip (excluded)';
  else if(gamma!=null) html+='<br>Gamma: '+gamma.toFixed(2);
@@ -21336,6 +21472,7 @@ async function loadMeterSettings(attempt){
  setVal('meterGreyRefMode', greyMode);
  setVal('meterGrayWorld',   s.gray_world);
  setVal('meterRgbBalanceFormula', s.rgb_formula);
+ try{ meterUpdateNoiseFloorControlAvailability(); }catch(e2){}
  setVal('meterDeltaEForm',  meterNormalizeSavedGreyDeltaEForm(s.de_form));
  setVal('meterColorDeltaEForm', s.color_de_form||'de2000');
  setChk('meterColorIncludeLumError', s.color_incl_lum);

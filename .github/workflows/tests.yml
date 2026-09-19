@@ -44,6 +44,8 @@ jobs:
           node --version
           node -c usr/share/PGenerator/webui-lg.js
           node -c usr/share/PGenerator/webui-automation.js
+          node -c usr/share/PGenerator/webui-app.js
+          node -c usr/share/PGenerator/webui-workspace.js
       - name: Run the test suite
         run: prove -v t/
 

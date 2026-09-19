@@ -52,6 +52,47 @@ fetch("/api/health")
   })
   .catch(() => {});
 
+// Ref picker: populate the datalist with live branches for the typed
+// repository. Fetches lazily on first focus and on repository change; the
+// server caches for 60s so tab clicks don't hammer the GitHub API. A failed
+// fetch is silent — the field stays plain free-text as before.
+let refsLoadedFor = null;
+let refsLoading = false;
+function loadRefs(force = false) {
+  const repository = els.repository.value.trim();
+  if (!repository || refsLoading) return;
+  if (!force && refsLoadedFor === repository) return;
+  refsLoading = true;
+  fetch("/api/refs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repository, githubToken: els.githubToken.value }),
+  })
+    .then((response) => response.json())
+    .then((data) => {
+      if (!data.ok || !Array.isArray(data.branches)) return;
+      refsLoadedFor = repository;
+      const list = document.querySelector("#refList");
+      list.innerHTML = "";
+      for (const branch of data.branches) {
+        const option = document.createElement("option");
+        option.value = branch.name;
+        option.label = branch.default ? `${branch.name} (default)` : branch.name;
+        list.appendChild(option);
+      }
+    })
+    .catch(() => {})
+    .finally(() => { refsLoading = false; });
+}
+els.repository.addEventListener("change", () => loadRefs(true));
+els.ref.addEventListener("focus", () => loadRefs());
+els.ref.addEventListener("click", () => loadRefs());
+// Eager first load: by the time the operator tabs into the ref field the
+// branch list is already there. The field must start EMPTY — a datalist
+// filters options by the current value, so a prefilled "main" makes every
+// other branch invisible to the picker.
+loadRefs(true);
+
 function credentials() {
   return {
     host: els.host.value.trim(),

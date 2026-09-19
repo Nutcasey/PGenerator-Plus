@@ -7,7 +7,11 @@
 #   pgenerator-update apply          — download and apply latest release
 #   pgenerator-update version        — print current version
 #
-# Update stream: https://github.com/BigShoots/PGenerator-Plus/releases
+# Update stream: https://github.com/oldgithubman/PGenerator-Plus/releases
+# (factory default; override via ota_repo in /etc/PGenerator/PGenerator.conf
+#  or the GITHUB_REPO environment variable). A non-default ota_repo only
+# passes `apply` when ota_repo_trusted=1 is also set — see the trust gate
+# in the apply branch.
 #
 # Release assets are tar.gz archives containing files in FHS layout:
 #   usr/share/PGenerator/*.pm
@@ -21,8 +25,13 @@
 
 set -euo pipefail
 
-GITHUB_REPO="${GITHUB_REPO:-BigShoots/PGenerator-Plus}"
-GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+DEFAULT_GITHUB_REPO="oldgithubman/PGenerator-Plus"
+# Repos trusted out of the box for `apply` even without ota_repo_trusted=1:
+# the factory default plus upstream BigShoots (the original project home).
+# Keep in sync with $ota_repo_trusted_allowlist in webui.pm. Any other
+# repo still needs the explicit operator trust key.
+TRUSTED_REPO_ALLOWLIST="$DEFAULT_GITHUB_REPO BigShoots/PGenerator-Plus"
+PGENERATOR_CONF_FILE="${PGENERATOR_CONF_FILE:-/etc/PGenerator/PGenerator.conf}"
 VERSION_FILE="${VERSION_FILE:-/usr/share/PGenerator/version.pm}"
 UPDATE_MIGRATIONS_DIR="${UPDATE_MIGRATIONS_DIR:-/usr/share/PGenerator/update-migrations.d}"
 EXEC_MANIFEST_FILE="${EXEC_MANIFEST_FILE:-/usr/share/PGenerator/release-exec-manifest.txt}"
@@ -31,6 +40,80 @@ UPDATE_LOG="${UPDATE_LOG:-/var/log/PGenerator/update.log}"
 CURL_OPTS="-s -L --connect-timeout 10 --max-time 60"
 GITHUB_ACCEPT="Accept: application/vnd.github.v3+json"
 GITHUB_UA="User-Agent: PGenerator-Plus-Updater"
+
+# ── Resolve the update repo ──
+# The operator can point this device at a different GitHub repo for OTA
+# updates and release notifications via the WebUI (System Settings →
+# Software Update), which persists ota_repo=owner/name in
+# /etc/PGenerator/PGenerator.conf. Precedence: explicit GITHUB_REPO env >
+# conf key > factory default. A full URL is accepted and normalized to
+# owner/repo. Values that are not a safe owner/repo pair fall back to the
+# default so a typo cannot brick the update path or inject a URL.
+read_conf_val() {
+ [ -f "$PGENERATOR_CONF_FILE" ] || return 0
+ # || true: with pipefail set, a missing key makes grep exit 1 and would
+ # abort the whole script from inside the $(...) in GITHUB_REPO_RAW.
+ grep "^$1=" "$PGENERATOR_CONF_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# A custom update source is a full root-trust decision (apply extracts an
+# unsigned tarball at / as root), so apply accepts only repos in the
+# factory TRUSTED_REPO_ALLOWLIST, or any repo whose operator confirmed the
+# trust prompt (the WebUI then sets ota_repo_trusted=1 alongside
+# ota_repo). A request that rewrites only ota_repo (e.g. a cross-site
+# drive-by) can never install code. Manual conf edits must set both keys.
+repo_in_allowlist() {
+ local allowed
+ for allowed in $TRUSTED_REPO_ALLOWLIST; do
+  [ "$1" = "$allowed" ] && return 0
+ done
+ return 1
+}
+
+custom_repo_trusted() {
+ repo_in_allowlist "$1" || [ "$(read_conf_val ota_repo_trusted)" = "1" ]
+}
+
+normalize_repo() {
+ # Byte-for-byte parity with webui_ota_repo_normalize() in webui.pm: trim
+ # whitespace; prefix strips (/releases suffix, trailing slashes, .git) in
+ # the same order; case-insensitive; quoted values are NOT stripped (they
+ # fail validation on both sides). The two normalizers disagreeing would
+ # let the UI show "Official updates" while the updater pulls from a fork
+ # (PR-20 review finding #2). Detection runs against a lowercased copy so
+ # every strip is case-insensitive without relying on nocasematch, which
+ # does not apply to ${var#pattern} expansions.
+ local raw="${1:-}"
+ raw="${raw#"${raw%%[![:space:]]*}"}"
+ raw="${raw%"${raw##*[![:space:]]}"}"
+ local lc
+ lc=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+ # Strip order mirrors webui.pm exactly: github prefix, /releases[(/latest)]
+ # with optional trailing slash, trailing slashes, then .git.
+ if [[ "$lc" == https://github.com/* ]]; then raw="${raw:19}"; lc="${lc:19}"
+ elif [[ "$lc" == http://github.com/* ]]; then raw="${raw:18}"; lc="${lc:18}"
+ elif [[ "$lc" == git@github.com:* ]]; then raw="${raw:15}"; lc="${lc:15}"
+ fi
+ # /releases(/latest)?/?$ — longest alternative first, like the Perl regex
+ if [[ "$lc" == */releases/latest ]]; then raw="${raw:0:${#lc}-16}"
+ elif [[ "$lc" == */releases/ ]]; then raw="${raw:0:${#lc}-10}"
+ elif [[ "$lc" == */releases ]]; then raw="${raw:0:${#lc}-9}"
+ fi
+ lc=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+ while [[ "$lc" == */ ]]; do raw="${raw:0:${#raw}-1}"; lc="${lc:0:${#lc}-1}"; done
+ [[ "$lc" == *.git ]] && raw="${raw:0:${#raw}-4}"
+ printf '%s' "$raw"
+}
+
+GITHUB_REPO_RAW="${GITHUB_REPO:-$(read_conf_val ota_repo)}"
+GITHUB_REPO="$(normalize_repo "$GITHUB_REPO_RAW")"
+if [[ ! "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] \
+   || [[ "${GITHUB_REPO%/*}" =~ ^[.]+$ ]] || [[ "${GITHUB_REPO#*/}" =~ ^[.]+$ ]]; then
+ # Second clause: dot-only segments ('..', '.') pass the charset check
+ # but URL-join against api.github.com; refuse them outright.
+ GITHUB_REPO="$DEFAULT_GITHUB_REPO"
+fi
+GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
 
 # ── Read current version from version.pm ──
 get_current_version() {
@@ -392,18 +475,34 @@ case "$cmd" in
    changelog="A newer image release ($latest) is available, but it is outside the OTA family of your current version ($current). OTA updates only apply within the same major.minor series (e.g. 2.7.x -> 2.7.x). To move to $latest, download the full image and re-flash your SD card."
   fi
 
-  printf '{"status":"ok","current":%s,"latest":%s,"update_available":%s,"published":%s,"changelog":%s,"asset_url":%s}\n' \
+  trusted=false
+  custom_repo_trusted "$GITHUB_REPO" && trusted=true
+  printf '{"status":"ok","current":%s,"latest":%s,"update_available":%s,"published":%s,"changelog":%s,"asset_url":%s,"repo":%s,"trusted":%s}\n' \
    "$(json_escape "$current")" \
    "$(json_escape "$latest")" \
    "$update_available" \
    "$(json_escape "$published")" \
    "$(json_escape "$changelog")" \
-   "$(json_escape "$asset_url")"
+   "$(json_escape "$asset_url")" \
+   "$(json_escape "$GITHUB_REPO")" \
+   "$trusted"
   ;;
 
  apply)
   current=$(get_current_version)
   log_msg "Update check started (current: $current)"
+
+  # Custom-repo root-trust gate (PR-20 review finding #1): apply extracts
+  # an unsigned tarball at / as root, so only repos in the factory allow-
+  # list (default + upstream BigShoots) or a repo carrying the operator's
+  # ota_repo_trusted=1 key may install. A cross-site request can at most
+  # rewrite ota_repo; without the trust key the download never starts.
+  if ! custom_repo_trusted "$GITHUB_REPO"; then
+   log_msg "ERROR: refusing to apply from untrusted repo $GITHUB_REPO"
+   echo "ERROR: Update source $GITHUB_REPO is not trusted. Set it from the WebUI Software Update card and confirm the trust prompt." >&2
+   printf '{"status":"error","message":"Update source %s is not trusted. Save it from the WebUI and confirm the trust prompt.","repo":"%s"}\n' "$GITHUB_REPO" "$GITHUB_REPO"
+   exit 1
+  fi
 
   release_json=$(get_latest_release)
   if [ -z "$release_json" ]; then
