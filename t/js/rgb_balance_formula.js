@@ -1129,6 +1129,10 @@ test('empirical_floor_from_repeat_scatter', () => {
   // measurement-affecting keys yes, picture plumbing no.
   assert(S.meterLgTrimKeyAffectsPatch('whiteBalanceRed') === true, 'WB offset invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('Colour Temp') === true, 'colour temp invalidates');
+  // Real LG control keys are camelCase (webui-lg.js LG_DISPLAY_CONTROL_ITEMS);
+  // a space-only matcher silently missed colorTemperature on first review.
+  assert(S.meterLgTrimKeyAffectsPatch('colorTemperature') === true, 'camelCase color temp invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('colour_temperature') === true, 'snake colour temp invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('brightness') === true, 'brightness invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('contrast') === true, 'contrast invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('hdmiRange') === false, 'hdmiRange keeps history');

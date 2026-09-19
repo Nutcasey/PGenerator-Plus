@@ -14096,8 +14096,10 @@ function meterStepNoiseSigma(key){
 // plumbing keys would erase history those writes did not affect. Pure
 // predicate so the harness pins both halves.
 function meterLgTrimKeyAffectsPatch(key){
- const k=String(key||'').toLowerCase();
- return /whitebalance|brightness|contrast|colour temp|color temp/.test(k)&&!k.includes('hdmirange');
+ // Normalize camelCase (whiteBalanceRed, colorTemperature) by squashing
+ // spaces: the real control key is 'colorTemperature', not 'color temp'.
+ const k=String(key||'').toLowerCase().replace(/[\s_-]+/g,'');
+ return /whitebalance|brightness|contrast|colourtemp|colortemp/.test(k)&&!k.includes('hdmirange');
 }
 // Drop a step's scatter samples: the trim just changed what the patch
 // measures, so the old scatter describes a setting that no longer exists
