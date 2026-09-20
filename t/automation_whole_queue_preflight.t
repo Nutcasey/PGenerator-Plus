@@ -156,6 +156,19 @@ is($modes{sdr},'filmMaker','blocked preflight keeps its last selected picture mo
 ok(!$r->{restored} && $r->{restore_skipped} eq 'failure','blocked result records skipped restoration');
 ok(!exists(PGAutomation::read_json_file($run_file)->{preflight_revision}),'blocked queue has no executable plan');
 is(scalar(grep {$_->[1]=~/reset|lut|autocal|meter\/read/} @calls),0,'late incompatibility never reaches a destructive command');
+# A queue with nothing left to check is not a failed check: it must restore
+# like a check-only pass, never journal the failure policy on a healthy run.
+fixture();
+PGAutomation::with_lock($run_file,sub {$_[0]{items}[$_]{status}='complete' for 0..3;$_[0]{viewing_restore_required}=JSON::PP::true;
+ $_[0]{hazard_restore}={screenSaver=>{value=>'on',category=>'system'}};$_[0]{hazard_restore_pending}=JSON::PP::true;return $_[0];});
+$r=run_check();
+ok($r->{ready},'a queue with every job complete is ready');
+ok($r->{restored} && !$r->{restore_skipped},'nothing pending restores rather than skipping as a failure');
+$saved=PGAutomation::read_json_file($run_file);
+ok(!$saved->{stop_restore_policy},'no failure cleanup policy is journalled on a healthy run');
+isnt($saved->{viewing_restore_outcome}//'','skipped-on-failure','the original viewing context is not written off as a failure skip');
+isnt($saved->{hazard_restore_outcome}//'','skipped-on-failure','hazard restoration is not written off as a failure skip');
+ok($saved->{hazard_restore_pending},'the hazard restoration obligation survives an empty check');
 fixture();$virtual=1;
 $r=run_check();
 ok(!$r->{ready},'unreadable/echoed original mode blocks reversible probing');

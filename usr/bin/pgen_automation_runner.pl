@@ -3004,7 +3004,11 @@ sub _panel_light_stage {
         if (!_sleep_controlled(2)) { $reason = 'cancelled'; last; }
     }
     _refresh_control();
-    $reason = 'cancelled' if $STOP_REQUESTED;
+    if ($STOP_REQUESTED && $reason ne 'cancelled') {
+        # Stop supersedes the search outcome but must not erase it.
+        $detail = 'Stop requested'.($reason ? "; search outcome was $reason".($detail ? ": $detail" : '') : '');
+        $reason = 'cancelled';
+    }
     $converged = 0 if $reason eq 'cancelled';
     my $best_restore = 'not-needed';
     if (!$converged && $best && $reason ne 'cancelled' && $current != $best->{value}) {
@@ -5138,7 +5142,9 @@ sub _preflight_queue {
         $restored=_defer_preflight_restore();
         $result->{restore_deferred}=1 if $restored;
         push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-restore',message=>$::LAST_ERROR||'Unable to hand restoration over to the batch'} if !$restored;
-    } elsif (!$passed && !$STOP_REQUESTED) {
+    } elsif (@pending && !$passed && !$STOP_REQUESTED) {
+        # Only a job that actually failed its check owes the failure policy;
+        # a queue with nothing pending restores like a check-only pass.
         _keep_current_mode_on_stop('failure');
         $restored = 1; # The restoration obligation was explicitly skipped.
         $result->{restore_skipped} = 'failure';

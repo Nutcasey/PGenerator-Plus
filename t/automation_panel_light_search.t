@@ -21,6 +21,7 @@ sub search {
  local *main::_read_white=sub {
   $reads++;
   die "Unexpected measurement at setting $value" if ref($measurements) eq 'HASH' && !exists $measurements->{$value};
+  kill 'TERM',$$ if $options{stop_after_read};
   return {Y=>ref($measurements) eq 'HASH' ? $measurements->{$value} : $measurements->($value)};
  };
  local *main::_read_and_verify_settings=sub {{verified=>1}};
@@ -95,4 +96,9 @@ ok(!$r->{ok},'Stop during adjustment interrupts the search');
 is($r->{artifact}{outcome},'cancelled','cancellation is distinct from an unreachable target');
 is_deeply($r->{writes},[6,5],'Stop does not write the previous best back after cancellation');
 is($r->{reads},1,'Stop prevents another measurement');
+$r=search(6,{6=>0},stop_after_read=>1);
+ok(!$r->{ok},'Stop arriving with a meter failure still fails the stage');
+is($r->{artifact}{outcome},'cancelled','Stop supersedes the search outcome');
+like($r->{error},qr/Stop requested; search outcome was measurement-failed: No valid white luminance/,'the superseded outcome survives in the failure text');
+like($r->{artifact}{failure},qr/measurement-failed/,'artifact outcome and failure text agree');
 done_testing();
