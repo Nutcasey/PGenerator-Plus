@@ -11975,7 +11975,14 @@ async function meterRunSeries(options){
   if(meterSelectionWillMeasureWhite) meterWhiteReading=null;
  }else{
   meterClearSelectionBaseline();
-  meterReplaceReadings([]);
+  // keepNoiseHistory=true: a full re-run is the SAME meter+target+panel
+  // measurement context — and 'run the series twice' IS the documented
+  // scatter-accumulation affordance. The default wipe here deleted pass 1
+  // the instant pass 2 started, so the store could never exceed 1 sample
+  // per step no matter how many runs were done (bench: pinned at 'pass 1
+  // done — re-run'). Stale-context wipes stay where they belong: Clear,
+  // reload, disconnect, series switch — none of which is a re-run.
+  meterReplaceReadings([],true);
   meterWhiteReading=savedWhiteSnapshot;
   meterSeriesBaselineBlack=savedBlackSnapshot;
  }

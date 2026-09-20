@@ -860,6 +860,25 @@ test('series_poll_feeds_and_keeps_noise_scatter', () => {
     + keepCalls.length + '/' + replaceCalls.length + ' with keepNoiseHistory=true)');
 });
 
+test('run_start_keeps_noise_scatter', () => {
+  // Bench follow-up: with the poll path fixed, 'run the series twice' STILL
+  // pinned at 'pass 1 done — re-run'. meterRunSeries' full-run branch wiped
+  // readings (and with them the scatter store) at run start — deleting pass 1
+  // the instant pass 2 began, so the store could never exceed 1 sample/step.
+  // A re-run is the same measurement context; the affordance lives or dies
+  // here. Pin every meterReplaceReadings inside meterRunSeries keeps history.
+  const ws = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'usr', 'share', 'PGenerator', 'webui-workspace.js'), 'utf8');
+  const runStart = ws.indexOf('async function meterRunSeries');
+  if (runStart < 0) throw new Error('meterRunSeries not found');
+  const runBody = ws.slice(runStart, ws.indexOf('async function meterPollSeries', runStart));
+  const runFlat = runBody.replace(/\s+/g, ' ');
+  const calls = runFlat.match(/meterReplaceReadings\(/g) || [];
+  const keeps = runFlat.match(/meterReplaceReadings\([^;]*,\s*true\)/g) || [];
+  assert(calls.length > 0 && keeps.length === calls.length,
+    'every meterReplaceReadings inside meterRunSeries keeps noise history (found '
+    + keeps.length + '/' + calls.length + ' with keepNoiseHistory=true)');
+});
+
 test('noise_floor_mode_status_refreshed_on_prefs_restore', () => {
   // Reload into Empirical mode: the session scatter store starts EMPTY, so
   // the load path must refresh the coverage status or the row lies until the
