@@ -109,14 +109,21 @@ function pgAutomationConfirm(message,confirmLabel){
   let dialog=document.getElementById('pgAutomationConfirmDialog');
   if(!dialog){
    dialog=document.createElement('dialog');dialog.id='pgAutomationConfirmDialog';dialog.setAttribute('aria-labelledby','pgAutomationConfirmText');
-   dialog.innerHTML='<form method="dialog"><p id="pgAutomationConfirmText"></p><div class="auto-actions"><button class="btn btn-sm btn-secondary" type="submit" value="cancel">Cancel</button><button class="btn btn-sm btn-primary" type="submit" value="ok" id="pgAutomationConfirmOk">Continue</button></div></form>';
+   dialog.innerHTML='<form method="dialog"><p id="pgAutomationConfirmText"></p><p id="pgAutomationConfirmNotice" role="status"></p><div class="auto-actions"><button class="btn btn-sm btn-secondary" type="submit" value="cancel">Cancel</button><button class="btn btn-sm btn-primary" type="submit" value="ok" id="pgAutomationConfirmOk">Continue</button></div></form>';
    (document.getElementById('pgAutomationQueueDialog')?.parentNode||document.body).appendChild(dialog);
   }
   // One question at a time: a second request while one is open is declined
   // rather than replacing the question the user is reading.
-  if(typeof dialog.showModal!=='function'||dialog.open){resolve(false);return;}
+  if(typeof dialog.showModal!=='function'){resolve(false);return;}
+  if(dialog.open){
+   // The page behind a modal is inert; keep this feedback inside the question.
+   dialog.querySelector('#pgAutomationConfirmNotice').textContent='Another action is waiting for your answer. Answer this question, then retry the action you just requested.';
+   resolve(false);return;
+  }
+  dialog.querySelector('#pgAutomationConfirmNotice').textContent='';
   dialog.querySelector('#pgAutomationConfirmText').textContent=message;
   dialog.querySelector('#pgAutomationConfirmOk').textContent=confirmLabel||'Continue';
+  // Only the original request owns the close listener and receives this answer.
   const done=()=>{dialog.removeEventListener('close',done);resolve(dialog.returnValue==='ok');};
   dialog.returnValue='';dialog.addEventListener('close',done);
   dialog.showModal();dialog.querySelector('#pgAutomationConfirmOk').focus();
@@ -1653,8 +1660,11 @@ async function pgAutomationFetchJob(view,state){
  state.loading=true;state.lastFetch=Date.now();
  try{
   const data=await fetchJSON('/api/automation/runs/'+encodeURIComponent(state.runId)+'/jobs/'+state.index,{_quiet:true,_timeoutMs:15000});
+  // A response can arrive after the operator selects another job; never paint
+  // the previous job's measurements into the newly selected view.
   if(pgAutomation.jobViews[view]!==state)return;
   if(!data||data.status!=='ok')throw new Error(data?.message||'No job details returned');
+  // Status polling may already have advanced the stage while details loaded.
   if(view==='calibration'&&data.active_stage!==pgAutomation.current?.run?.active_stage)return;
   state.data=data;
   const target=pgAutomationJobTarget(view),item=data.item;

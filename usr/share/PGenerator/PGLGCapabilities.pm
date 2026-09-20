@@ -155,6 +155,8 @@ sub _clone {
  return $JSON->decode($JSON->encode($value));
 }
 
+# Overlay arrays replace inherited lists in full. Unioning them could retain
+# a write route or setting that a more specific TV profile intentionally removes.
 sub _merge {
  my ($base,$overlay)=@_;
  return _clone($overlay) if(ref($base) ne 'HASH' || ref($overlay) ne 'HASH');
@@ -574,6 +576,8 @@ sub _compute_lg_capabilities {
  my $effective=_clone($library->{'base'});
  my @applied=($library->{'base_profile_id'});
  my @evidence;
+ # Apply lower priorities first so higher-priority overrides win. Profile ID
+ # breaks ties deterministically, keeping the resulting profile hash stable.
  my @matched=sort {
   ($a->{'priority'}||0) <=> ($b->{'priority'}||0)
    || ($a->{'profile_id'}||'') cmp ($b->{'profile_id'}||'')
@@ -853,6 +857,8 @@ sub lg_record_setting_observation {
      || $key eq '' || $operation !~ /^(?:read|write|verify|roundtrip)$/ || ref($result) ne 'HASH');
  return {ok=>JSON::PP::false,error=>'device-identity-unavailable'}
   if(!(_normalized_identity($identity)->{'device_id'}||''));
+ # Evidence is scoped to a physical TV, input, signal and picture mode.
+ # An unconfirmed context must not teach later jobs the wrong capabilities.
  my $complete=_normalized_context($context);
  return {ok=>JSON::PP::false,error=>'context-unconfirmed'}
   if((exists($context->{context_confirmed}) && !$context->{context_confirmed})
@@ -861,6 +867,8 @@ sub lg_record_setting_observation {
  eval { make_path($root,{mode=>0755}) if(!-d $root); 1 }
   or return {ok=>JSON::PP::false,error=>'observation-store-unavailable',detail=>"$@"};
  my $path=_observation_path($identity,%options);
+ # Lock a separate inode: replacing the JSON atomically must not let another
+ # writer bypass this lock by opening the replacement file.
  my $lock_path=$path.'.lock';
  open(my $lock,'>>',$lock_path)
   or return {ok=>JSON::PP::false,error=>'observation-lock-unavailable',detail=>"$!"};
@@ -1018,6 +1026,9 @@ sub lg_best_settings_plan {
  return $plan;
 }
 
+# Acceptance belongs to this requested value and its write contract. A generic
+# OK response cannot override contradictory readback; acknowledged-only writes
+# are accepted below only where the contract explicitly permits that outcome.
 sub lg_setting_write_accepted {
  my ($response,$key,$expected)=@_;
  return 0 if(ref($response) ne 'HASH' || ($response->{status}||'') ne 'ok');

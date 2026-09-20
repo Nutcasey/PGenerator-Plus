@@ -19,6 +19,8 @@ my $sequence = 0;
 my %warned;
 my $json = JSON::PP->new->canonical(1)->utf8(1)->allow_nonref(1);
 
+# Wall time correlates events across processes; monotonic time measures elapsed
+# work without clock corrections producing negative or inflated durations.
 sub monotonic { Time::HiRes::clock_gettime(Time::HiRes::CLOCK_MONOTONIC()) }
 sub elapsed_ms { int((monotonic() - $_[0]) * 1000 + 0.5) }
 sub timestamp {
@@ -48,6 +50,8 @@ sub from_config {
     return context($CONTEXT) if ref($config) ne 'HASH';
     my $c = context($config->{calibration_trace});
     $c->{worker} = $config->{automation_worker_id} if PGAutomation::worker_id($config);
+    # A nested operation takes precedence over the worker's saved base context,
+    # so its events remain attached to the current caller.
     return context({%$c,%{context($CONTEXT)}});
 }
 sub child_context {
@@ -59,6 +63,8 @@ sub child_context {
 }
 sub header_value { MIME::Base64::encode_base64($json->encode(context($CONTEXT)), '') }
 sub header_line { 'X-PGenerator-Trace: '.header_value()."\r\n" }
+# Base64 is transport encoding, not trust: bound the header before decoding
+# and pass decoded fields through the same identifier whitelist as local calls.
 sub from_header {
     my ($value) = @_;
     return {} if !defined($value) || length($value)>2048 || $value !~ /\A[A-Za-z0-9+\/=]+\z/;
@@ -94,6 +100,7 @@ sub compact {
 
 sub _warn {
     my ($path,$reason) = @_;
+    # A busy or full sink must not flood stderr on every subsequent measurement.
     return if $warned{$path}++;
     eval {
         my $message='Diagnostics unavailable: '.$reason;
@@ -131,6 +138,7 @@ sub _event_impl {
     my $ok = eval {
         sysopen(my $fh,$path,O_WRONLY|O_CREAT|O_APPEND|O_NOFOLLOW,0600) or die "open: $!";
         if (!PGAutomation::lock_exclusive($fh,0.05)) { close($fh); die "writer busy"; }
+        # Another writer may have reached retention while we waited for the lock.
         if (-e "$path.full") { close($fh); return 1; }
         my $size = (stat($fh))[7];
         my $line = $json->encode($record)."\n";
@@ -171,6 +179,8 @@ sub api_call {
     my $status=ref($result) eq 'HASH' ? ($result->{status}||'unknown') : 'invalid-response';
     my $delivery=ref($result) eq 'HASH' ? $result->{delivery_state} : undef;
     my $message=ref($result) eq 'HASH' ? $result->{message}||'' : '';
+    # Losing the response to a write does not establish whether the TV applied it.
+    # Preserve that uncertainty for callers deciding whether recovery is needed.
     $delivery='outcome-unknown' if !defined($delivery) && $method ne 'GET'
         && ($error || ref($result) ne 'HASH' || $result->{_transport_error}
             || ($result->{error_code}||'') eq 'stopped' || $status =~ /cancelled|canceled|stopped/
@@ -191,6 +201,8 @@ sub measurement {
         (defined($attempt)?(attempt=>$attempt):())});
     event($source,'measurement-start',{ire=>$step->{ire}});
     my $started=monotonic();
+    # Meter callbacks return both a reading and an error; preserve list context
+    # and rethrow exceptions only after recording the measurement outcome.
     my @result=eval {$call->()}; my $error=$@;
     my $reading=$result[0];
     my %values;

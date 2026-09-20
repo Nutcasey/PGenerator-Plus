@@ -14,7 +14,8 @@ Build & release
 - Pi 5 staging: extract packages with tar --keep-directory-symlink and validate usrmerge symlinks (/lib,/bin,/sbin) right after staging.
 - Pi 5 GPU memory is the kernel CMA pool (vc4-kms-v3d cma-, 64–512 MB); gpu_mem is a no-op there.
 - Image builds must strip inherited WiFi credentials.
-- github-deployer/ is outside PR #14 calibration work. Do not modify or rebuild it.
+- Windows/macOS bundles carry copies of frontend/Perl files; rebuild via the corresponding github-deployer/build-*-package.sh after changing bundled files.
+- The deploy console runs separately on the Mac; it is not part of the Raspberry Pi calibration runtime.
 
 Conventions
 - Keep comment density in the 12–19% range (repo norm).
