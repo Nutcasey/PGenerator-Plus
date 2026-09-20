@@ -9,6 +9,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Pin Python for the deployer tests
+        # t/deployer_*.t drive github-deployer/server.py through python3. Pin the
+        # interpreter instead of taking ubuntu-latest's drifting default: on
+        # Python 3.14+ annotations are deferred by default (PEP 649/749), which
+        # would hide an eagerly-evaluated annotation bug that still breaks on the
+        # 3.12 the console actually runs under. Keep this at/below 3.13, and in
+        # step with the deploy console's real target.
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install Perl module dependencies
         # pgenerator-lg uses IO::Socket::SSL (WebSocket TLS to the TV); it is
         # not part of core Perl on the runner, so perl -c and the test that

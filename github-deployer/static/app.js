@@ -403,6 +403,9 @@ els.upload.addEventListener("click", async () => {
       paths: selected.map((file) => file.path),
     });
     toast(`${data.uploaded.length} file${data.uploaded.length === 1 ? "" : "s"} uploaded from ${data.commit.slice(0, 8)}.\nBackup: ${data.backup}`, "success", 9000);
+    if (Array.isArray(data.autoIncluded) && data.autoIncluded.length) {
+      toast(`Of those, ${data.autoIncluded.length} ${data.autoIncluded.length === 1 ? "was" : "were"} auto-included to keep the panel capability library consistent:\n${data.autoIncluded.join("\n")}`, "success", 12000);
+    }
   } catch (error) {
     toast(error.message, "error", 10000);
   } finally {
