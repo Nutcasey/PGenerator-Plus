@@ -14194,8 +14194,11 @@ function meterStepNoiseSigma(key){
 function meterLgTrimKeyAffectsPatch(key){
  // Normalize camelCase (whiteBalanceRed, colorTemperature) by squashing
  // spaces: the real control key is 'colorTemperature', not 'color temp'.
+ // hdmiRange/calibration-mode style plumbing keys simply do not match the
+ // pattern — no exclusion clause needed (a previous 'hdmirange' guard was
+ // dead code); the harness pins hdmiRange === false.
  const k=String(key||'').toLowerCase().replace(/[\s_-]+/g,'');
- return /whitebalance|brightness|contrast|colourtemp|colortemp/.test(k)&&!k.includes('hdmirange');
+ return /whitebalance|brightness|contrast|colourtemp|colortemp/.test(k);
 }
 // Drop a step's scatter samples: the trim just changed what the patch
 // measures, so the old scatter describes a setting that no longer exists

@@ -12313,8 +12313,13 @@ async function meterPollSeries(){
   if(white) meterWhiteReading=white;
   // Selection mid-greys: restore the pre-run white so we never invent a
   // synthetic peak from the brightest selected patch after the run.
+  // keepNoiseHistory=true: this white re-seat replaces the array EVERY poll
+  // cycle of a selection run — with the default wipe it deleted the scatter
+  // the record loop above had just stored, so 'run the series twice' on a
+  // selected subset could never accumulate a sample (same defect class as
+  // the main poll replace fixed in 5d3028e1, this is its sibling site).
   if(meterSeriesSelectionRunActive&&!meterSelectionWillMeasureWhite){
-   meterReplaceReadings(meterRestoreSelectionWhiteReference(meterReadings));
+   meterReplaceReadings(meterRestoreSelectionWhiteReference(meterReadings),true);
   }
   // If we don't yet have an actual 100% measurement, use the same mode-aware
   // synthetic reference as one-off reads. Never replace a still-valid selection
@@ -12404,7 +12409,10 @@ async function meterPollSeries(){
   // greyscale error math keeps the original series peak.
   if(meterSeriesSelectionRunActive&&!meterSelectionWillMeasureWhite){
    try{
-    meterReplaceReadings(meterAttachSeriesMeta(meterRestoreSelectionWhiteReference(meterReadings||[])));
+    // keepNoiseHistory=true: the run just finished; this re-seat is a
+    // presentation fixup of the SAME measurement context, not a series
+    // switch, so the scatter the run built must survive it.
+    meterReplaceReadings(meterAttachSeriesMeta(meterRestoreSelectionWhiteReference(meterReadings||[])),true);
     const isColorDone=meterActiveSeriesType==='colors'||meterActiveSeriesType==='saturations';
     const sortedDone=isColorDone?[...meterReadings]:[...meterReadings].sort((a,b)=>(a.ire||0)-(b.ire||0));
     drawAllCharts(sortedDone);

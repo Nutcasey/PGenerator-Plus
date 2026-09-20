@@ -847,6 +847,17 @@ test('series_poll_feeds_and_keeps_noise_scatter', () => {
     'poll replaceReadings must pass keepNoiseHistory=true');
   assert(/meterRecordReadingNoise\(rd *, *rd\)/.test(pollFlat),
     'poll records each incoming reading into the scatter store');
+  // Review #22 finding 1 — the sibling replace sites: inside the poll loop
+  // EVERY meterReplaceReadings is an in-run array swap (selection white
+  // re-seat each cycle, completion re-seat), so EVERY call in the function
+  // must pass keepNoiseHistory=true. A bare call anywhere in here is a wipe
+  // that deletes what the record loop just stored — selection greyscale runs
+  // then accumulate zero scatter while the row says 're-run the series'.
+  const replaceCalls = pollFlat.match(/meterReplaceReadings\(/g) || [];
+  const keepCalls = pollFlat.match(/meterReplaceReadings\([^;]*,\s*true\)/g) || [];
+  assert(replaceCalls.length > 0 && keepCalls.length === replaceCalls.length,
+    'every meterReplaceReadings inside meterPollSeries keeps noise history (found '
+    + keepCalls.length + '/' + replaceCalls.length + ' with keepNoiseHistory=true)');
 });
 
 test('noise_floor_mode_status_refreshed_on_prefs_restore', () => {
