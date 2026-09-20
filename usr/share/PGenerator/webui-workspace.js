@@ -12290,10 +12290,22 @@ async function meterPollSeries(){
 	    :(Array.isArray(meterReadings)?meterReadings:[]);
 	   meterReplaceReadings(meterAttachSeriesMeta(
 	    meterRestoreSelectionWhiteReference(meterMergeSeriesReadings(baseline,incoming))
-	   ));
+	   ),true);
 	  }else{
-	   meterReplaceReadings(incoming);
+	   meterReplaceReadings(incoming,true);
 	  }
+  // Empirical noise history: a series IS a repeat-reading source — the
+  // operator's 'run the series twice' affordance only exists if each
+  // delivered measurement feeds the scatter store. The consecutive-XYZ
+  // dedupe inside the recorder collapses the per-second poll re-delivery
+  // of unchanged readings into one sample per actual measurement, while a
+  // second run's fresh meter variance records as genuine scatter.
+  // (Bench-reported defect: two full 21-pt runs left the coverage count
+  // at zero — the recorder was wired only to single-read and continuous
+  // paths, and the poll's wholesale replace wiped any history it saw.)
+  try{
+   incoming.forEach(rd=>{ if(rd&&!rd.error&&meterReadingHasLuminance(rd)) meterRecordReadingNoise(rd,rd); });
+  }catch(e){}
   // Only set white reference from actual 100% reading — never use
   // "brightest so far" during a running series, because that changes
   // every poll cycle and causes all ΔE / RGB balance values to shift.

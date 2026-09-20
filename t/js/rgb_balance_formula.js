@@ -49,6 +49,8 @@ const FN_NAMES = [
   'meterNoiseHistoryStore',
   'meterStepNoiseKey',
   'meterRecordReadingNoise',
+  'meterReplaceReadings',
+  'meterRebuildReadingsIndex',
   'meterStepNoiseSigma',
   'meterEmpiricalNoiseFloorFor',
   'meterNoiseFloorSourceNote',
@@ -157,6 +159,19 @@ const BT709_XYZ2RGB = [
 const METER_NOISE_HISTORY_K = 2;
 const METER_NOISE_HISTORY_MAX = 12;
 let meterNoiseHistory = null;
+// meterReplaceReadings/meterRebuildReadingsIndex close over the readings
+// array + index vars; the sandbox must own them like the module does.
+let meterReadings = [];
+let meterReadingsGeneration = 0;
+let meterReadingsIndex = new Map();
+let meterReadingsIndexSource = null;
+let meterReadingsIndexLength = -1;
+function meterReadingIndexKeys(reading) {
+  const keys = [];
+  if (reading && reading.name) keys.push(String(reading.name));
+  if (reading && reading.ire != null) keys.push('ire:' + reading.ire);
+  return keys;
+}
 // Floor-input elements get a label stub so meterUpdateNoiseFloorControlAvailability
 // can toggle opacity/title on their closest('label').
 const document = { getElementById: (id) => {
@@ -768,6 +783,24 @@ test('noise_floor_inactive_hint_offers_one_tap_perceptual_switch', () => {
   globalThis.__noiseHint = null;
 });
 
+test('series_poll_feeds_and_keeps_noise_scatter', () => {
+  // Bench-reported defect: 'run the series twice' built no scatter — the
+  // poller's meterReplaceReadings wiped the store every cycle and nothing
+  // on the series path ever called the recorder. Pin both halves in the
+  // workspace source: the poll keeps history AND records each incoming
+  // reading; a revert of either half fails this test.
+  const ws = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'usr', 'share', 'PGenerator', 'webui-workspace.js'), 'utf8');
+  const pollStart = ws.indexOf('async function meterPollSeries');
+  if (pollStart < 0) throw new Error('meterPollSeries not found');
+  const poll = ws.slice(pollStart, ws.indexOf('async function', pollStart + 10));
+  const pollFlat = poll.replace(/\s+/g, ' ');
+  assert(pollFlat.includes('meterReplaceReadings(incoming, true)')
+    || pollFlat.includes('meterReplaceReadings(incoming,true)'),
+    'poll replaceReadings must pass keepNoiseHistory=true');
+  assert(/meterRecordReadingNoise\(rd *, *rd\)/.test(pollFlat),
+    'poll records each incoming reading into the scatter store');
+});
+
 test('noise_floor_mode_status_refreshed_on_prefs_restore', () => {
   // Reload into Empirical mode: the session scatter store starts EMPTY, so
   // the load path must refresh the coverage status or the row lies until the
@@ -1127,11 +1160,22 @@ test('empirical_floor_from_repeat_scatter', () => {
   const store = S.meterNoiseHistoryStore();
   store.set('45%', { vals: [[0, 0, 0], [0.1, -0.1, 0]] });
   assert(S.meterStepNoiseSigma('45%') > 0, 'store is shared module state');
+  // Default replace = series switch: history wiped.
+  S.meterReplaceReadings([{ name: '5%', Y: 1 }]);
+  assert(S.meterStepNoiseSigma('45%') === null, 'default replaceReadings wipes history');
+  // keepNoiseHistory=true = in-run poll replace: history SURVIVES, which is
+  // what makes 'run the series twice' accumulate (bench-reported defect:
+  // the poll wiped every cycle, so two runs left the count at zero).
+  // NB: the default wipe above replaced the Map itself — refetch before use.
+  const store2 = S.meterNoiseHistoryStore();
+  store2.set('45%', { vals: [[0, 0, 0], [0.1, -0.1, 0]] });
+  S.meterReplaceReadings([{ name: '5%', Y: 1 }], true);
+  assert(S.meterStepNoiseSigma('45%') > 0, 'poll replaceReadings keeps history');
 
   // Floor-source annotation: the same ±number must say whether it came
   // from measured scatter or the typed fallback (UX: same-number ambiguity).
   globalThis.__noiseMode = { value: 'empirical' };
-  store.set('note%', { vals: [[0, 0, 0], [0.1, -0.1, 0], [0, 0.1, -0.1], [-0.1, 0, 0.1]] });
+  S.meterNoiseHistoryStore().set('note%', { vals: [[0, 0, 0], [0.1, -0.1, 0], [0, 0.1, -0.1], [-0.1, 0, 0.1]] });
   assert(S.meterNoiseFloorSourceNote({ name: 'note%' }) === ' · measured scatter (4 readings)',
     'measured point names its sample count');
   assert(S.meterNoiseFloorSourceNote({ name: 'nope%' }) ===
@@ -1145,7 +1189,7 @@ test('empirical_floor_from_repeat_scatter', () => {
   // 'within noise' would swallow the entire plot (review #22 item 3).
   globalThis.__noiseMode = { value: 'empirical' };
   globalThis.__noiseFloor = { value: '0.3' };
-  store.set('cap%', { vals: [[0, 0, 0], [10, 0, 0]] });
+  S.meterNoiseHistoryStore().set('cap%', { vals: [[0, 0, 0], [10, 0, 0]] });
   assert(S.meterStepNoiseSigma('cap%') > 5, 'cap fixture: k·sigma would exceed 10');
   assertClose(S.meterEmpiricalNoiseFloorFor({ name: 'cap%' }), 10, 1e-12,
     'empirical floor capped at 10 L*');
@@ -1153,7 +1197,7 @@ test('empirical_floor_from_repeat_scatter', () => {
   // sigma == 0 (quantized meter: identical balances over DISTINCT XYZ near
   // black) is NOT a 0-wide floor — it falls back to the flat field
   // (review #22 item 2).
-  store.set('zero%', { vals: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] });
+  S.meterNoiseHistoryStore().set('zero%', { vals: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] });
   assert(S.meterStepNoiseSigma('zero%') === 0, 'zero-scatter fixture');
   assert(S.meterEmpiricalNoiseFloorFor({ name: 'zero%' }) === null,
     'sigma 0 must not produce a 0-wide floor');
@@ -1161,6 +1205,8 @@ test('empirical_floor_from_repeat_scatter', () => {
     'sigma 0 point falls back to the flat floor');
 
   // Trim invalidation: a WB write drops ONLY that step's scatter.
+  // (The replace tests above reset the store; seed both steps fresh.)
+  S.meterNoiseHistoryStore().set('5%', { vals: [[0, 0, 0], [0, 0.1, 0]] });
   S.meterInvalidateStepNoise({ name: '45%' });
   assert(S.meterStepNoiseSigma('45%') === null, 'trimmed step: history dropped');
   assert(S.meterStepNoiseSigma('5%') !== null, 'other steps keep their history');

@@ -14001,15 +14001,22 @@ function meterRebuildReadingsIndex(readings){
  return meterReadingsIndex;
 }
 
-function meterReplaceReadings(readings){
+function meterReplaceReadings(readings,keepNoiseHistory){
  meterReadings=Array.isArray(readings)?readings:[];
  meterReadingsGeneration++;
  meterRebuildReadingsIndex(meterReadings);
  // A wholesale readings-array swap is a series load/reset: the measured
  // noise belongs to the previous meter+target+series state and must not
  // annotate the new one (the array replace, unlike per-step upserts, is
- // where a new measurement context begins).
- meterNoiseHistory=null;
+ // where a new measurement context begins). keepNoiseHistory=true is for
+ // the in-run series poller, which replaces the array every cycle to show
+ // progress: wiping there would erase the scatter the same run just
+ // produced and 'run the series twice' could never accumulate a sample
+ // (bench-reported: two full series runs left the count at zero). Steps
+ // of other series types carry different keys, so kept entries can never
+ // annotate a foreign series; a real context change (Clear, reload,
+ // disconnect) replaces via the default path and still wipes.
+ if(!keepNoiseHistory) meterNoiseHistory=null;
  // Series reset also empties the scatter store: refresh the row count.
  try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
  return meterReadings;
