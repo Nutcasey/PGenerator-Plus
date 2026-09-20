@@ -15286,7 +15286,14 @@ function drawRGBChart(gs,allSteps,readingMap){
   // chart.toX/toY take NORMALIZED [0,1] view coordinates (same convention as
   // refY and the rPts/gPts/bPts points above), not data values — convert.
   const toNorm=v=>(v-yMin)/(yMax-yMin);
-  const zone=[];
+  // Segments, not one list: a point whose effective floor is 0 (empirical
+  // mode, no usable scatter, empty typed fallback) has NOTHING to annotate
+  // — connecting across it would shade a band over a point whose accessor
+  // verdict was 'off' (review #22 round 4 P2: band and per-point judgement
+  // disagreed on partially characterised series). Each contiguous run of
+  // floored points gets its own polygon; the gaps stay clear.
+  const zoneSegments=[];
+  let zoneSeg=[];
   xSteps.forEach((step,idx)=>{
    const bal=balMap[step.ire];
    // Same point set as the trace: a noChroma (zero-light) step has no
@@ -15300,10 +15307,11 @@ function drawRGBChart(gs,allSteps,readingMap){
    if(!rdZone) return;
    const gain=meterPerceptualRgbBalanceGain(rdZone);
    const dev=meterRgbBalanceEffectiveNoiseFloor(rdZone)*gain;
-   if(!(dev>0)) return;
-   zone.push({x:meterGreyCategoryChartX(xSteps,idx),hi:toNorm(100+dev),lo:toNorm(100-dev)});
+   if(!(dev>0)){ if(zoneSeg.length>1) zoneSegments.push(zoneSeg); zoneSeg=[]; return; }
+   zoneSeg.push({x:meterGreyCategoryChartX(xSteps,idx),hi:toNorm(100+dev),lo:toNorm(100-dev)});
   });
-  if(zone.length>1){
+  if(zoneSeg.length>1) zoneSegments.push(zoneSeg);
+  zoneSegments.forEach(zone=>{
    ctx.save();
    ctx.beginPath();ctx.rect(chart.pad.l,chart.pad.t,chart.w,chart.h);ctx.clip();
    ctx.beginPath();
@@ -15341,7 +15349,7 @@ function drawRGBChart(gs,allSteps,readingMap){
    ctx.textAlign='left';ctx.textBaseline='alphabetic';
    ctx.fillText(zText,zx,zy+1);
    ctx.restore();
-  }
+  });
  }
  const rPts=[],gPts=[],bPts=[];
  // Off-scale tracking: a clamped point must never read as "error == axis
@@ -20946,6 +20954,10 @@ function meterOnCcssProfileChange(ev){
   try{ meterOpenCustomCcssEditor(); }catch(e){}
   return;
  }
+ // The correction profile changes what every reading IS: scatter recorded
+ // under another CCSS describes corrected values of a different curve
+ // (review #22 round 4 P2 — switching to No Correction kept the floor).
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  sel.dataset.lastStableValue=v;
  meterSyncCcssProfileHoverTitle(sel);
  try{
@@ -21630,6 +21642,10 @@ if(meterCcssCreateDisplayTypeEl) meterCcssCreateDisplayTypeEl.addEventListener('
 const meterMeasurementPortEl=document.getElementById('meterMeasurementPort');
 if(meterMeasurementPortEl) meterMeasurementPortEl.addEventListener('change',()=>{
  meterMeasurementPort=meterStoredMeasurementPort();
+ // A different instrument has different repeatability: scatter recorded on
+ // the old meter must not be interpreted as noise of the new one (review
+ // #22 round 4 P2 — switching ports kept the previous floor).
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  // Persist the operator's explicit selection as the durable preference so
  // meterSelectedMeasurementPort's saved/autodetect fallback chain -- used by
  // the status poll, profile-field visibility, and every read path -- agrees

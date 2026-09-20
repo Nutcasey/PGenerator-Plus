@@ -47,6 +47,7 @@ const FN_NAMES = [
   'meterRgbBalanceNoiseFloorAnnotationLive',
   'meterFormatNoiseFloorValue',
   'meterNoiseHistoryStore',
+  'meterSyncNoiseAnalysisContext',
   'meterStepNoiseKey',
   'meterRecordReadingNoise',
   'meterReplaceReadings',
@@ -213,6 +214,9 @@ globalThis.__recIsReal = true;
 function meterReadingIsGreyscale() { return globalThis.__recIsGrey; }
 function meterReadingIsRealMeasurement() { return globalThis.__recIsReal; }
 function meterLiveRgbData(rd) { return globalThis.__liveBal || null; }
+// Analysis-context tracking (review #22 round 4 P1): the module-level context
+// var must exist in the sandbox (only functions are brace-extracted).
+let meterNoiseAnalysisContext = null;
 function meterStepNameKey(step) { return (step && (step.name || (step.ire != null ? step.ire + '' : ''))) || ''; }
 // The real meterOnRgbBalanceNoiseFloorChange (extracted below) delegates its
 // redraw to the shared formula-change path; stub that and count invocations
@@ -220,7 +224,9 @@ function meterStepNameKey(step) { return (step && (step.name || (step.ire != nul
 globalThis.__noiseChangeCalls = 0;
 function meterOnRgbBalanceFormulaChange() { globalThis.__noiseChangeCalls++; }
 function meterGreyDeltaResult() { return { value: null }; }
-function meterGreyRefMode() { return 'relative'; }
+// Driven by globalThis.__greyRef so the noise-context test can switch modes
+// (default 'relative' matches the historic hardcoded stub).
+function meterGreyRefMode() { return globalThis.__greyRef || 'relative'; }
 function meterDeltaEForm() { return 'deitp'; }
 function meterGrayWorldWeight() { return null; }
 function meterReadingXYZ(rd) { return rd ? { X: rd.X, Y: rd.Y, Z: rd.Z } : null; }
@@ -1360,7 +1366,19 @@ test('empirical_floor_from_repeat_scatter', () => {
   assert(S.meterLgTrimKeyAffectsPatch('blackLevel') === true, 'blackLevel invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('blackLevelAdjust') === true, 'blackLevelAdjust invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('oledLight') === true, 'oledLight invalidates');
-  assert(S.meterLgTrimKeyAffectsPatch('black_frame_insertion') === false, 'BFI keeps history');
+  // Panel-output controls per review #22 round 4 P2: gamma regrades the
+  // response, energy saving / local dimming / tone mapping / eye comfort /
+  // BFI all change what the meter integrates.
+  assert(S.meterLgTrimKeyAffectsPatch('gamma') === true, 'gamma invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('energySaving') === true, 'energySaving invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('localDimming') === true, 'localDimming invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('hdrDynamicToneMapping') === true, 'tone mapping invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('eyeComfortMode') === true, 'eye comfort invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('black_frame_insertion') === true, 'BFI invalidates');
+  // True plumbing: signal formatting and menus do not change patch light.
+  assert(S.meterLgTrimKeyAffectsPatch('colorDepth') === false, 'colorDepth keeps history');
+  assert(S.meterLgTrimKeyAffectsPatch('colorGamut') === false, 'gamut selection keeps history');
+  assert(S.meterLgTrimKeyAffectsPatch('sharpness') === false, 'sharpness keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('hdmiRange') === false, 'hdmiRange keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('calibration_mode') === false, 'cal mode keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('') === false, 'empty key keeps history');
@@ -1465,6 +1483,104 @@ test('floor_formatter_prints_as_judged', () => {
   assert(S.meterFormatNoiseFloorValue(0.8451231) === '0.85', 'irrational empirical sigma rounds to 2dp');
   assert(S.meterFormatNoiseFloorValue(0) === 'Off', '0 reads Off');
   assert(S.meterFormatNoiseFloorValue(NaN) === 'Off', 'NaN reads Off');
+});
+
+test('noise_analysis_context_switch_wipes_store', () => {
+  // Review #22 round 4 P1: the recorder stores meterLiveRgbData OUTPUT, so
+  // samples taken under different formulas (or grey-ref modes) are different
+  // QUANTITIES. A cross-view pair previously formed a fabricated sigma
+  // (bench: Chromaticity->Perceptual between identical readings reached the
+  // 10 L* cap; relative->eotf produced a false 2.58 floor). The store must
+  // wipe at the view change so no sigma ever spans two analysis contexts.
+  // Fresh state for this block (tests share the module store; earlier blocks
+  // left samples and nulled stubs behind).
+  globalThis.__noiseMode = { value: 'empirical' };
+  globalThis.__noiseFloor = { value: '0.3' };
+  globalThis.__recIsGrey = true;
+  globalThis.__recIsReal = true;
+  S.meterReplaceReadings([]); // default wipe: store empty, refs consistent
+  // View A (hcfr): first sample bootstraps the context (no wipe on first).
+  globalThis.__sel = { value: 'hcfr' };
+  globalThis.__greyRef = 'relative';
+  globalThis.__liveBal = { R: 113.83, G: 100, B: 100, gain: 1 };
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 1 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 1, 'view A sample stored');
+  // Switch formula to Perceptual, then deliver identical XYZ, new timestamp:
+  // pre-fix this pair formed a huge sigma; post-fix the store was wiped at
+  // the record-time context change and only the NEW sample survives.
+  globalThis.__sel = { value: 'perceptual' };
+  globalThis.__liveBal = { R: 100.75, G: 100, B: 100, gain: 1 };
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 2 }, { name: '10%' });
+  const h = S.meterNoiseHistoryStore().get('10%');
+  assert(h && h.vals.length === 1, 'formula switch wiped the foreign-view sample');
+  assert(S.meterEmpiricalNoiseFloorFor({ name: '10%' }) === null,
+    'cross-view pair must NOT produce a floor (single fresh sample -> typed fallback)');
+  assertClose(S.meterRgbBalanceEffectiveNoiseFloor({ name: '10%' }), 0.3, 1e-9,
+    'effective floor after view switch is the typed value');
+  // Same-sample-count repeat under the SAME view still accumulates (the
+  // wipe keys on context, not on every record).
+  globalThis.__liveBal = { R: 100.25, G: 100, B: 100, gain: 1 };
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.6801, timestamp: 3 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 2, 'same-view second sample accumulates');
+  // Grey-ref mode is part of the context: relative->eotf between samples
+  // wipes too (the second bench-reproduced fabrication vector). Distinct
+  // XYZ: re-sending the previous triple would hit the re-delivery dedupe
+  // and never reach the context check.
+  globalThis.__greyRef = 'eotf';
+  globalThis.__liveBal = { R: 102.58, G: 100, B: 100, gain: 1 };
+  S.meterRecordReadingNoise({ X: 0.61, Y: 0.61, Z: 0.69, timestamp: 4 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 1,
+    'grey-ref switch wiped the previous-mode samples');
+  // Cleanup: leave the module store empty and the context unset so later
+  // tests' bootstrap assumptions (first record seeds context silently)
+  // and store-state assertions hold regardless of block order.
+  S.meterReplaceReadings([]);
+  globalThis.__sel = null; globalThis.__greyRef = null;
+  globalThis.__noiseMode = null; globalThis.__noiseFloor = null;
+  globalThis.__liveBal = null;
+});
+
+test('view_change_handlers_sync_noise_context', () => {
+  // The record-time check only fires on the NEXT reading; between the switch
+  // and that reading, previously stored floors would still annotate (P1 fix
+  // must be live at the handler too, not only deferred to record time).
+  const formulaSrc = extractFunction(srcText, 'meterOnRgbBalanceFormulaChange');
+  assert(formulaSrc.includes('meterSyncNoiseAnalysisContext()'),
+    'formula-change handler syncs (wipes on change) the noise analysis context');
+  const greySrc = extractFunction(srcText, 'meterOnGreyRefChange');
+  assert(greySrc.includes('meterSyncNoiseAnalysisContext()'),
+    'grey-ref handler syncs the noise analysis context');
+});
+
+test('meter_port_and_ccss_invalidate_scatter', () => {
+  // Review #22 round 4 P2: instrument and correction profile are
+  // measurement-context changes that do NOT replace the readings array, so
+  // the meterReplaceReadings wipe never fires — both handlers must call
+  // meterInvalidateAllStepNoise or a new meter/profile interprets systematic
+  // differences as its own repeatability.
+  const portIdx = wsText.indexOf('const meterMeasurementPortEl=document.getElementById');
+  assert(portIdx >= 0, 'meter port handler anchor present');
+  const portBlock = wsText.slice(portIdx, portIdx + 1500);
+  assert(portBlock.includes('meterInvalidateAllStepNoise'),
+    'measurement-port change invalidates all scatter');
+  const ccssFn = wsText.slice(wsText.indexOf('function meterOnCcssProfileChange'));
+  const ccssBody = ccssFn.slice(0, ccssFn.indexOf('\nfunction '));
+  assert(ccssBody.includes('meterInvalidateAllStepNoise'),
+    'CCSS profile change invalidates all scatter');
+});
+
+test('noise_band_segments_at_zero_floor_points', () => {
+  // Review #22 round 4 P2: a point whose effective floor is 0 must break the
+  // band into segments — one polygon spanning a zero-floor point shaded a
+  // band over a point whose own verdict was 'off'. Structural pin on
+  // drawRGBChart: segment accumulation + a break at !(dev>0).
+  const idx = wsText.indexOf('function drawRGBChart(');
+  assert(idx >= 0, 'drawRGBChart anchor present');
+  const body = wsText.slice(idx, wsText.indexOf('\nconst rPts=[]', idx));
+  assert(body.includes('const zoneSegments=[]') && body.includes('zoneSegments.forEach(zone=>'),
+    'band renders as segments, one polygon per contiguous floored run');
+  assert(/if\(!\(dev>0\)\)\{ if\(zoneSeg\.length>1\) zoneSegments\.push\(zoneSeg\); zoneSeg=\[\]; return; \}/.test(body),
+    'zero-floor point closes the current segment (gap stays unshaded)');
 });
 
 // ---------------------------------------------------------------------------

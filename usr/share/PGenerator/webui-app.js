@@ -12125,6 +12125,11 @@ function meterUpdateNoiseFloorModeStatus(){
 
 function meterOnRgbBalanceFormulaChange(){
  try{ meterSaveColorPrefs(); }catch(e){}
+ // Formula switch changes what meterLiveRgbData returns: samples recorded
+ // under the previous formula are a different quantity (HCFR linear-RGB %
+ // vs perceptual L* deviations) and must not survive into the new view's
+ // sigma. Wipe on change even when there are no readings to redraw.
+ meterSyncNoiseAnalysisContext();
  // The noise floor only annotates the Perceptual view; refresh its dimmed
  // state first so it stays correct even when there are no readings to redraw.
  try{ meterUpdateNoiseFloorControlAvailability(); }catch(e){}
@@ -12150,6 +12155,11 @@ function meterOnRgbBalanceFormulaChange(){
 function meterOnGreyRefChange(src){
  meterUpdateSeparateLumVisibility();
  try{ meterSaveColorPrefs(); }catch(e){}
+ // Grey ref mode (relative/absolute/eotf) changes the balance TARGET and
+ // thus the recorded deviation: samples from the old mode are not the same
+ // quantity (review #22 round 4: relative->eotf fabricated a 2.58 L* floor
+ // between two identical readings).
+ meterSyncNoiseAnalysisContext();
  // Target Gamma has a dedicated change listener that regrades series targets
  // and performs the required full target-curve refresh.
  if(src==='target-gamma') return;
@@ -14332,6 +14342,29 @@ function meterReadingHasLuminance(rd){
 const METER_NOISE_HISTORY_K=2;    // flag within ±2σ of the step's scatter
 const METER_NOISE_HISTORY_MAX=12; // samples per step (ring buffer)
 let meterNoiseHistory=null;
+// Analysis-context fingerprint for the scatter store: the recorder stores
+// meterLiveRgbData OUTPUT, which follows the selected RGB-balance formula
+// and Grey ref mode (HCFR's linear-RGB percentages and the eotf target are
+// DIFFERENT quantities from the perceptual pre-gain L* deviations; dividing
+// by shadow gain cannot reconcile them). Samples recorded under two
+// different analysis views must never share a sigma, so a context change
+// observed at record time wipes the store before the new sample lands
+// (review #22 round 4, P1: switching views between repeats fabricated a
+// 10-cap floor). Keyed on formula|grey-ref only: the Flat/Empirical mode
+// select is a judgment switch, not a measurement context.
+let meterNoiseAnalysisContext=null;
+// Check + (on change) wipe. Called at record time AND from both analysis
+// view-change handlers, so stale cross-view floors cannot annotate even in
+// the window between the switch and the next reading.
+function meterSyncNoiseAnalysisContext(){
+ try{
+  const ctx=meterRgbBalanceFormula()+'|'+meterGreyRefMode();
+  if(meterNoiseAnalysisContext===ctx) return;
+  const had=meterNoiseAnalysisContext!==null;
+  meterNoiseAnalysisContext=ctx;
+  if(had){ meterNoiseHistoryStore().clear(); try{ meterUpdateNoiseFloorModeStatus(); }catch(e){} }
+ }catch(e){}
+}
 function meterNoiseHistoryStore(){
  if(!meterNoiseHistory) meterNoiseHistory=new Map();
  return meterNoiseHistory;
@@ -14350,6 +14383,10 @@ function meterRecordReadingNoise(reading,step){
   if(!reading||reading.noChroma) return;
   if(!meterReadingIsGreyscale(reading)) return;
   if(typeof meterReadingIsRealMeasurement==='function'&&!meterReadingIsRealMeasurement(reading)) return;
+  // Analysis-view change => every stored sample is a different quantity:
+  // wipe BEFORE recording so a cross-view pair can never form a sigma
+  // (see meterSyncNoiseAnalysisContext above).
+  meterSyncNoiseAnalysisContext();
   const key=meterStepNoiseKey(step||reading);
   if(!key) return;
   const bal=meterLiveRgbData(reading);
@@ -14412,11 +14449,17 @@ function meterLgTrimKeyAffectsPatch(key){
  // 'brightness' or as panel light (backlight/blackLevel/blackLevelAdjust/
  // oledLight — the keys meterAutoCalWritePanelLight drives, which wipes ALL
  // scatter on the same physical reasoning: panel luminance changes what
- // every patch reads). hdmiRange/calibration-mode style plumbing keys
- // simply do not match the pattern — no exclusion clause needed (a previous
- // 'hdmirange' guard was dead code); the harness pins hdmiRange === false.
+ // every patch reads). The same reasoning extends to every control that
+ // alters the PANEL OUTPUT itself (review #22 round 4): gamma regrades the
+ // luminance curve, energy saving and local dimming rescale it, HDR tone
+ // mapping redistributes it, eye comfort shifts the white point, and BFI
+ // changes the temporal profile an integrating colorimeter sees.
+ // hdmiRange/calibration-mode style plumbing keys simply do not match the
+ // pattern — no exclusion clause needed (a previous 'hdmirange' guard was
+ // dead code); the harness pins hdmiRange === false. Over-wiping costs only
+ // re-reads (fail-safe); under-wiping folds a real signal change into σ.
  const k=String(key||'').toLowerCase().replace(/[\s_-]+/g,'');
- return /whitebalance|brightness|contrast|colourtemp|colortemp|backlight|blacklevel|oledlight/.test(k);
+ return /whitebalance|brightness|contrast|colourtemp|colortemp|backlight|blacklevel|oledlight|gamma|energysaving|localdimming|tonemapping|eyecomfort|blackframeinsertion/.test(k);
 }
 // Drop a step's scatter samples: the trim just changed what the patch
 // measures, so the old scatter describes a setting that no longer exists
