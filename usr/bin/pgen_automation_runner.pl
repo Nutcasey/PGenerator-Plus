@@ -2917,92 +2917,140 @@ sub _panel_light_stage {
     if (!_response_ok($initial)) { $::LAST_ERROR = $initial->{message} || 'Unable to set initial panel light'; return 0; }
     $item->{settings}{$key} = $current;
     _sleep_controlled(2) or return 0;
-    my @iterations;
-    my $converged = 0;
-    my $last_read;
-    my $stage_failed = 0;
-    for my $iteration (1..8) {
+    my (@iterations, %measured);
+    my ($best, $lower, $upper, $last_read);
+    my ($converged, $reason, $detail) = (0, '', '');
+    my $budget = 8;
+    my $tolerance = $target * 0.03;
+    $tolerance = 2 if $tolerance < 2;
+    my $final_check = {verified => 'unverifiable'};
+    for my $iteration (1..$budget) {
         my $reading = _read_white($item);
         my $luma = _luminance($reading);
-        my $entry = { iteration => $iteration, value => $current, reading => $reading, luminance => $luma };
+        my $entry = {iteration=>$iteration, value=>$current, reading=>$reading, luminance=>$luma};
+        push @iterations, $entry;
+        my $prefix = sprintf('Panel light | Attempt %d/%d | Setting %d | ', $iteration, $budget, $current);
         if (!defined($luma) || $luma <= 0) {
-            $entry->{result} = 'measurement-failed';
-            $::LAST_ERROR ||= 'Panel-light control did not receive a valid white luminance measurement';
-            $stage_failed = 1;
-            push @iterations, $entry;
+            $reason = 'measurement-failed';
+            $detail = $::LAST_ERROR || 'No valid white luminance measurement';
+            $entry->{result} = $reason;
+            _log_action($prefix.$detail);
             last;
         }
         $last_read = $luma;
-        my $tolerance = $target * 0.03;
-        $tolerance = 2 if $tolerance < 2;
-        if (abs($luma - $target) <= $tolerance) {
+        $measured{$current} = $entry;
+        $best = $entry if !$best || abs($luma-$target) < abs($best->{luminance}-$target);
+        $prefix .= sprintf('Y %.2f cd/m2; target %.2f +/-%.2f | ', $luma, $target, $tolerance);
+        if (abs($luma-$target) <= $tolerance) {
             $entry->{result} = 'converged';
             $converged = 1;
-            push @iterations, $entry;
+            $reason = 'converged';
+            _log_action($prefix.'Target reached');
             last;
         }
-        if ($iteration == 8) { push @iterations, $entry; last; }
+        # Bounds come from actual measurements. Never revisit a setting or
+        # call the target unreachable merely because arithmetic rounded flat.
+        $lower = $current if $luma < $target && (!defined($lower) || $current > $lower);
+        $upper = $current if $luma > $target && (!defined($upper) || $current < $upper);
+        if (defined($lower) && defined($upper) && $upper-$lower == 1) {
+            $reason = 'resolution-limit';
+            $detail = sprintf('Adjacent settings %d (%.2f cd/m2) and %d (%.2f cd/m2) straddle the target; neither meets tolerance',
+                $lower, $measured{$lower}{luminance}, $upper, $measured{$upper}{luminance});
+        } elsif (($current == 0 && $luma > $target) || ($current == 100 && $luma < $target)) {
+            $reason = 'control-limit';
+            $detail = 'Measured control boundary cannot reach the target';
+        } elsif ($iteration == $budget) {
+            $reason = 'attempt-limit';
+            $detail = 'Measurement budget exhausted; target reachability unknown';
+        }
+        if ($reason) {
+            $entry->{result} = $reason;
+            _log_action($prefix.$detail);
+            last;
+        }
         my $next = int(($current || 1) * $target / $luma + 0.5);
-        $next = 0 if $next < 0;
-        $next = 100 if $next > 100;
-        if ($next == $current) {
-            $entry->{result} = ($current == 0 || $current == 100) ? 'clamped' : 'resolution-limit';
-            push @iterations, $entry;
+        $next = 0 if $next < 0; $next = 100 if $next > 100;
+        my $decision = 'Trying '.$next;
+        if (defined($lower) && defined($upper)) {
+            $next = int(($lower+$upper)/2);
+            $decision = "Measured bracket $lower..$upper; trying $next";
+        } elsif ($next == $current || exists($measured{$next})) {
+            $next = $current + ($luma > $target ? -1 : 1);
+            $decision = "Rounded adjustment unchanged or already measured; trying $next";
+        }
+        if ($next < 0 || $next > 100 || exists($measured{$next})) {
+            $reason = 'search-stalled';
+            $detail = 'No unmeasured candidate in the search direction; target reachability unknown';
+            $entry->{result} = $reason;
+            _log_action($prefix.$detail);
             last;
         }
         $entry->{next_value} = $next;
-        push @iterations, $entry;
+        _log_action($prefix.$decision);
         my $result = _apply_one_setting($item, $key, $next, 'picture');
-        if (!$result || ($result->{status} || '') ne 'ok') {
-            $entry->{result} = 'set-failed';
-            $::LAST_ERROR = $result->{message} || "Unable to adjust panel light $key";
-            $stage_failed = 1;
+        if (!_response_ok($result)) {
+            $reason = $entry->{result} = 'set-failed';
+            $detail = $result->{message} || "Unable to adjust panel light $key";
             last;
         }
         $current = $next;
         $item->{settings}{$key} = $current;
-        my $verified = _read_and_verify_settings($item_number, $item, 'c5-panel-iteration');
-        if (!$verified->{verified} && $verified->{verified} ne 'unverifiable') {
-            $entry->{result} = 'set-unverified';
-            $::LAST_ERROR = 'Panel-light adjustment did not verify against the LG TV';
-            $stage_failed = 1;
+        $final_check = _read_and_verify_settings($item_number, $item, 'c5-panel-iteration');
+        if (!$final_check->{verified} && $final_check->{verified} ne 'unverifiable') {
+            $reason = $entry->{result} = 'set-unverified';
+            $detail = 'Panel-light adjustment did not verify against the LG TV';
             last;
         }
-        _sleep_controlled(2) or last;
+        if (!_sleep_controlled(2)) { $reason = 'cancelled'; last; }
     }
-    my $unreachable = !$converged && ($current == 0 || $current == 100);
-    if (!$converged && !$unreachable && !$stage_failed) {
-        $stage_failed = 1;
-        $::LAST_ERROR = 'Panel light did not reach the luminance tolerance within eight measurements';
+    _refresh_control();
+    $reason = 'cancelled' if $STOP_REQUESTED;
+    $converged = 0 if $reason eq 'cancelled';
+    my $best_restore = 'not-needed';
+    if (!$converged && $best && $reason ne 'cancelled' && $current != $best->{value}) {
+        my $restore = _apply_one_setting($item, $key, $best->{value}, 'picture');
+        $best_restore = 'failed';
+        if (_response_ok($restore)) {
+            $current = $best->{value};
+            $item->{settings}{$key} = $current;
+            $final_check = _read_and_verify_settings($item_number, $item, 'c5-panel-best');
+            $best_restore = $final_check->{verified} eq '1' ? 'verified'
+                : $final_check->{verified} eq 'unverifiable' ? 'unverifiable' : 'failed';
+        }
+        _log_action(sprintf('Panel light | Restore best setting %d; measured Y %.2f cd/m2 | %s',
+            $best->{value}, $best->{luminance}, $best_restore));
     }
-    my $warning = $converged ? undef : ($unreachable ? 'panel-light-target-unreachable' : 'panel-light-unverifiable');
-    my $final_check = { verified => 'unverifiable' };
-    if (!$stage_failed) {
+    if ($converged) {
         $final_check = _read_and_verify_settings($item_number, $item, 'c5');
         if (!$final_check->{verified} && $final_check->{verified} ne 'unverifiable') {
-            $stage_failed = 1;
-            $::LAST_ERROR = 'Panel-light stage settings did not verify against the LG TV';
+            $converged = 0;
+            $reason = 'set-unverified';
+            $detail = 'Panel-light stage settings did not verify against the LG TV';
         }
     }
+    if (!$converged) {
+        $::LAST_ERROR = sprintf('Panel light stopped after %d/%d measurements: %s; target %.2f +/-%.2f cd/m2',
+            scalar(@iterations), $budget, $detail || $reason, $target, $tolerance);
+        $::LAST_ERROR .= sprintf('; best setting %d measured %.2f cd/m2', $best->{value}, $best->{luminance}) if $best;
+        $::LAST_ERROR .= '; best-setting restore '.$best_restore if $best_restore ne 'not-needed';
+        _log_action($::LAST_ERROR);
+    }
     my $result = {
-        policy => 'target',
-        key => $key,
-        target_luminance => $target,
-        iterations => \@iterations,
-        settled_value => $current,
-        start_value_assumed => $start_assumed ? JSON::PP::true : JSON::PP::false,
-        last_luminance => $last_read,
-        converged => $converged ? JSON::PP::true : JSON::PP::false,
-        settings_verified => $final_check->{verified},
-        warning => $warning,
-        completed_at => time(),
+        policy=>'target', key=>$key, target_luminance=>$target, tolerance=>$tolerance,
+        iterations=>\@iterations, attempts=>scalar(@iterations), attempt_budget=>$budget,
+        settled_value=>$current, last_luminance=>$last_read,
+        best_value=>$best ? $best->{value} : undef, best_luminance=>$best ? $best->{luminance} : undef,
+        best_restore=>$best_restore, outcome=>$reason,
+        start_value_assumed=>$start_assumed ? JSON::PP::true : JSON::PP::false,
+        converged=>$converged ? JSON::PP::true : JSON::PP::false,
+        settings_verified=>$final_check->{verified}, completed_at=>time(),
     };
-    delete $result->{warning} if !defined($result->{warning});
+    $result->{failure} = $::LAST_ERROR if !$converged;
     return 0 if !_write_artifact(PGAutomation::item_dir($RUN_ID, $item_number) . '/panel-light.json', $result);
-    return 0 if $stage_failed;
-    return 0 if !_record_setup_luminance($item,$last_read);
+    return 0 if !_update_item_snapshot($item_number, $item);
+    return 0 if !$converged;
+    return 0 if !_record_setup_luminance($item, $last_read);
     $item->{warnings} ||= [];
-    push @{$item->{warnings}}, $warning if $warning;
     push @{$item->{warnings}}, 'panel-light-start-assumed'
         if $start_assumed && !grep { !ref($_) && $_ eq 'panel-light-start-assumed' } @{$item->{warnings}};
     return _update_item_snapshot($item_number, $item);
@@ -3710,17 +3758,18 @@ sub _pause_after_checkpoint {
 
 sub _park_interrupted {
     my ($stage) = @_;
-    # Give the TV back the way a safe Pause does: return the original viewing
-    # context now (unless CAL_END is still unconfirmed), so a failed batch does
-    # not need a manual Retry cleanup before anything else can use the TV.
-    my $before = eval { _run() };
+    # Explicit Pause retains its viewing-restoration contract. A failed job
+    # keeps the current mode and owes only worker, meter and panel cleanup.
+    my $before = _run();
+    my $parking = $before->{pause_park_pending} && ($before->{pending_terminal_status}||'') eq 'paused';
+    $before = _keep_current_mode_on_stop('failure') if !$parking;
     my $cleanup = ref($before) eq 'HASH' ? $before->{stop_cleanup} : undef;
     if (ref($before) eq 'HASH' && $before->{viewing_restore_required}
             && !(ref($cleanup) eq 'HASH' && !$cleanup->{verified})) {
         _restore_preflight_context('viewing')
             or _log_action('Original viewing context restoration still pending: '.($::LAST_ERROR||'unconfirmed'));
     }
-    _update_run(sub {
+    my $saved = _update_run(sub {
         my ($run) = @_;
         $run->{status} = 'interrupted';
         # _finish latches cleanup for failures that are not restoration
@@ -3731,23 +3780,18 @@ sub _park_interrupted {
         } else {
             delete $run->{cleanup_required};
         }
-        # Protections and the viewing context were returned at park, so a
-        # resume must recreate the temporary device state, as after a Pause.
+        # Resume must recreate the temporary calibration/protection state.
         $run->{pause_context_released} = JSON::PP::true;
         $run->{runner_pid} = 0;
         $run->{active_stage} = $stage if defined($stage) && $stage ne '';
         $run->{updated_at} = time();
     });
-    PGAutomation::with_lock($EXECUTION_FILE, sub {
-        my ($current) = @_;
-        return undef if ref($current) ne 'HASH'
-            || ($current->{run_id} || '') ne $RUN_ID
-            || ($current->{token} || '') ne $TOKEN;
-        $current->{status} = 'interrupted';
-        $current->{pid} = 0;
-        $current->{updated_at} = time();
-        return $current;
-    });
+    die 'Unable to persist interrupted state; ownership retained' if !ref($saved);
+    if ($saved->{cleanup_required}) {
+        die 'Unable to retain cleanup ownership' if !_write_execution($saved);
+    } else {
+        _release_execution();
+    }
     unlink($RUN_DIR . '/runner.pid');
     $ACTIVE_STAGE = '';
     _clear_active_worker();
@@ -3763,6 +3807,8 @@ sub _current_mode_stop_requested {
 }
 
 sub _keep_current_mode_on_stop {
+    my ($reason)=@_;
+    $reason ||= 'stop';
     my $run=_run();
     return $run if ($run->{stop_restore_policy}||'') eq 'current-mode-only'
         && !$run->{preflight_restore_required} && !$run->{viewing_restore_required};
@@ -3772,18 +3818,18 @@ sub _keep_current_mode_on_stop {
         for my $kind (qw(preflight viewing)) {
             next if !$state->{$kind.'_restore_required'};
             $state->{$kind.'_restore_required'}=JSON::PP::false;
-            $state->{$kind.'_restore_outcome'}='skipped-on-stop';
+            $state->{$kind.'_restore_outcome'}='skipped-on-'.$reason;
         }
-        # Stop owes CAL_END and panel protection, not restoration of the
-        # batch's saved picture preferences or a tour of checked signals.
-        $state->{hazard_restore_outcome}='skipped-on-stop';
+        # Stop and failure owe CAL_END and panel protection, not the batch's
+        # saved picture preferences or a tour of checked signals.
+        $state->{hazard_restore_outcome}='skipped-on-'.$reason;
         $state->{skipped_hazard_restore_failures}=$state->{hazard_restore_failures}
             if @{$state->{hazard_restore_failures}||[]};
         $state->{hazard_restore_failures}=[];
         $state->{hazard_restore_pending}=JSON::PP::false;
     });
-    die 'Unable to persist Stop policy; ownership retained' if !ref($saved);
-    _log_action('Stop | Keeping current signal and picture mode; skipping original settings restoration');
+    die 'Unable to persist cleanup policy; ownership retained' if !ref($saved);
+    _log_action(($reason eq 'stop' ? 'Stop' : 'Failure cleanup').' | Keeping current signal and picture mode; skipping original settings restoration');
     return $saved;
 }
 
@@ -3801,7 +3847,7 @@ sub _stop_active {
     return if $STOP_HANDLED++;
     $STOPPING = 1;
     $CLEANUP_DEADLINE = time() + $CLEANUP_RETRY_BUDGET;
-    _keep_current_mode_on_stop() if !$parking && _current_mode_stop_requested();
+    _keep_current_mode_on_stop(_current_mode_stop_requested() ? 'stop' : 'failure') if !$parking;
     # Journal an unfinished cleanup before issuing device commands. A process
     # interruption or a failed result write must not expose an older successful
     # cleanup as proof that this attempt safely released the TV and meter.
@@ -3898,6 +3944,11 @@ sub _stop_active {
 
 sub _finish {
     my ($status, $failure) = @_;
+    if ($status eq 'failed') {
+        _keep_current_mode_on_stop('failure');
+        _stop_active() if !$STOP_HANDLED;
+        _restore_run_hazards(_run(),_run()->{items});
+    }
     if (_current_mode_stop_requested() && !$STOP_HANDLED) {
         _stop_active();
         _restore_run_hazards(_run(),_run()->{items});
@@ -4023,6 +4074,9 @@ sub _restore_hazards {
 
 sub _restore_run_hazards {
     my ($run, $items) = @_;
+    # Callers may hold the manifest from before _stop_active journalled policy.
+    my $latest = _run();
+    $run = $latest if ($latest->{stop_restore_policy}||'') eq 'current-mode-only';
     $run=_keep_current_mode_on_stop() if _current_mode_stop_requested();
     my %restore;
     if (ref($run) eq 'HASH' && ref($run->{hazard_restore}) eq 'HASH') {
@@ -5075,8 +5129,8 @@ sub _preflight_queue {
     }
     # A batch that passed keeps the TV where the check left it (on the first
     # job's signal and mode) and restores the original modes when it finishes.
-    # A check-only run or blocked queue restores now. Stop keeps the current
-    # mode and skips the saved viewing context, like Stop during calibration.
+    # A successful check-only run restores now. Failed checks and Stop keep
+    # the current mode, like failure or Stop during calibration.
     my $passed=!$STOP_REQUESTED && @pending && $result->{checked_items}==@pending
         && !grep {!$_->{ok} && ($_->{level}||'error') eq 'error'} @{$result->{checks}};
     my $restored;
@@ -5084,6 +5138,10 @@ sub _preflight_queue {
         $restored=_defer_preflight_restore();
         $result->{restore_deferred}=1 if $restored;
         push @{$result->{checks}},{ok=>0,level=>'error',name=>'queue-preflight-restore',message=>$::LAST_ERROR||'Unable to hand restoration over to the batch'} if !$restored;
+    } elsif (!$passed && !$STOP_REQUESTED) {
+        _keep_current_mode_on_stop('failure');
+        $restored = 1; # The restoration obligation was explicitly skipped.
+        $result->{restore_skipped} = 'failure';
     } else {
         # A display-state write failure must not prevent restoration.
         eval {_preflight_progress($result,undef,$STOP_REQUESTED
@@ -5441,6 +5499,11 @@ sub _main {
         _finish($parking ? 'paused' : 'stopped');
         return;
     }
+    # A resumed job starts a new device context; prior cleanup policy must
+    # not suppress normal completion or explicit Pause restoration.
+    if ($run->{stop_restore_policy}) {
+        die 'Unable to reset resumed cleanup policy' if !ref(_update_run(sub {delete $_[0]{stop_restore_policy};}));
+    }
     my $preflight=_reusable_preflight(_run()) || _preflight_queue();
     if (!$preflight->{ready} || $run->{preflight_only}) {
         _finish($STOP_REQUESTED?'stopped':$preflight->{ready}?'complete':'failed',
@@ -5454,7 +5517,6 @@ sub _main {
         if (!defined($current->{preflight_revision}) || $current->{preflight_revision}!=($current->{queue_revision}||0)) {
             my $checked=_preflight_queue();
             if (!$checked->{ready}) {
-                _restore_run_hazards(_run(),_run()->{items});
                 _finish('failed',{stage=>'queue-preflight',message=>$checked->{message},error_code=>'queue-preflight-blocked'});
                 return;
             }
@@ -5462,7 +5524,6 @@ sub _main {
         my ($claimed,$queue_changed)=_claim_queue_item($i);
         if ($queue_changed) {
             if (_replan_exhausted($i)) {
-                _restore_run_hazards(_run(),_run()->{items});
                 _finish('failed',{stage=>'queue-preflight',error_code=>'queue-plan-mismatch',
                     message=>'Job '.($i+1).' kept failing to match the plan it had just passed. Stopping rather than re-checking the queue indefinitely; see the activity log.'});
                 return;
@@ -5496,13 +5557,13 @@ sub _main {
     }
     if (($latest->{status} || '') eq 'interrupted') {
         my $failure_stage = ref($latest->{failure}) eq 'HASH' ? ($latest->{failure}{stage} || '') : '';
-        _stop_active() if $failure_stage ne 'apply-all-done' && ($ACTIVE_WORKER || ref($ACTIVE_ITEM) eq 'HASH');
+        _stop_active();
         _restore_run_hazards($latest, $items);
         _park_interrupted($latest->{active_stage} || $failure_stage || 'interrupted');
         return;
     }
     if (($latest->{status} || '') eq 'failed') {
-        _stop_active() if $ACTIVE_WORKER || ref($ACTIVE_ITEM) eq 'HASH';
+        _stop_active();
         _restore_run_hazards($latest, $items);
         _finish('failed', $latest->{failure});
         return;
@@ -5511,7 +5572,7 @@ sub _main {
     if ($aborted || @unfinished) {
         # _run_item returned without persisting interrupted/failed (for example
         # a snapshot write failed). Never report that as complete.
-        _stop_active() if $ACTIVE_WORKER || ref($ACTIVE_ITEM) eq 'HASH';
+        _stop_active();
         _restore_run_hazards($latest, $items);
         _finish('failed', { stage => $ACTIVE_STAGE || 'item', message => $::LAST_ERROR || 'An item stopped without recording its outcome' });
         return;

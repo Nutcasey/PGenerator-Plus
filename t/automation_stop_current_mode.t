@@ -70,6 +70,64 @@ for my $failure ('','fallback','calibration','panel','meter') {
  }
 }
 
+# Automatic stage failure uses the same device cleanup without a Stop request.
+for my $failure ('','calibration','panel','meter') {
+ my $path=fixture();my @calls;
+ local *main::_control=sub {{request=>'none'}};
+ local *main::_log=sub {};
+ local *main::_heartbeat=sub {};
+ local *main::_ensure_lg_connection=sub {1};
+ local *main::_worker_process_alive=sub {0};
+ local *main::_api_once=sub {
+  my ($method,$route,$payload)=@_;
+  push @calls,[$route,$payload];
+  die "Failure cleanup must not restore modes/settings: $route" if $route=~m{config|picture-settings|reset|upload};
+  return {status=>'error',message=>'CAL_END rejected'} if $failure eq 'calibration' && $route=~m{calibration-mode|autocal/run/end};
+  return {status=>'error',message=>'TPC/GSR refused'} if $failure eq 'panel' && $route eq '/api/lg/panel-protection';
+  return {status=>'error',message=>'Meter busy'} if $failure eq 'meter' && $route eq '/api/meter/session/stop';
+  return {status=>'ok',calibration_mode=>$failure eq 'calibration'?1:0};
+ };
+ PGAutomation::with_lock($path,sub {
+  $_[0]{status}='interrupted';$_[0]{failure}={stage=>'panel-light-settled',message=>'Target not reached'};return $_[0];
+ });
+ my $stale=main::_run();
+ main::_stop_active();
+ main::_restore_run_hazards($stale,[]);
+ main::_park_interrupted('panel-light-settled');
+ my $run=main::_run();
+ is($run->{status},'interrupted','automatic failure remains resumable');
+ is($run->{failure}{message},'Target not reached','original failure survives cleanup');
+ is($run->{viewing_restore_outcome},'skipped-on-failure','failure explicitly skips original modes');
+ ok(grep($_->[0] eq '/api/lg/calibration-mode' && $_->[1]{current_picture_mode},@calls),'failure exits current calibration mode');
+ ok(grep($_->[0] eq '/api/lg/panel-protection' && $_->[1]{enable},@calls),'failure re-enables panel protections');
+ if ($failure eq '') {
+  ok(!$run->{cleanup_required},'successful automatic cleanup has no remaining obligation');
+  ok(!-e PGAutomation::base_dir().'/execution.json','successful automatic cleanup releases ownership');
+  is($run->{panel_protection}{restore_outcome},'sent-unverified','TPC/GSR evidence remains honest');
+ } else {
+  ok($run->{cleanup_required},"$failure failure retains cleanup requirement");
+  ok(-e PGAutomation::base_dir().'/execution.json',"$failure failure retains ownership");
+ }
+}
+
+{
+ my $path=fixture();my @calls;
+ local *main::_control=sub {{request=>'none'}};
+ local *main::_log=sub {};
+ local *main::_heartbeat=sub {};
+ local *main::_ensure_lg_connection=sub {1};
+ local *main::_worker_process_alive=sub {0};
+ local *main::_api_once=sub {
+  push @calls,$_[1];
+  die 'Terminal failure tried to restore modes' if $_[1]=~m{config|picture-settings};
+  return {status=>'ok',calibration_mode=>0};
+ };
+ ok(main::_finish('failed',{message=>'Startup failed'}),'terminal failure performs required cleanup');
+ is(main::_run()->{status},'failed','terminal failure preserves its outcome');
+ ok(grep($_ eq '/api/lg/panel-protection',@calls),'terminal failure restores TPC/GSR');
+ ok(!-e PGAutomation::base_dir().'/execution.json','terminal failure releases ownership after cleanup');
+}
+
 {
  my $path=fixture();my @calls;
  local *main::_control=sub {{request=>'stop'}};

@@ -80,7 +80,8 @@ sub fake_api {
             {ok=>1,level=>'ok',name=>'meter-idle',message=>'Meter is idle'},
             {ok=>0,level=>'warning',name=>'item-0-manual',item_number=>0,message=>'TruMotion: verify Off'}]};
     }
-    return {status=>'ok'} if $path eq '/api/meter/session/stop';
+    return {status=>'ok'} if $path=~m{^/api/meter/(?:session|series|lg-autocal|lg-3d-autocal)/stop$} || $path eq '/api/lg/dv-profile/stop';
+    return {status=>'ok',calibration_mode=>0} if $path=~m{^/api/lg/(?:calibration-mode|autocal/run/end|status)$};
     die "Unexpected device operation $method $path";
 }
 sub run_check {
@@ -129,7 +130,7 @@ is(scalar(@{PGAutomation::read_json_file(PGAutomation::run_dir($run_id).'/prefli
 ok(-f PGAutomation::run_dir($run_id).'/status.json','the check publishes the live status');
 is(scalar(grep {$_->[1]=~/reset|lut|autocal|meter\/read/} @calls),0,'preflight sends no reset, LUT upload or meter measurement');
 {
- local *main::_api=\&fake_api;local *main::_sleep_controlled=sub{1};local *main::_log=sub{};
+ local *main::_api=\&fake_api;local *main::_sleep_controlled=sub{1};local *main::_log=sub{};local *main::_ensure_lg_connection=sub {1};
  my $item=PGAutomation::clone($saved->{items}[0]);
  @calls=();
  ok(eval {main::_prepare_job_context(0,$item);1},'fresh job checks accept the unchanged frozen plan') or diag $@;
@@ -151,8 +152,8 @@ $r=run_check();
 ok(!$r->{ready},'an incompatible fourth job blocks the entire queue');
 is($prepares,4,'the incompatible late job is discovered upfront');
 is($r->{jobs}[3]{status},'blocked','specific late job is named');
-is_deeply(\%modes,\%original_modes,'blocked preflight still restores every changed picture mode');
-ok($r->{restored},'blocked result carries restoration confirmation');
+is($modes{sdr},'filmMaker','blocked preflight keeps its last selected picture mode');
+ok(!$r->{restored} && $r->{restore_skipped} eq 'failure','blocked result records skipped restoration');
 ok(!exists(PGAutomation::read_json_file($run_file)->{preflight_revision}),'blocked queue has no executable plan');
 is(scalar(grep {$_->[1]=~/reset|lut|autocal|meter\/read/} @calls),0,'late incompatibility never reaches a destructive command');
 fixture();$virtual=1;
@@ -187,10 +188,10 @@ $r=run_check();
 ok(!$r->{ready} && !$r->{restored},'failed restoration blocks an otherwise compatible queue');
 ok(PGAutomation::read_json_file($run_file)->{preflight_restore_required},'restoration journal obligation persists');
 {
- local *main::_api=\&fake_api;local *main::_sleep_controlled=sub{1};local *main::_log=sub{};
+ local *main::_api=\&fake_api;local *main::_sleep_controlled=sub{1};local *main::_log=sub{};local *main::_ensure_lg_connection=sub {1};
  main::_finish('failed',{stage=>'queue-preflight',message=>'Restoration failed'});
- is(PGAutomation::read_json_file($run_file)->{status},'interrupted','failed restoration stays recoverable');
- ok(-f "$store/execution.json",'failed restoration retains exclusive device ownership');
+ is(PGAutomation::read_json_file($run_file)->{status},'failed','failure completes current-mode safety cleanup');
+ ok(!-f "$store/execution.json",'irrelevant original-mode restoration cannot retain ownership');
  $restore_fail=0;
  ok(main::_restore_preflight_context(),'a later retry uses the saved restoration journal');
  ok(!PGAutomation::read_json_file($run_file)->{preflight_restore_required},'successful retry clears restoration obligation');
@@ -223,10 +224,12 @@ for my $scenario (qw(blocked check-only run)) {
  fixture();$bad_job=$scenario eq 'blocked';
  PGAutomation::with_lock($run_file,sub {$_[0]{preflight_only}=1 if $scenario eq 'check-only';return $_[0];});
  my $executed=0;
+ PGAutomation::with_lock($run_file,sub {$_[0]{stop_restore_policy}='current-mode-only';return $_[0];}) if $scenario eq 'run';
  local *PGAutomationLaunch::worker_handshake=sub {return 1;};
- local *main::_api=\&fake_api;local *main::_sleep_controlled=sub{1};local *main::_log=sub{};
+ local *main::_api=\&fake_api;local *main::_sleep_controlled=sub{1};local *main::_log=sub{};local *main::_ensure_lg_connection=sub {1};
  local *main::_run_item=sub {
   $executed++;
+  ok(!main::_run()->{stop_restore_policy},'resumed job clears the previous cleanup policy');
   is($prepares,4,'all jobs were live checked before the first calibration stage');
   my ($number,$item)=@_;$item->{status}='complete';
   main::_update_run(sub {$_[0]{items}[$number]=$item;});return 1;
@@ -319,7 +322,7 @@ for my $limited (0,1) {
  # alongside the marks the queue check left there.
  PGAutomation::with_lock($run_file,sub {$_[0]{viewing_restore_required}=1;$_[0]{mode_written_signals}{$_}{job}=JSON::PP::true for qw(dv sdr);return $_[0];});
  @calls=();
- local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
+ local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};local *main::_ensure_lg_connection=sub {1};
  ok(main::_restore_preflight_context('viewing'),'run-level original output restoration succeeds');
  is_deeply({map {$_=>$config{$_}} keys %saved_config},\%saved_config,'original generator transport is restored after calibration, not only after preflight');
  my $restored=PGAutomation::read_json_file($run_file);
@@ -337,7 +340,7 @@ for my $limited (0,1) {
  fixture();my %saved_config=%config;my %saved_modes=%modes;
  ok(run_check()->{ready},'stop window: the queue was checked');
  my %current_config=%config;my %current_modes=%modes;
- local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
+ local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};local *main::_ensure_lg_connection=sub {1};
  main::_finish('stopped',{stage=>'queue-preflight',message=>'Automation stopped'});
  my $stopped=PGAutomation::read_json_file($run_file);
  is($stopped->{status},'stopped','stop window: the run stops cleanly');
@@ -352,7 +355,7 @@ for my $limited (0,1) {
  ok(run_check()->{ready},'keep-last: the queue was checked');
  # Job 1 (SDR) ran and selected its mode; HDR10 and DV were only checked.
  PGAutomation::with_lock($run_file,sub {$_[0]{mode_written_signals}{sdr}{job}=JSON::PP::true;return $_[0];});
- local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
+ local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};local *main::_ensure_lg_connection=sub {1};
  @calls=();
  main::_finish('stopped',{stage=>'item',message=>'Automation stopped'});
  my $kept=PGAutomation::read_json_file($run_file);
@@ -370,7 +373,7 @@ for my $limited (0,1) {
  PGAutomation::with_lock($run_file,sub {$_[0]{finish_policy}='keep-last';return $_[0];});
  ok(run_check()->{ready},'keep-last, all selected: the queue was checked');
  PGAutomation::with_lock($run_file,sub {$_[0]{mode_written_signals}{$_}{job}=JSON::PP::true for qw(sdr hdr10 dv);return $_[0];});
- local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
+ local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};local *main::_ensure_lg_connection=sub {1};
  @calls=();
  main::_finish('complete');
  my $kept=PGAutomation::read_json_file($run_file);
@@ -496,7 +499,7 @@ for my $case ('same','mode-changed','queue-changed','stale','output-changed') {
 {
     fixture();
     local *PGAutomationLaunch::worker_handshake=sub {1};
-    local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
+    local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};local *main::_ensure_lg_connection=sub {1};
     local *main::_run_item=sub {my ($number,$item)=@_;$item->{status}='complete-with-warnings';$item->{warnings}=['check me'];main::_update_run(sub {$_[0]{items}[$number]=$item;});return 1;};
     ok(eval {main::_main();1},'a batch whose jobs warn runs to the end') or diag $@;
     is(PGAutomation::read_json_file($run_file)->{status},'complete-with-warnings','and finishes complete-with-warnings, not complete');
@@ -509,7 +512,7 @@ for my $case ('same','mode-changed','queue-changed','stale','output-changed') {
     fixture();
     my $restores=0;my $real_restore=\&main::_restore_run_hazards;
     local *PGAutomationLaunch::worker_handshake=sub {1};
-    local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};
+    local *main::_api=\&fake_api;local *main::_sleep_controlled=sub {1};local *main::_log=sub {};local *main::_ensure_lg_connection=sub {1};
     local *main::_restore_run_hazards=sub {$restores++;$real_restore->(@_)};
     local *main::_run_item=sub {
         my ($number,$item)=@_;$item->{status}='complete';

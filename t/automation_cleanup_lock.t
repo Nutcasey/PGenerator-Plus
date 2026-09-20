@@ -1,6 +1,6 @@
 # Regression for PR 14 test report P16, P19 and P29: a restoration that can
 # never succeed must not hold the TV forever, and a parked failure must give
-# the TV back the way a safe Pause does.
+# the TV back after current-mode safety cleanup.
 use strict;
 use warnings;
 no warnings qw(once redefine);
@@ -163,8 +163,9 @@ for my $change (qw(firmware input)) {
  main::_park_interrupted('post-readings-done');
  my $run=run_json();
  is($run->{status},'interrupted','the failed batch stays resumable');
- ok(!$run->{viewing_restore_required},'the viewing context is restored at park');
- is($modes{hdr10},'hdrCinema','the original HDR10 mode is back');
+ ok(!$run->{viewing_restore_required},'failure park clears the original-viewing restoration obligation');
+ is($modes{hdr10},'hdrFilmMaker','failure keeps the current HDR10 picture mode');
+ ok(!-f "$store/execution.json",'verified failure cleanup releases ownership');
  ok(!$run->{cleanup_required} && !main::webui_automation_cleanup_required($run),'no manual Retry cleanup is needed');
  ok($run->{pause_context_released},'resume will recreate the temporary device state');
 }
@@ -174,8 +175,8 @@ for my $change (qw(firmware input)) {
  $tv_down=1;
  main::_park_interrupted('post-readings-done');
  my $run=run_json();
- ok($run->{viewing_restore_required},'an unreachable TV keeps the restoration pending');
- ok($run->{cleanup_required},'and cleanup is still required');
+ ok(!$run->{viewing_restore_required},'failure never reconnects just to restore original modes');
+ ok(!$run->{cleanup_required},'already acknowledged cleanup needs no further TV request');
 }
 {
  fresh('p29-outcome');

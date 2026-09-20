@@ -19,7 +19,7 @@ Build & release
 Conventions
 - Keep comment density in the 12–19% range (repo norm).
 - Python lives in usr/bin/ (meter/result helpers); Bash scripts drive the image pipeline.
-- Stop keeps the current signal and picture mode. Stop workers, release the meter, confirm calibration exit and restore TPC/GSR; do not restore original picture settings or tour other signal modes. Show cleanup progress and retain ownership if required cleanup fails.
+- Stop and automatic failure keep the current signal and picture mode. Stop workers, release the meter, confirm calibration exit and restore TPC/GSR; do not restore original picture settings or tour other signal modes. Show cleanup progress and retain ownership if required cleanup fails.
 
 Calibration logging
 - Every log must provide important detail; every word earns its place.
