@@ -630,8 +630,19 @@ test('noise_floor_clear_button', () => {
   assert(/display:none/.test(btn[0]), 'clear button must start hidden (floor defaults to Off)');
   assert(/aria-label=/.test(btn[0]), 'clear button needs an accessible name');
   setFormula({ value: 'perceptual' });
-  // Floor on: availability update must reveal the button.
-  const clear = { style: {} };
+  // The clear handler mutates the mode element IN PLACE (getElementById), so
+  // the stub must be one shared mutable object — replacing __noiseMode per
+  // assignment would make the handler write a discarded object. Declared at
+  // the top and pinned to 'flat' so every assertion below sees a defined
+  // mode regardless of what an earlier test left behind.
+  const modeStub = (globalThis.__noiseMode && typeof globalThis.__noiseMode === 'object') ? globalThis.__noiseMode : { value: 'flat' };
+  globalThis.__noiseMode = modeStub;
+  modeStub.value = 'flat';
+  // Floor on: availability update must reveal the button. The stub mirrors
+  // the real button: dataset exists on every DOM element, and the updater
+  // caches the authored HTML title in it — without dataset the stub would
+  // skip the title branch the real DOM always takes.
+  const clear = { style: {}, dataset: {}, title: 'Set the noise floor to Off' };
   globalThis.__noiseClear = clear;
   globalThis.__noiseFloor = { value: '0.5', style: {} };
   globalThis.__noiseLabel = { style: {}, title: 'Perceptual noise floor tooltip: shadow gain applies.', dataset: {} };
@@ -652,6 +663,43 @@ test('noise_floor_clear_button', () => {
   const before2 = __noiseChangeCalls;
   S.meterOnRgbBalanceNoiseFloorClear();
   assert(__noiseChangeCalls === before2, 'missing input: clear must be a no-op');
+  // Empirical activation sources (UX round 6): empirical mode with an EMPTY
+  // field annotates from scatter alone, so (a) the × must be visible there —
+  // a field-only gate hid the only one-tap Off — and (b) × must flip the mode
+  // back to Flat, or clearing the field leaves the annotation on and the
+  // button visibly does nothing.
+  modeStub.value = 'empirical';
+  globalThis.__noiseFloor = { value: '', style: {} };
+  S.meterUpdateNoiseFloorControlAvailability();
+  assert(clear.style.display === '', 'empirical + empty field: × must be visible (it is the only one-tap Off)');
+  assert(/Flat/.test(clear.title), 'empirical: × title describes the real action (clear field + mode back to Flat)');
+  modeStub.value = 'flat';
+  globalThis.__noiseFloor = { value: '0.5', style: {} };
+  S.meterUpdateNoiseFloorControlAvailability();
+  assert(/Off/.test(clear.title), 'flat: × title stays the authored one');
+  modeStub.value = 'empirical';
+  globalThis.__noiseFloor = { value: '0.5', style: {} };
+  const before3 = __noiseChangeCalls;
+  S.meterOnRgbBalanceNoiseFloorClear();
+  assert(globalThis.__noiseFloor.value === '', 'empirical clear must empty the input');
+  assert(modeStub.value === 'flat', 'empirical clear must switch the mode to Flat — field-only clear left the annotation on');
+  assert(__noiseChangeCalls === before3 + 1, 'empirical clear must trigger the redraw path once');
+  // The coverage status is a Flat-invisible element: flipping the mode via ×
+  // (outside the select's own onchange) must refresh it or '· N points
+  // measured' lingers under a mode that annotates nothing.
+  const statusStub = { style: {}, textContent: '· 2 points measured' };
+  globalThis.__modeStatus = statusStub;
+  modeStub.value = 'empirical';
+  globalThis.__noiseFloor = { value: '0.5', style: {} };
+  S.meterOnRgbBalanceNoiseFloorClear();
+  assert(statusStub.style.display === 'none', 'clear must hide the empirical coverage status (flat mode shows nothing)');
+  globalThis.__modeStatus = null;
+  // Flat mode clear must NOT touch the mode select value.
+  modeStub.value = 'flat';
+  globalThis.__noiseFloor = { value: '0.4', style: {} };
+  S.meterOnRgbBalanceNoiseFloorClear();
+  assert(modeStub.value === 'flat', 'flat clear leaves mode at flat');
+  modeStub.value = 'flat';
   globalThis.__noiseClear = null;
   globalThis.__noiseFloor = null;
 });

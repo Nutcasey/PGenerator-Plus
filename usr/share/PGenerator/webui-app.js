@@ -10003,11 +10003,29 @@ function meterUpdateNoiseFloorControlAvailability(){
  target.title=(applies&&target.dataset&&target.dataset.activeTitle)?target.dataset.activeTitle
   :'Noise floor applies to the Perceptual RGB bal formula only — switch RGB bal to Perceptual to use it. The saved value is kept.';
  // One-tap return to Off: clearing a typed number by hand is fiddly on a
- // touch screen, so show a × only when the floor is actually on. Dim it
+ // touch screen, so show a × whenever the annotation CAN be live. Gate on
+ // every activation source, not the typed field (the round-4 lesson applied
+ // to this sibling): Empirical mode with an EMPTY field annotates from
+ // scatter alone, and a field-only gate hid the only one-tap Off — the
+ // operator had to discover the mode select to stop the annotation. Dim it
  // with the rest of the row when the floor is inert — a lone bright control
  // in a dimmed row reads as live.
+ const empiricalMode=(meterRgbBalanceNoiseFloorMode()==='empirical');
  const clear=document.getElementById('meterRgbBalanceNoiseFloorClear');
- if(clear&&clear.style){ clear.style.display=applied>0?'':'none'; clear.style.opacity=applies?'':'0.45'; }
+ if(clear&&clear.style){
+  clear.style.display=(applied>0||empiricalMode)?'':'none';
+  clear.style.opacity=applies?'':'0.45';
+  // In Empirical mode the button does more than empty the field (see
+  // meterOnRgbBalanceNoiseFloorClear), so the hover text must describe the
+  // actual action. Cache the authored HTML title once — one source of truth,
+  // same pattern as the field label's activeTitle above.
+  if(clear.dataset){
+   if(!clear.dataset.authoredTitle) clear.dataset.authoredTitle=clear.title;
+   clear.title=empiricalMode
+    ? 'Turns the noise annotation off: clears the typed floor and switches the mode back to Flat (scatter history is kept).'
+    : (clear.dataset.authoredTitle||'');
+  }
+ }
  // Highlight the preset whose value equals the applied floor, so the button
  // row answers 'which one is in play' (a typed 0.35 matches none, which is
  // itself information). aria-pressed carries the same state to AT. No
@@ -10059,12 +10077,24 @@ function meterApplyNoiseFloorPreset(value){
  meterOnRgbBalanceNoiseFloorChange();
 }
 // Clear the noise floor back to Off and redraw the annotation (chart band,
-// hover tooltips, live bars) exactly like an operator edit would.
+// hover tooltips, live bars) exactly like an operator edit would. 'Off' must
+// mean the ANNOTATION stops, not just the field empties: in Empirical mode a
+// field-only clear leaves every point annotating from its own scatter, so the
+// × — whose whole promise is one-tap Off — would visibly do nothing. Switch
+// the mode back to Flat too (field empty + flat = annotation off). Scatter
+// history is deliberately NOT wiped: returning to Empirical later keeps the
+// measured points, and the invalidation paths own history lifecycle.
 function meterOnRgbBalanceNoiseFloorClear(){
  const input=document.getElementById('meterRgbBalanceNoiseFloor');
  if(!input) return;
  input.value='';
+ const mode=document.getElementById('meterNoiseFloorMode');
+ if(mode&&mode.value==='empirical') mode.value='flat';
  meterOnRgbBalanceNoiseFloorChange();
+ // The mode may have just flipped to Flat outside the mode select's own
+ // handler: refresh the coverage status or '· N points measured' lingers
+ // under a Flat mode that shows nothing.
+ try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
 }
 // Commit-time normalization: the effective floor (meterRgbBalanceNoiseFloor)
 // caps at 10 and resolves non-positive/non-finite input to Off, but the field
