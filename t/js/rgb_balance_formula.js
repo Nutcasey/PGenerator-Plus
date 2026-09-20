@@ -1143,6 +1143,23 @@ test('empirical_floor_from_repeat_scatter', () => {
   S.meterRecordReadingNoise({ X: 1, Y: 1, Z: 1.2 }, step2);
   assertClose(S.meterStepNoiseSigma(S.meterStepNoiseKey(step2)), sigmaBefore, 1e-12,
     'duplicate XYZ poll must not add a sample');
+  // BUT identical XYZ with a NEW timestamp is a genuine repeat measurement
+  // (bench: settled panel + i1 returns bit-identical readings for a whole
+  // second series run; timestamp-blind dedupe pinned 'pass 1 done' forever).
+  const valsBefore = S.meterNoiseHistoryStore().get(S.meterStepNoiseKey(step2)).vals.length;
+  S.meterRecordReadingNoise({ X: 1, Y: 1, Z: 1.2, timestamp: 999 }, step2);
+  assert(S.meterNoiseHistoryStore().get(S.meterStepNoiseKey(step2)).vals.length === valsBefore + 1,
+    'identical XYZ with new timestamp records a second sample');
+  // σ==0 from identical repeats: floor falls back to typed (design kept) and
+  // the note says the meter cannot resolve noise here, not 'measured scatter'.
+  const stepZero = { name: 'zeroσ%' };
+  globalThis.__liveBal = { R: 100, G: 100, B: 100, gain: 1 };
+  S.meterRecordReadingNoise({ X: 5, Y: 50, Z: 55, timestamp: 1 }, stepZero);
+  S.meterRecordReadingNoise({ X: 5, Y: 50, Z: 55, timestamp: 2 }, stepZero);
+  assert(S.meterEmpiricalNoiseFloorFor(stepZero) === null,
+    'σ==0 (all-identical repeats) falls back to typed floor');
+  assert(S.meterNoiseFloorSourceNote(stepZero).includes('identical readings'),
+    'σ==0 note names quantization, not measured scatter');
   // Gates: non-greyscale and non-real readings record nothing.
   globalThis.__recIsGrey = false;
   globalThis.__liveBal = { R: 105, G: 95, B: 100, gain: 1 };

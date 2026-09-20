@@ -14120,14 +14120,19 @@ function meterRecordReadingNoise(reading,step){
   const store=meterNoiseHistoryStore();
   let h=store.get(key);
   if(!h){ h={vals:[]}; store.set(key,h); }
-  // Replace the last sample when it carries identical XYZ — the same poll
-  // result re-delivered (series cache refresh, re-apply) is one measurement,
-  // not evidence of repeatability.
+  // Collapse poll RE-DELIVERY only: identical XYZ AND identical timestamp is
+  // the same measurement served again by the series cache. Identical XYZ
+  // with a NEW timestamp is a genuine repeat measurement — bench-proven on
+  // a settled panel+colorimeter that a full second series run is bit-
+  // identical to the first, so timestamp-blind dedupe silently discarded
+  // the operator's 'run it twice' evidence and pinned the UI at 'pass 1'.
   const lastXYZ=h.lastXYZ;
   const xyz=[reading.X,reading.Y,reading.Z];
-  if(lastXYZ&&lastXYZ.length===3&&lastXYZ.every((v,i)=>v===xyz[i])) return;
+  const ts=Number(reading.timestamp)||0;
+  if(lastXYZ&&lastXYZ.length===3&&lastXYZ.every((v,i)=>v===xyz[i])&&h.lastTS===ts) return;
   h.vals.push(sample);
   h.lastXYZ=xyz;
+  h.lastTS=ts;
   if(h.vals.length>METER_NOISE_HISTORY_MAX) h.vals.shift();
   // Keep the row's live 'N points measured' count honest as it grows.
   try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
@@ -14217,7 +14222,14 @@ function meterNoiseFloorSourceNote(stepOrReading){
   const h=meterNoiseHistoryStore().get(meterStepNoiseKey(stepOrReading));
   return h&&Array.isArray(h.vals)?h.vals.length:0;
  }catch(e){return 0;}})();
- if(n>=2) return ' · measured scatter ('+n+' readings)';
+ if(n>=2){
+  // '2 identical readings' is not 'measured scatter': σ==0 falls back to
+  // the typed floor (quantization, not repeatability), so say exactly that
+  // instead of implying the point earned its own floor.
+  const sig=(()=>{try{return meterStepNoiseSigma(meterStepNoiseKey(stepOrReading));}catch(e){return null;}})();
+  if(sig===0) return ' · '+n+' identical readings — meter cannot resolve its noise here; using typed floor';
+  return ' · measured scatter ('+n+' readings)';
+ }
  // 1 sample is NOT 'no history': the patch has been read, it needs ONE
  // more. Same bench-confusion as the row status, per-point flavor.
  if(n===1) return ' · 1 reading so far — one more gives this point its own floor; using typed floor';
