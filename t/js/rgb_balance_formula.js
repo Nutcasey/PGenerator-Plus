@@ -158,6 +158,8 @@ const BT709_XYZ2RGB = [
 // ReferenceError and every empirical floor silently reads null.
 const METER_NOISE_HISTORY_K = 2;
 const METER_NOISE_HISTORY_MAX = 12;
+// Sub-resolution bound mirror (source: webui-app.js meterEmpiricalNoiseFloorFor).
+const METER_NOISE_FLOOR_MIN = 0.01;
 let meterNoiseHistory = null;
 // meterReplaceReadings/meterRebuildReadingsIndex close over the readings
 // array + index vars; the sandbox must own them like the module does.
@@ -255,6 +257,7 @@ const S = sandboxFactory();
 let passed = 0, failed = 0;
 // Test-scope mirror of the sandbox/source noise-history constants (see STUBS).
 const METER_NOISE_HISTORY_K = 2;
+const METER_NOISE_FLOOR_MIN = 0.01;
 const results = [];
 function test(name, fn) {
   try {
@@ -1238,6 +1241,33 @@ test('empirical_floor_from_repeat_scatter', () => {
     'σ==0 (all-identical repeats) falls back to typed floor');
   assert(S.meterNoiseFloorSourceNote(stepZero).includes('identical readings'),
     'σ==0 note names quantization, not measured scatter');
+  // Sub-resolution scatter (review #22 finding 1): two NEAR-identical
+  // samples on a low-noise meter give a tiny positive σ; k·σ below the
+  // flat control's 0.01 L* resolution bound is quantization, not
+  // characterized scatter — the point must fall back to the typed floor
+  // and the note must say so, not claim 'measured scatter'.
+  const stepTiny = { name: 'tinyσ%' };
+  globalThis.__liveBal = { R: 100.000, G: 100.000, B: 100.000, gain: 1 };
+  S.meterRecordReadingNoise({ X: 6, Y: 60, Z: 66, timestamp: 1 }, stepTiny);
+  globalThis.__liveBal = { R: 100.002, G: 100.000, B: 100.000, gain: 1 };
+  S.meterRecordReadingNoise({ X: 6, Y: 60, Z: 66.0002, timestamp: 2 }, stepTiny);
+  const tinySig = S.meterStepNoiseSigma(S.meterStepNoiseKey(stepTiny));
+  assert(tinySig > 0 && METER_NOISE_HISTORY_K * tinySig < METER_NOISE_FLOOR_MIN,
+    'sub-minimum σ fixture (positive σ, k·σ < 0.01)');
+  assert(S.meterEmpiricalNoiseFloorFor(stepTiny) === null,
+    'k·σ below the 0.01 bound falls back to typed floor');
+  assertClose(S.meterRgbBalanceEffectiveNoiseFloor(stepTiny), 0.3, 1e-9,
+    'effective floor for sub-minimum-σ point is the typed flat value');
+  assert(S.meterNoiseFloorSourceNote(stepTiny).includes('cannot resolve its noise'),
+    'sub-minimum-σ note discloses the typed-floor fallback');
+  // A σ whose k·σ is AT/above the bound still earns its own floor.
+  const stepEdge = { name: 'edgeσ%' };
+  globalThis.__liveBal = { R: 99.995, G: 100.000, B: 100.000, gain: 1 };
+  S.meterRecordReadingNoise({ X: 7, Y: 70, Z: 77, timestamp: 1 }, stepEdge);
+  globalThis.__liveBal = { R: 100.005, G: 100.000, B: 100.000, gain: 1 };
+  S.meterRecordReadingNoise({ X: 7, Y: 70, Z: 77.0002, timestamp: 2 }, stepEdge);
+  assertClose(S.meterEmpiricalNoiseFloorFor(stepEdge), METER_NOISE_HISTORY_K * 0.01 / Math.SQRT2, 1e-9,
+    'σ just above the bound still produces its empirical floor');
   // Gates: non-greyscale and non-real readings record nothing.
   globalThis.__recIsGrey = false;
   globalThis.__liveBal = { R: 105, G: 95, B: 100, gain: 1 };
@@ -1323,6 +1353,14 @@ test('empirical_floor_from_repeat_scatter', () => {
   assert(S.meterLgTrimKeyAffectsPatch('colour_temperature') === true, 'snake colour temp invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('brightness') === true, 'brightness invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('contrast') === true, 'contrast invalidates');
+  // Panel-luminance keys (review #22 finding 2): the autocal panel-light
+  // writer already wipes ALL scatter on these; the generic LG commit path
+  // must agree, or the same physical change keeps stale scatter alive.
+  assert(S.meterLgTrimKeyAffectsPatch('backlight') === true, 'backlight invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('blackLevel') === true, 'blackLevel invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('blackLevelAdjust') === true, 'blackLevelAdjust invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('oledLight') === true, 'oledLight invalidates');
+  assert(S.meterLgTrimKeyAffectsPatch('black_frame_insertion') === false, 'BFI keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('hdmiRange') === false, 'hdmiRange keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('calibration_mode') === false, 'cal mode keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('') === false, 'empty key keeps history');
@@ -1398,9 +1436,13 @@ test('empirical_mode_control_wiring', () => {
   globalThis.__noiseMode = { value: 'flat' };
   S.meterUpdateNoiseFloorModeStatus();
   assert(statusEl.style.display === 'none', 'flat mode: status hidden');
-  // Markup must carry the element the updater writes to (id + aria-live).
-  const statusTag = /<span[^>]*id="meterNoiseFloorModeStatus"[^>]*aria-live="polite"[^>]*>/.exec(html);
-  assert(!!statusTag, 'status span exists in the mode row with aria-live');
+  // Markup must carry the element the updater writes to, and must NOT make
+  // it an aria-live region: the updater rewrites the text on every recorded
+  // sample, so a live region re-announces 'N points measured' on every poll
+  // during continuous reads (a11y review #22). Title carries the detail.
+  const statusTag = /<span[^>]*id="meterNoiseFloorModeStatus"[^>]*>/.exec(html);
+  assert(!!statusTag, 'status span exists in the mode row');
+  assert(!/aria-live/.test(statusTag[0]), 'status span is not an aria-live region (per-sample rewrites would spam AT)');
   // Rendered-measured pin (live bench): the span's max-width cap was inert
   // because inline boxes ignore max-width, and a clipped tail needs the
   // ellipsis trio. Markup must carry all three + max-width...

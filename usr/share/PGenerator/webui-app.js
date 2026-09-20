@@ -14408,11 +14408,15 @@ function meterStepNoiseSigma(key){
 function meterLgTrimKeyAffectsPatch(key){
  // Normalize camelCase (whiteBalanceRed, colorTemperature) by squashing
  // spaces: the real control key is 'colorTemperature', not 'color temp'.
- // hdmiRange/calibration-mode style plumbing keys simply do not match the
- // pattern — no exclusion clause needed (a previous 'hdmirange' guard was
- // dead code); the harness pins hdmiRange === false.
+ // The luminance family is measurement-affecting whether written as
+ // 'brightness' or as panel light (backlight/blackLevel/blackLevelAdjust/
+ // oledLight — the keys meterAutoCalWritePanelLight drives, which wipes ALL
+ // scatter on the same physical reasoning: panel luminance changes what
+ // every patch reads). hdmiRange/calibration-mode style plumbing keys
+ // simply do not match the pattern — no exclusion clause needed (a previous
+ // 'hdmirange' guard was dead code); the harness pins hdmiRange === false.
  const k=String(key||'').toLowerCase().replace(/[\s_-]+/g,'');
- return /whitebalance|brightness|contrast|colourtemp|colortemp/.test(k);
+ return /whitebalance|brightness|contrast|colourtemp|colortemp|backlight|blacklevel|oledlight/.test(k);
 }
 // Drop a step's scatter samples: the trim just changed what the patch
 // measures, so the old scatter describes a setting that no longer exists
@@ -14441,11 +14445,20 @@ function meterInvalidateAllStepNoise(){
 // distinct XYZ samples near black, and a 0-wide floor would blind the
 // annotation at exactly the points where the operator needs context —
 // the typed flat value is the safer default there.
+// Same sub-resolution bound the flat control enforces (see
+// meterRgbBalanceNoiseFloor: floors < 0.01 L* render an invisible band and
+// flag points at a resolution no meter can defend). A low-noise meter with
+// two near-identical samples yields a tiny positive σ; k·σ below this bound
+// is quantization noise, not characterized scatter, so the point falls back
+// to the typed floor exactly like the σ==0 case.
+const METER_NOISE_FLOOR_MIN=0.01;
 function meterEmpiricalNoiseFloorFor(stepOrReading){
  if(meterRgbBalanceNoiseFloorMode()!=='empirical') return null;
  const sigma=meterStepNoiseSigma(meterStepNoiseKey(stepOrReading));
  if(sigma==null||sigma===0) return null;
- return Math.min(10,METER_NOISE_HISTORY_K*sigma);
+ const floor=METER_NOISE_HISTORY_K*sigma;
+ if(floor<METER_NOISE_FLOOR_MIN) return null;
+ return Math.min(10,floor);
 }
 // Single definition of the EFFECTIVE pre-gain floor for one point:
 // empirical k·σ once that step has history, else the flat operator floor.
@@ -14470,11 +14483,12 @@ function meterNoiseFloorSourceNote(stepOrReading){
   return h&&Array.isArray(h.vals)?h.vals.length:0;
  }catch(e){return 0;}})();
  if(n>=2){
-  // '2 identical readings' is not 'measured scatter': σ==0 falls back to
-  // the typed floor (quantization, not repeatability), so say exactly that
-  // instead of implying the point earned its own floor.
+  // '2 identical readings' is not 'measured scatter': σ==0 (or a k·σ below
+  // the meter-resolution bound) falls back to the typed floor — quantization,
+  // not repeatability — so say exactly that instead of implying the point
+  // earned its own floor.
   const sig=(()=>{try{return meterStepNoiseSigma(meterStepNoiseKey(stepOrReading));}catch(e){return null;}})();
-  if(sig===0) return ' · '+n+' identical readings — meter cannot resolve its noise here; using typed floor';
+  if(sig===0||METER_NOISE_HISTORY_K*sig<METER_NOISE_FLOOR_MIN) return ' · '+n+' near-identical readings — meter cannot resolve its noise here; using typed floor';
   return ' · measured scatter ('+n+' readings)';
  }
  // 1 sample is NOT 'no history': the patch has been read, it needs ONE
@@ -15476,6 +15490,13 @@ function meterApplySingleReadResult(result,requestedStep){
     meterUpsertSeriesReading(rd,requestedStep);
     // Feed the empirical per-point noise history (no-op unless building
     // scatter samples; self-gated on greyscale + real measurement).
+    // Recorder sites are exactly the three commit paths (here, continuous
+    // read below, series poll in webui-workspace); the structural pins
+    // series_poll_feeds_and_keeps_noise_scatter / run_start_keeps_noise_scatter
+    // guard the replaces inside meterPollSeries/meterRunSeries only. The
+    // backend-AutoCal status replaces (meterAutoCalApplyStatus etc.) also
+    // wipe by default and record nothing today — if a recorder is ever wired
+    // into those paths, their replaces need keepNoiseHistory=true too.
     meterRecordReadingNoise(rd,requestedStep);
     // Auto-detect white reference from the canonical stamped series reading.
     const white=meterFindSeriesWhiteReading(meterReadings);

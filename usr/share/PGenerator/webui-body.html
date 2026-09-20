@@ -1370,8 +1370,12 @@ __PG_LOGO_DARK__
        <!-- Live state of the empirical scatter store: 'Empirical σ' selected
             but zero points measured behaves exactly like Flat, and until
             now nothing said so without hovering every point. Filled by
-            meterUpdateNoiseFloorModeStatus; hidden when empty/flat. -->
-       <span id="meterNoiseFloorModeStatus" style="display:none;font-size:.62rem;color:var(--text2);user-select:none;line-height:1.1;max-width:22ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" aria-live="polite"></span>
+            meterUpdateNoiseFloorModeStatus; hidden when empty/flat.
+            Deliberately NOT an aria-live region: the updater rewrites the
+            text on every recorded sample, so during continuous reads a live
+            region re-announces 'N points measured' each poll; sighted users
+            see the count and AT users get the full detail via the title. -->
+       <span id="meterNoiseFloorModeStatus" style="display:none;font-size:.62rem;color:var(--text2);user-select:none;line-height:1.1;max-width:22ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle"></span>
        <button type="button" id="meterRgbBalanceNoiseFloorClear" style="display:none;appearance:none;background:none;border:none;color:var(--text2);font-size:.9rem;line-height:1;padding:2px 4px;cursor:pointer;opacity:.8" title="Set the noise floor to Off" aria-label="Turn RGB balance noise floor off" onclick="meterOnRgbBalanceNoiseFloorClear()">&times;</button>
        <button type="button" id="meterRgbBalanceNoiseFloorHint" style="display:none;appearance:none;background:none;border:none;color:var(--orange,#e8b84b);font-size:.62rem;line-height:1.1;padding:2px 4px;cursor:pointer;text-decoration:underline;text-underline-offset:2px" title="The noise floor only annotates the Perceptual RGB bal view. Click to switch RGB bal to Perceptual now; the value is kept." aria-label="Noise floor inactive: click to switch RGB bal to Perceptual" onclick="meterSwitchToPerceptualRgbBalance()">Perceptual only — switch?</button>
       </span>
