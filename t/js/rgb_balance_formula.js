@@ -1179,8 +1179,15 @@ test('empirical_floor_from_repeat_scatter', () => {
   assert(S.meterNoiseFloorSourceNote({ name: 'note%' }) === ' · measured scatter (4 readings)',
     'measured point names its sample count');
   assert(S.meterNoiseFloorSourceNote({ name: 'nope%' }) ===
-    ' · no scatter history at this point yet — using typed floor; re-read this patch to measure it',
+    ' · no history at this point yet — using typed floor; re-read this patch to measure it',
     'fallback point says typed + names the repair');
+  // 1 sample is not 'no history': the patch WAS read; ask for exactly one
+  // more (bench: after a first series pass every point sat at 1 sample and
+  // the UI told the operator to start over).
+  S.meterNoiseHistoryStore().set('one%', { vals: [[0, 0, 0]] });
+  assert(S.meterNoiseFloorSourceNote({ name: 'one%' }) ===
+    ' · 1 reading so far — one more gives this point its own floor; using typed floor',
+    '1-sample point asks for one more, not a restart');
   globalThis.__noiseMode = { value: 'flat' };
   assert(S.meterNoiseFloorSourceNote(step) === '', 'flat mode: no source note');
   globalThis.__noiseMode = { value: 'empirical' };
@@ -1275,6 +1282,15 @@ test('empirical_mode_control_wiring', () => {
     'repair text is shorter than the 22ch-overflowing first version');
   assert(/re-read/i.test(statusEl.title), 'full explanation carried in the title');
   assert(statusEl.style.display === 'inline-block', 'empty-store hint is visible as inline-block (max-width applies)');
+  // Store holds ONLY 1-sample points after a first series pass: the repair
+  // is 'one more run', not 'no scatter — re-read'.
+  S.meterNoiseHistoryStore().clear();
+  S.meterNoiseHistoryStore().set('p1a', { vals: [[0, 0, 0]] });
+  S.meterNoiseHistoryStore().set('p1b', { vals: [[0.1, 0, 0]] });
+  S.meterUpdateNoiseFloorModeStatus();
+  assert(statusEl.textContent === '· pass 1 done — re-run', '1-sample store says re-run');
+  assert(/one more pass/i.test(statusEl.title), 'pass-1 title explains the next step');
+  // Mixed store: measured count leads, title mentions the pending points.
   S.meterNoiseHistoryStore().set('a', { vals: [[0, 0, 0], [0.1, 0, 0]] });
   S.meterUpdateNoiseFloorModeStatus();
   assert(statusEl.textContent === '· 1 point measured', 'one point: singular count');
@@ -1282,6 +1298,8 @@ test('empirical_mode_control_wiring', () => {
   S.meterNoiseHistoryStore().set('c', { vals: [[0, 0, 0]] });
   S.meterUpdateNoiseFloorModeStatus();
   assert(statusEl.textContent === '· 2 points measured', 'counts only points with >=2 samples');
+  assert(statusEl.title.includes('3 steps have 1 reading'),
+    'mixed store title reports the pending 1-sample steps (p1a,p1b,c)');
   globalThis.__noiseMode = { value: 'flat' };
   S.meterUpdateNoiseFloorModeStatus();
   assert(statusEl.style.display === 'none', 'flat mode: status hidden');

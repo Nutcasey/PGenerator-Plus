@@ -11855,16 +11855,24 @@ function meterUpdateNoiseFloorModeStatus(){
  let title='';
  try{
   if(meterRgbBalanceNoiseFloorMode()==='empirical'){
-   let n=0;
-   meterNoiseHistoryStore().forEach(h=>{ if(h&&Array.isArray(h.vals)&&h.vals.length>=2) n++; });
-   // Glance text must fit the span's own 22ch cap: the first version
-   // ('no scatter yet — re-read patches') measured 151px against a
-   // 121px box, and the ellipsis ate the repair verb ("re-rea...").
-   // Short form fits (97px) and keeps state + action; the full sentence
-   // lives in the tooltip for anyone who wants it.
-   text=n>0?('· '+n+(n===1?' point measured':' points measured')):'· no scatter — re-read';
-   title=n>0?('Per-point noise floors are live for '+n+' step'+(n===1?'':'s')+' this session; points without >=2 repeat readings still use the typed floor.')
-            :'Empirical mode with no repeat readings behaves like Flat. Re-read patches (or run a series twice) to build each point\'s scatter.';
+   let n=0, n1=0;
+   meterNoiseHistoryStore().forEach(h=>{
+    if(!h||!Array.isArray(h.vals)) return;
+    if(h.vals.length>=2) n++;
+    else if(h.vals.length===1) n1++;
+   });
+   // Glance text must fit the span's own 22ch cap (measured: 121px box,
+   // each string below <=110px). Three truthful states: measured, has
+   // pass-1 samples (the operator DID read the patch — saying 'no
+   // scatter, re-read' there is wrong and was bench-confusing), and
+   // nothing yet.
+   text=n>0?('· '+n+(n===1?' point measured':' points measured'))
+       :(n1>0?'· pass 1 done — re-run':'· no scatter — re-read');
+   title=n>0?('Per-point noise floors are live for '+n+' step'+(n===1?'':'s')+' this session'
+     +(n1>0?('; '+n1+' '+(n1===1?'step has':'steps have')+' 1 reading and '+(n1===1?'needs':'need')+' one more'):'')
+     +'. Points without >=2 repeat readings use the typed floor.')
+    :(n1>0?('First pass recorded one reading per step. One more pass over these steps gives each point its scatter; until then they use the typed floor.')
+           :'Empirical mode with no repeat readings behaves like Flat. Re-read patches (or run a series twice) to build each point\'s scatter.');
   }
  }catch(e){}
  el.textContent=text;
@@ -14210,7 +14218,10 @@ function meterNoiseFloorSourceNote(stepOrReading){
   return h&&Array.isArray(h.vals)?h.vals.length:0;
  }catch(e){return 0;}})();
  if(n>=2) return ' · measured scatter ('+n+' readings)';
- return ' · no scatter history at this point yet — using typed floor; re-read this patch to measure it';
+ // 1 sample is NOT 'no history': the patch has been read, it needs ONE
+ // more. Same bench-confusion as the row status, per-point flavor.
+ if(n===1) return ' · 1 reading so far — one more gives this point its own floor; using typed floor';
+ return ' · no history at this point yet — using typed floor; re-read this patch to measure it';
 }
 
 function meterReadingHasChromaticity(rd){
