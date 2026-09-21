@@ -77,6 +77,7 @@ jobs:
           node t/browser/automation_progress.cjs
           node t/browser/automation_history.cjs
           node t/browser/automation_refresh.cjs
+          node t/browser/automation_report_refresh.cjs
           node t/browser/automation_editor.cjs
           node t/browser/automation_settings_plan.cjs
           node t/browser/automation_review_fixes.cjs

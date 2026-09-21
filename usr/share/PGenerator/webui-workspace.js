@@ -8029,6 +8029,7 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries,options){
    meterRecoverSeries({
     series_id:null,
     snapshot_report:true,
+    _skip_chart_draw:summaryOnly,
     cache_key:snap.cache_key,
     type:snap.type,
     points:snap.points,
@@ -8052,6 +8053,15 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries,options){
    }
    if(!summaryOnly) await meterPrepareCurrentSeriesForReport();
    sectionHtml+=meterBuildCurrentSeriesReportSection(title,{key,notice,summaryOnly});
+   // Capture the chart's series while its saved context is installed. The
+   // finally block restores the operator's unrelated manual series.
+   if(typeof buildOpts.onSeries==='function')buildOpts.onSeries(entry,{
+    steps:meterSeriesSteps.map(step=>{
+     if(step.target_x!=null&&step.target_y!=null)return {...step};
+     const target=meterTargetChromaticityForReading(step);
+     return target?{...step,target_x:target.x,target_y:target.y}:{...step};
+    }),readings:meterReadings.slice()
+   });
   }
  } finally {
   if(previousReportContext===undefined)delete window._meterSnapshotReportContext;
@@ -8066,7 +8076,7 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries,options){
   if(typeof meterSeriesCacheDirtyKeys!=='undefined') Array.from(meterSeriesCacheDirtyKeys).forEach(key=>{if(!Object.prototype.hasOwnProperty.call(meterSeriesCache,key))meterSeriesCacheDirtyKeys.delete(key);});
   meterPersistSeriesCache();
   if(restore.key){
-   meterRestoreSeriesFromCache(restore.key);
+   meterRestoreSeriesFromCache(restore.key,{skipChartDraw:summaryOnly});
    if(restore.selectedName&&restore.pinned){
     const sel=(meterReadings||[]).find(r=>r&&r.name===restore.selectedName);
     if(sel) showColorReadingDetail(sel,{pin:true});

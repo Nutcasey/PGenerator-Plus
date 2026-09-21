@@ -13829,6 +13829,8 @@ function meterRecoverSeries(s){
  const recoveredChartKey=meterActiveSeriesKey;
  const recoveredReadings=Array.isArray(meterReadings)?[...meterReadings]:[];
  const drawRecoveredCharts=()=>{
+  // Report summaries need the recovered colour maths, not canvas paints.
+  if(s._skip_chart_draw) return;
   if(meterActiveSeriesKey!==recoveredChartKey||meterSeriesChartRevision!==recoveredChartRevision) return;
   if(recoveredReadings.length>0){
    const sorted=(type==='colors'||type==='saturations')?[...recoveredReadings]:[...recoveredReadings].sort((a,b)=>(a.ire||0)-(b.ire||0));
@@ -14288,7 +14290,8 @@ function meterCacheSeriesState(status,options){
 }
 
 function meterRestoreSeriesFromCache(key){
- const cached=meterResolveSeriesSnapshotFromCache(key,arguments[1]||{});
+ const options=arguments[1]||{};
+ const cached=meterResolveSeriesSnapshotFromCache(key,options);
  if(!cached||!cached.steps||cached.steps.length===0) return false;
  const sourceSnap=meterSeriesCache&&meterSeriesCache[key];
  if(sourceSnap&&sourceSnap.source_format==='hcfr-chc'&&sourceSnap.source_session_id) meterActiveHcfrSessionId=sourceSnap.source_session_id;
@@ -14327,7 +14330,8 @@ function meterRestoreSeriesFromCache(key){
   readings:restoredReadings,
   white_reading:restoredWhite,
   black_reading:restoredBlack,
-  _defer_cache_persist:true
+  _defer_cache_persist:true,
+  _skip_chart_draw:!!options.skipChartDraw
  });
  meterSharedSeriesId=null;
  return true;

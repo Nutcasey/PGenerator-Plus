@@ -1828,7 +1828,9 @@ function pgAutomationShowJob(view,runId,index,force=false){
  // itself rides the light 2 s run poll, so it never waits on the 472 KB job
  // fetch that the 18 Sep work deliberately slowed down.
  const cadence=(view==='calibration'||pgAutomationRunIsLive())?5000:30000;
- if(!state.loading&&!(state.settled&&state.data)&&(force||Date.now()-state.lastFetch>cadence))pgAutomationFetchJob(view,state);
+ const run=pgAutomation.current?.run;
+ if(run?.id===state.runId&&!pgAutomationTerminal(run)&&Number(run.active_item)===state.index)state.settled=false;
+ if(!state.loading&&(force||!(state.settled&&state.data))&&(force||Date.now()-state.lastFetch>cadence))pgAutomationFetchJob(view,state);
 }
 async function pgAutomationFetchJob(view,state){
  state.loading=true;state.lastFetch=Date.now();
@@ -1960,15 +1962,19 @@ function pgAutomationRunIsLive(){return !!pgAutomationLiveWorker();}
 // The job's live snapshot carries the patch under the meter as numbers
 // (current_ire and friends); the run's worker status only carries a display
 // string with the stage name glued on. Prefer the numbers.
+function pgAutomationLiveState(){
+ const run=pgAutomation.current?.run;
+ if(!run||pgAutomationTerminal(run)||run.active_item==null)return null;
+ return Object.values(pgAutomation.jobViews||{}).filter(state=>state&&state.runId===run.id
+  &&state.index===Number(run.active_item)&&state.data?.live&&state.data.active_stage===run.active_stage
+  &&(!run.stage_started_at||Number(state.data.stage_started_at)===Number(run.stage_started_at)))
+  .sort((a,b)=>b.lastFetch-a.lastFetch)[0]||null;
+}
 function pgAutomationLiveSnapshot(worker){
- for(const st of Object.values(pgAutomation.jobViews||{})){
-  const snap=st&&st.data&&st.data.live&&st.data.live.snapshot;
-  if(!snap||!snap.current_name)continue;
-  // Up to 5 s old against a 2 s worker status: trust the numbers only while
-  // they describe the patch the worker says it is on now.
-  if(!worker||String(snap.current_name)===String(worker.current_name))return snap;
- }
- return null;
+ const snap=pgAutomationLiveState()?.data?.live?.snapshot;
+ // A job snapshot can lag the status poll. Its numbers are authoritative only
+ // while both replies name the same patch of this run and stage.
+ return snap&&snap.current_name&&(!worker||String(snap.current_name)===String(worker.current_name))?snap:null;
 }
 // A running stage answers "how much longer" first. On tablet widths the quality
 // figure is dropped by CSS -- the chart carrying it is a few pixels below.
@@ -1981,13 +1987,16 @@ function pgAutomationLiveFigureHtml(count,average){
   +(average?'<span class="auto-section-figure-trail"> · ΔE '+pgAutomationEscape(average)+'</span>':'');
 }
 function pgAutomationPaintLiveFigures(){
- const states=Object.values(pgAutomation.jobViews||{});
- document.querySelectorAll('details.auto-section-running').forEach(section=>{
-  const el=section.querySelector('.auto-section-figure');
-  if(!el)return;
-  const key=section.dataset.sectionKey||'';
-  const live=states.map(st=>st&&st.sectionLive&&st.sectionLive[key]).find(Boolean)||{};
-  el.innerHTML=pgAutomationLiveFigureHtml(Number(live.count||0),live.average||'');
+ const active=pgAutomationLiveState();
+ Object.entries(pgAutomation.jobViews||{}).forEach(([view,state])=>{
+  pgAutomationJobTarget(view)?.querySelectorAll('details.auto-section-running').forEach(section=>{
+   const current=!!active&&state.runId===active.runId&&state.index===active.index
+    &&state.data.active_stage===active.data.active_stage&&state.data.stage_started_at===active.data.stage_started_at;
+   section.toggleAttribute('data-pg-live',current);
+   const el=section.querySelector('.auto-section-figure');if(!el||!current)return;
+   const live=state.sectionLive?.[section.dataset.sectionKey]||{};
+   el.innerHTML=pgAutomationLiveFigureHtml(Number(live.count||0),live.average||'');
+  });
  });
 }
 // Set the live mark from the poll that delivered it, then let the shared chart
@@ -1995,14 +2004,17 @@ function pgAutomationPaintLiveFigures(){
 function pgAutomationSyncLiveMark(){
  if(typeof meterLiveMarkSet!=='function')return;
  const worker=pgAutomationLiveWorker();
- if(!worker){meterLiveMarkSet(null);return;}
+ pgAutomationPaintLiveFigures();
+ const state=pgAutomationLiveState();
+ const entry=state?.entries?.find(entry=>entry.isLive);
+ const series=entry&&state.sectionSeries?.[entry.key];
+ if(!worker||!series){meterLiveMarkSet(null);return;}
  const run=pgAutomation.current&&pgAutomation.current.run;
  const held=['paused','interrupted','stopping'].includes((run&&run.status)||'');
- meterLiveMarkSet(meterLiveResolveStatusMark(pgAutomationLiveSnapshot(worker)||worker,pgAutomation.liveSteps,held?'held':null,pgAutomation.liveReadings));
+ meterLiveMarkSet(meterLiveResolveStatusMark(pgAutomationLiveSnapshot(worker)||worker,series.steps,held?'held':null,series.readings));
  // A re-render replaces the chart images even when the patch has not moved,
  // so the overlays are re-attached here rather than only when the mark changes.
  if(typeof meterLiveRefreshSurfaces==='function')meterLiveRefreshSurfaces();
- pgAutomationPaintLiveFigures();
  pgAutomationMarkLiveTableRow();
 }
 // The greyscale table lists measured patches only, so its live row is the most
@@ -2235,21 +2247,18 @@ async function pgAutomationRenderJobGraphs(view,state){
  const renderWidth=Math.max(1100,Math.ceil(target.offsetWidth||(host?host.offsetWidth:0)||0)+80);
  state.renderWidth=renderWidth;
  const scale=[renderWidth,window.devicePixelRatio||1,typeof pgDesktopZoom==='number'?pgDesktopZoom:1];
- const signature=JSON.stringify([entries,...scale]);if(signature===state.graphSignature)return;
+ const signature=JSON.stringify([entries,...scale]);
+ if(signature===state.graphSignature){pgAutomationPaintVerdict(view,state);return;}
  // Only the running stage's measurements can move mid-run, and rebuilding the
  // skeleton for them throws away every finished section's chart image. When
  // nothing structural changed, refresh that one stage in place instead.
  const structure=JSON.stringify([entries.map(e=>[e.key,e.name,e.phase,e.greyscale,e.isLive]),...scale]);
- if(state.graphStructure===structure&&(state.entries||[]).length&&target.querySelector('details.auto-section')){
-  state.entries=entries;state.graphSignature=signature;
-  pgAutomationRefreshLiveSection(view,state);
-  return;
- }
- state.graphStructure=structure;
- state.entries=entries;state.sectionBadges={};state.sectionLive={};
+ const reuse=state.graphStructure===structure&&(state.entries||[]).length&&target.querySelector('details.auto-section');
+ const changed=reuse?entries.filter(entry=>JSON.stringify(entry)!==JSON.stringify(state.entries.find(old=>old.key===entry.key))):entries;
  if(!entries.length){
   target.innerHTML='<p class="auto-muted">'+(observer?'No measurements for the current stage yet. '+pgAutomationEscape(pgAutomationStageLabel(data.active_stage||'Between stages'))+'. Previous-stage graphs are not shown as live.':!state.showBefore&&!state.showAfter?'Select a comparison to show graphs.':'No measured graph data is available for this selection yet.')+'</p>';
-  state.graphSignature=signature;state.verdictStats=[];state.totalReadings=0;
+  state.entries=entries;state.graphStructure=structure;state.graphSignature=signature;
+  state.sectionStats={};state.sectionBadges={};state.sectionLive={};state.verdictStats=[];state.totalReadings=0;
   pgAutomationPaintVerdict(view,state);pgAutomationRenderJobIndex(view,state);
   return;
  }
@@ -2258,32 +2267,53 @@ async function pgAutomationRenderJobGraphs(view,state){
  try{
   // Headline numbers for every stage, no canvas work. Charts are drawn later,
   // one section at a time, and only for sections somebody opened.
-  const html=await meterFullAutoCalBuildSnapshotReportSections(entries,{summaryOnly:true});
+  const series={};
+  const html=await meterFullAutoCalBuildSnapshotReportSections(changed,{summaryOnly:true,onSeries:(entry,value)=>{series[entry.key]=value;}});
   if(pgAutomation.jobViews[view]===state&&state.data===data){
    const template=document.createElement('template');template.innerHTML=html;
    const rendered=[...template.content.querySelectorAll('.report-section')];
-   const phaseRank={post:3,calibration:2,pre:1};
-   let total=0,verdict=null;
+   state.entries=entries;state.graphStructure=structure;
+   if(!reuse){state.sectionStats={};state.sectionBadges={};state.sectionLive={};state.sectionSeries={};}
+   Object.assign(state.sectionSeries,series);
    const built=rendered.map(section=>{
     const key=section.dataset.reportKey||'';
     const entry=entries.find(candidate=>candidate.key===key)||{};
     const parts=pgAutomationReportSectionParts(section);
     const count=Number(parts.count||0);
-    if(count)total+=count;
-    if(entry.greyscale&&count&&(!verdict||(phaseRank[entry.phase]||0)>verdict.rank))verdict={rank:phaseRank[entry.phase]||0,stats:parts.stats};
+    state.sectionStats[key]={count,stats:parts.stats};
     const average=pgAutomationStatValue(parts.stats,/^Average (ΔE|Delta)/i);
     state.sectionBadges[key]=average?'ΔE '+average:(count?count+' readings':'');
-    if(entry.isLive)state.sectionLive[key]={count:count,average:average||''};
+    if(entry.isLive)state.sectionLive[key]={count,average:average||''};
+    if(reuse){
+     const existing=[...target.querySelectorAll('details.auto-section')].find(el=>el.dataset.sectionKey===key);
+     if(existing){
+      // A folded section keeps its charts, but must redraw when reopened.
+      delete existing.dataset.chartsReady;
+      const summary=existing.querySelector('.report-summary'),fresh=section.querySelector('.report-summary');
+      if(summary&&fresh)summary.replaceWith(fresh);
+      const figure=existing.querySelector('.auto-section-figure');
+      if(figure)figure.innerHTML=entry.isLive?pgAutomationLiveFigureHtml(count,average):pgAutomationEscape(count?count+' readings':'No readings');
+     }
+    }
     return pgAutomationSection(key,entry.name||key,count?count+' readings':'No readings',parts.html,
      {defaultOpen:true,live:!!entry.isLive,figureHtml:entry.isLive?pgAutomationLiveFigureHtml(count,average):''});
    });
    // A renderer response with no sections in it is shown whole; measurements
    // are never dropped because this panel could not take them apart.
-   target.innerHTML=rendered.length?built.join(''):html;
+   if(!reuse)target.innerHTML=rendered.length?built.join(''):html;
+   const phaseRank={post:3,calibration:2,pre:1};
+   let total=0,verdict=null;
+   entries.forEach(entry=>{
+    const parts=state.sectionStats[entry.key];if(!parts)return;
+    total+=parts.count;
+    if(entry.greyscale&&parts.count&&(!verdict||(phaseRank[entry.phase]||0)>verdict.rank))verdict={rank:phaseRank[entry.phase]||0,stats:parts.stats};
+   });
    state.graphSignature=signature;state.totalReadings=total;state.verdictStats=verdict?verdict.stats:[];
    const measured=pgAutomationStatValue(state.verdictStats,/^Average (ΔE|Delta)/i);
-   if(measured){pgAutomation.jobFigures=pgAutomation.jobFigures||{};pgAutomation.jobFigures[state.runId+':'+state.index]='ΔE '+measured;}
-   pgAutomationPaintVerdict(view,state);pgAutomationRenderJobIndex(view,state);
+   pgAutomation.jobFigures=pgAutomation.jobFigures||{};
+   if(measured)pgAutomation.jobFigures[state.runId+':'+state.index]='ΔE '+measured;
+   else delete pgAutomation.jobFigures[state.runId+':'+state.index];
+   pgAutomationPaintVerdict(view,state);pgAutomationRenderJobIndex(view,state);pgAutomationSyncLiveMark();
   }
  }catch(e){if(pgAutomation.jobViews[view]===state)target.textContent='Unable to summarise measurements: '+e.message;}
  finally{
@@ -2305,16 +2335,6 @@ function pgAutomationDrainReports(){
   const section=host?[...host.querySelectorAll('details.auto-section')].find(el=>el.dataset.sectionKey===pending.key):null;
   if(section&&section.open)pgAutomationRenderSectionCharts(pending.view,section);
  });
-}
-function pgAutomationRefreshLiveSection(view,state){
- const host=pgAutomationJobTarget(view);
- const entry=(state.entries||[]).find(candidate=>candidate.isLive);
- if(!host||!entry){pgAutomationSyncLiveMark();return;}
- const section=[...host.querySelectorAll('details.auto-section')].find(el=>el.dataset.sectionKey===entry.key);
- if(section&&section.open){
-  delete section.dataset.chartsReady;
-  pgAutomationRenderSectionCharts(view,section);
- } else pgAutomationSyncLiveMark();
 }
 // Draw one stage's charts. Each call drives the real calibration canvases
 // off-screen through the shared report mutex, so it must stay one at a time.
@@ -2339,7 +2359,8 @@ async function pgAutomationRenderSectionCharts(view,sectionEl){
  document.body.style.setProperty('--automation-report-width',(state.renderWidth||1100)+'px');
  document.body.classList.add('pg-automation-report-render');
  try{
-  const html=await meterFullAutoCalBuildSnapshotReportSections([entry]);
+  let series=null;
+  const html=await meterFullAutoCalBuildSnapshotReportSections([entry],{onSeries:(_entry,value)=>{series=value;}});
   if(pgAutomation.jobViews[view]===state&&state.data===data&&sectionEl.isConnected){
    const template=document.createElement('template');template.innerHTML=html;
    const rendered=template.content.querySelector('.report-section');
@@ -2347,13 +2368,12 @@ async function pgAutomationRenderSectionCharts(view,sectionEl){
    body.innerHTML=parts?parts.html:html;
    if(rendered)pgAutomationFoldCharts(body);
    if(entry.isLive){
-    // These charts were drawn from the series still in the meter globals, so
-    // capture it here: it is what the mark resolves a patch name against.
+    // The shared renderer has already restored the manual series. Use only
+    // the snapshot captured while this chart's saved context was installed.
     state.sectionLive=state.sectionLive||{};
     state.sectionLive[key]={count:Number(parts&&parts.count)||0,
      average:(parts?pgAutomationStatValue(parts.stats,/^Average (ΔE|Delta)/i):'')||''};
-    if(typeof meterSeriesSteps!=='undefined'&&Array.isArray(meterSeriesSteps))pgAutomation.liveSteps=meterSeriesSteps.slice();
-    if(typeof meterReadings!=='undefined'&&Array.isArray(meterReadings))pgAutomation.liveReadings=meterReadings.slice();
+    if(series){state.sectionSeries=state.sectionSeries||{};state.sectionSeries[key]=series;}
    }
    sectionEl.dataset.chartsReady='1';
    if(entry.isLive)pgAutomationSyncLiveMark();
