@@ -15249,13 +15249,27 @@ sub webui_automation_control (@) {
  return $response;
 }
 
+# "The TV is free" and "a rival owns the TV" are different answers on Resume.
+# An absent claim (undef, e.g. released by failure cleanup) is free to
+# re-acquire; a claim this run already owns is 'ok' to refresh; any claim held
+# by a different run_id or token is a 'rival'. Only the absent case differs
+# from the historical guard, which stranded an interrupted run whose own claim
+# cleanup had already released.
+sub webui_automation_resume_claim_decision (@) {
+ my ($execution,$run)=@_;
+ return "ok" if(ref($execution) ne "HASH");
+ return "rival" if(($execution->{run_id}||"") ne ($run->{id}||"") || !$run->{token} || ($execution->{token}||"") ne $run->{token});
+ return "ok";
+}
+
 sub webui_automation_reconnect_for_resume (@) {
  my ($run)=@_;
- # Only the run holding the execution claim may reconnect on Resume. The
- # ordinary Connect button remains guarded against competing operations.
+ # Only a genuinely competing run is turned away here; a run whose own claim
+ # cleanup released reconnects and re-acquires the free TV. The ordinary
+ # Connect button remains guarded against competing operations.
  my $execution=&webui_automation_read_execution();
  return {status=>"error",error_code=>"automation-owner-mismatch",message=>"Another run owns the TV; this run cannot resume."}
-  if(ref($execution) ne "HASH" || ($execution->{run_id}||"") ne ($run->{id}||"") || !$run->{token} || ($execution->{token}||"") ne $run->{token});
+  if(&webui_automation_resume_claim_decision($execution,$run) eq "rival");
  my $lg=PGAutomation::decode_json(&webui_lg_status_json("Automation resume"))||{};
  return {status=>"ok"} if($lg->{connected} && !$lg->{disconnected});
  return {status=>"error",error_code=>"tv-not-paired",message=>"The saved TV pairing is unavailable. Stop this queue and pair the TV before restarting it."} if(!$lg->{paired});
@@ -15320,16 +15334,33 @@ sub webui_automation_control_body (@) {
   return &webui_automation_json($readiness) if(!$readiness->{ready});
   return &webui_automation_error("Unable to write automation control","write-failed")
    if(!PGAutomation::write_json_atomic(PGAutomation::run_dir($run_id)."/control.json",{request=>"none",updated_at=>PGAutomation::now()},0664));
+  my $prior_status=$run->{status};
   $run->{status}="starting"; delete($run->{failure}); delete($run->{stop_relaunches}); $run->{resumed_at}=PGAutomation::now(); $run->{runner_pid}=0;
   $run->{heartbeat}=undef;
   $run->{active_stage}="readiness"; $run->{stage_started_at}=$run->{resumed_at};
   $run->{worker_status}={message=>"Starting the resumed runner; TV and meter checks precede measurement patterns."};
   my ($updated,$update_error)=&webui_automation_write_locked(PGAutomation::run_dir($run_id)."/run.json",$run);
   return &webui_automation_error("Unable to update automation run".($update_error ? ": $update_error" : ""),"write-failed") if(!$updated);
-  my ($execution_updated,$execution_error)=&webui_automation_write_locked(PGAutomation::base_dir()."/execution.json",{owner=>"automation",run_id=>$run_id,token=>$run->{token},pid=>0,status=>"starting",updated_at=>PGAutomation::now()});
-  if(!$execution_updated) {
-   $run->{status}="paused"; $run->{runner_pid}=0;
-   &webui_automation_write_locked(PGAutomation::run_dir($run_id)."/run.json",$run);
+  # Claim the single TV worker atomically. reconnect_for_resume already turned
+  # away a rival, but a second Resume could have raced past it into the same
+  # free claim, so re-check ownership under the lock and never overwrite a
+  # different run's claim.
+  my $claim_conflict;
+  my ($execution_updated,undef,$execution_error)=PGAutomation::with_lock(PGAutomation::base_dir()."/execution.json",sub {
+   my ($current)=@_;
+   if(&webui_automation_resume_claim_decision($current,$run) eq "rival") {
+    $claim_conflict=1; return undef;
+   }
+   return {owner=>"automation",run_id=>$run_id,token=>$run->{token},pid=>0,status=>"starting",updated_at=>PGAutomation::now()};
+  });
+  if($claim_conflict || !$execution_updated) {
+   # run.json is already at "starting"; put it back. If even that write fails
+   # the run is stranded resumable-looking but wedged, so say so plainly rather
+   # than return the clean rival/write-failed message the caller would retry.
+   $run->{status}=$prior_status; $run->{runner_pid}=0;
+   my ($reverted,$revert_error)=&webui_automation_write_locked(PGAutomation::run_dir($run_id)."/run.json",$run);
+   return &webui_automation_error("Resume could not be undone after the TV claim was lost; the run may show Starting until it is Stopped.".($revert_error ? " ($revert_error)" : "")." Use Stop, then start a fresh run.","resume-state-uncertain") if(!$reverted);
+   return &webui_automation_error("Another run owns the TV; this run cannot resume.","automation-owner-mismatch") if($claim_conflict);
    return &webui_automation_error("Unable to claim automation execution".($execution_error ? ": $execution_error" : ""),"write-failed");
   }
   if(!&webui_automation_launch_runner($run_id,$run->{token})) {
