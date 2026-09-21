@@ -21991,6 +21991,7 @@ function pgInitialRetry(name,fn,delays){
  initCardCollapse();
  pgSyncCardCollapseForLayout();
  await loadConfig(true);
+ try{ idleCardInit(); }catch(e){ console.error('idle card init failed',e); }
  await diagRefreshCustomAssets();
  // Fire the header-card loads (resolution, temperature, version) on a
  // tight retry schedule so the info grid populates within ~5s even

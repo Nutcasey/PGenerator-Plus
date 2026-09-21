@@ -3941,7 +3941,9 @@ sub _stop_active {
     if (_run()->{preflight_restore_required} && !_restore_preflight_context()) {
         _log_action('Preflight restoration still requires cleanup: '.($::LAST_ERROR||'unconfirmed'));
     }
-    my $visible=_api('POST','/api/pattern',{name=>'gray50'},1,_cleanup_window());
+    # End on the idle frame (black, or stabilisation when a meter is set up for
+    # it) so the idle information card can take over once the delay passes.
+    my $visible=_api('POST','/api/pattern',{name=>'stop'},1,_cleanup_window());
     _log_action('Stop idle pattern: '.($visible->{status}||'unavailable'));
     $STOPPING = 0;
 }
@@ -4823,8 +4825,8 @@ sub _restore_preflight_context {
             if ($switched && $now_signal ne '') {
                 $ACTIVE_ITEM=$context->{modes}{$now_signal}||$context->{original};
                 _preflight_wait_config($last,_api('POST','/api/config',$last,1,0));
-                my $pattern=_api('POST','/api/pattern',{name=>'gray50',signal_mode=>$now_signal},1,0);
-                die 'Unable to display neutral pattern after preflight restoration' if !_response_ok($pattern);
+                my $pattern=_api('POST','/api/pattern',{name=>'stop',signal_mode=>$now_signal},1,0);
+                die 'Unable to display the idle pattern after preflight restoration' if !_response_ok($pattern);
             }
             die 'Unable to persist completed context restoration' if !ref(_update_run(sub {
                 $_[0]{$flag}=JSON::PP::false;
@@ -4836,8 +4838,8 @@ sub _restore_preflight_context {
         }
         $ACTIVE_ITEM=$context->{original};
         _preflight_wait_config($context->{config},_api('POST','/api/config',$context->{config},1,0));
-        my $pattern=_api('POST','/api/pattern',{name=>'gray50',signal_mode=>$context->{config}{signal_mode}},1,0);
-        die 'Unable to display neutral pattern after preflight restoration' if !_response_ok($pattern);
+        my $pattern=_api('POST','/api/pattern',{name=>'stop',signal_mode=>$context->{config}{signal_mode}},1,0);
+        die 'Unable to display the idle pattern after preflight restoration' if !_response_ok($pattern);
         my $final_signal=$context->{config}{signal_mode};
         my $live=eval { _preflight_read_mode($final_signal,$context->{mode_readback_unavailable}) };
         $confirm_identity->($context->{original},$final_signal,undef,$@||"No independent current-mode response\n") if ref($live) ne 'HASH';
@@ -4873,7 +4875,7 @@ sub _restore_preflight_context {
         $ACTIVE_ITEM=$context->{original};
         my $output_restored=eval {
             _preflight_wait_config($context->{config},_api('POST','/api/config',$context->{config},1,0));
-            _api('POST','/api/pattern',{name=>'gray50',signal_mode=>$context->{config}{signal_mode}},1,0);
+            _api('POST','/api/pattern',{name=>'stop',signal_mode=>$context->{config}{signal_mode}},1,0);
             1;
         };
         my $warning="Original picture modes were not restored because $identity_changed since the batch started. Check each signal's picture mode on the TV."

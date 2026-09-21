@@ -47,7 +47,8 @@ sub fake_api {
         return {status=>'ok'};
     }
     return {ok=>1} if $path eq '/api/ping';
-    if($path eq '/api/pattern') {die 'Non-neutral preflight patch' if ($payload->{name}||'') ne 'gray50';return {status=>'ok'};}
+    # Preflight shows neutral grey; restoration ends on the idle frame.
+    if($path eq '/api/pattern') {die 'Unexpected preflight pattern' if ($payload->{name}||'')!~/^(?:gray50|stop)$/;return {status=>'ok'};}
     if($path eq '/api/lg/picture-settings') {
         return main::_api_once($method,$path,$payload,0) if $use_real_transport && $payload->{ignore_calibration_picture_mode};
         return tv_response();
