@@ -123,6 +123,7 @@ sub parse_modetest_connectors {
   if($line=~/^\t\tvalues:\s*(.*)$/) { $entry->{values}=$1; next; }
   if($line=~/^\t\tvalue:\s*(.*)$/) {
    my $value=_trim($1);
+   $entry->{value_read}=1;
    $entry->{value}=$value if($value ne "");
    $in_blob=($value eq "") ? 1 : 0;
    next;
@@ -318,11 +319,13 @@ sub sent_signal {
  ($format)=$enum->("output format") if(!defined($format));
  $out{format}=_format_label($format) if(defined($format));
  my ($colorimetry)=$enum->("Colorimetry");
+ ($colorimetry)=$enum->("Colorspace") if(!defined($colorimetry));
  $out{colorimetry}=$COLORIMETRY{$colorimetry}||"Other" if(defined($colorimetry));
  my ($range)=$enum->("rgb quant range");
  # YCbCr is always sent at limited (video) range whatever the RGB property says.
  $out{range}=(defined($format) && $format != 0) ? "Limited"
-  : defined($range) ? ($range==2 ? "Full" : "Limited") : undef;
+  : defined($range) && $range==2 ? "Full"
+  : defined($range) && $range==1 ? "Limited" : undef;
  # Deep colour shows up as a faster pixel rate than the mode's own clock.
  my ($rate)=$enum->("active pixel rate");
  if(defined($rate) && ref($mode) eq "HASH" && $mode->{clock_khz}) {
@@ -337,27 +340,40 @@ sub sent_signal {
   elsif(abs($ratio-1.0) < 0.05) { $out{bits}="8-bit"; }
  }
  my $hdr=decode_hdr_output_metadata(ref($props->{HDR_OUTPUT_METADATA}) eq "HASH" ? $props->{HDR_OUTPUT_METADATA}{blob} : "");
- my $dovi=(ref($props->{DOVI_OUTPUT_METADATA}) eq "HASH" && ($props->{DOVI_OUTPUT_METADATA}{blob}||"")=~/[1-9a-f]/) ? 1 : 0;
+ # An absent or truncated property is unknown, not an empty metadata blob.
+ my $empty_blob=sub {
+  my $entry=shift;
+  return ref($entry) eq "HASH" && $entry->{value_read}
+   && ($entry->{blob}||"") eq "" && (!defined($entry->{value}) || $entry->{value} eq "0");
+ };
+ my $dv_prop=$props->{DOVI_OUTPUT_METADATA};
+ my $dovi=(ref($dv_prop) eq "HASH" && ($dv_prop->{blob}||"")=~/[1-9a-f]/) ? 1
+  : $empty_blob->($dv_prop) ? 0 : undef;
  # A metadata blob left on the connector is not proof it is being sent; the
  # encoder's packet slot is, when the register dump is readable.
- my $hdr_sent=$hdr && (ref($packets) ne "HASH" || $packets->{hdr});
- if($dovi) {
+ my $hdr_sent=$hdr ? 1 : $empty_blob->($props->{HDR_OUTPUT_METADATA}) ? 0 : undef;
+ my $dv_sent=$dovi;
+ if(ref($packets) eq "HASH") {
+  $hdr_sent=0 if(defined($packets->{hdr}) && !$packets->{hdr});
+  $hdr_sent=undef if($packets->{hdr} && !$hdr);
+  $dv_sent=0 if(defined($packets->{vendor}) && !$packets->{vendor});
+ }
+ $out{dv_metadata}=$dovi ? "Attached" : "Not attached" if(defined($dovi));
+ if($dv_sent) {
   $out{mode_label}="Dolby Vision";
   $out{transfer}="Dolby Vision";
-  $out{dv_metadata}="Attached";
  } elsif($hdr_sent && ($hdr->{eotf}==2 || $hdr->{eotf}==3)) {
   $out{mode_label}=$hdr->{eotf}==3 ? "HLG" : "HDR10";
   $out{transfer}=_transfer_label($hdr->{eotf});
- } else {
+ } elsif(defined($dv_sent) && !$dv_sent && defined($hdr_sent) && !$hdr_sent) {
   $out{mode_label}="SDR";
   $out{transfer}="SDR gamma";
-  $out{dv_metadata}="Not attached";
  }
  if($hdr_sent) {
   $out{primaries}=_primaries_name($hdr->{primaries},$hdr->{white});
   $out{mastering}=_nits_text($hdr->{max_luminance})." / "._nits_text($hdr->{min_luminance})." nits";
   $out{light_levels}=$hdr->{max_cll}." / ".$hdr->{max_fall};
- } elsif(!$dovi) {
+ } elsif(defined($hdr_sent) && !$hdr_sent && !$dv_sent) {
   $out{primaries}=$out{mastering}=$out{light_levels}="No HDR metadata";
  }
  return \%out;
@@ -406,7 +422,8 @@ sub card_model {
    if($key eq "resolution") {
     # The daemon rounds refresh to two decimals; compare at that precision.
     $differs=1 if(($req{w}||0) != ($got{w}||0) || ($req{h}||0) != ($got{h}||0)
-     || abs(($req{refresh}||0)-($got{refresh}||0)) > 0.011);
+     || (defined($req{refresh}) && defined($got{refresh}) && abs($req{refresh}-$got{refresh}) > 0.011)
+     || (defined($req{interlaced}) && defined($got{interlaced}) && $req{interlaced} != $got{interlaced}));
    } elsif($key eq "mode_label" && $want=~/^Dolby Vision/ && $have eq "Dolby Vision") {
     # The connector state shows Dolby Vision metadata but not its transport.
     $differs=0;

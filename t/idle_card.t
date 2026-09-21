@@ -121,6 +121,36 @@ my $unread=card_model($requested,{readable=>0},{});
 like($unread->{footer},qr/could not be read/,"unreadable driver is said, not guessed");
 is($unread->{mismatches},0,"unknown values are never mismatches");
 
+my $missing=sent_signal(connector=>{props=>{}});
+my $partial=card_model($requested,$missing,{});
+is($partial->{mismatches},0,"missing metadata properties do not invent SDR mismatches");
+ok(!defined($missing->{mode_label}) && !defined($missing->{dv_metadata}),"missing signal and DV metadata stay unknown");
+my $truncated=sent_signal(connector=>{props=>{
+ HDR_OUTPUT_METADATA=>{blob=>'',value=>undef},DOVI_OUTPUT_METADATA=>{blob=>'',value=>undef},
+}});
+ok(!defined($truncated->{mode_label}),"properties cut off before their values stay unknown");
+my $empty_listing=$listing;
+$empty_listing=~s/\Q$hdr_lines\E//;
+my $sdr=sent_signal(connector=>parse_modetest_connectors($empty_listing)->{'HDMI-A-1'});
+is($sdr->{mode_label},'SDR',"successfully read empty metadata still identifies SDR");
+my $dv_connector={props=>{DOVI_OUTPUT_METADATA=>{blob=>'01000000'}}};
+is(sent_signal(connector=>$dv_connector,packets=>{vendor=>1,hdr=>0})->{mode_label},'Dolby Vision',"enabled vendor packet carries the attached DV metadata");
+my $disabled_dv=sent_signal(connector=>$dv_connector,packets=>{vendor=>0,hdr=>0});
+is($disabled_dv->{mode_label},'SDR',"stale DV metadata with a disabled packet is not a Dolby Vision signal");
+is($disabled_dv->{dv_metadata},'Attached',"attached metadata remains distinct from transmitted signal");
+my $unread_hdr=sent_signal(connector=>{props=>{}},packets=>{vendor=>0,hdr=>1});
+ok(!defined($unread_hdr->{mode_label}),"an active HDR packet with unreadable EOTF does not become SDR");
+my $default_range=sent_signal(connector=>{props=>{'active color format'=>{value=>0},'rgb quant range'=>{value=>0}}});
+ok(!defined($default_range->{range}),"driver-default RGB range is not guessed as limited");
+my $pi5_listing=$listing;
+$pi5_listing=~s/Colorimetry:/Colorspace:/;
+$pi5_listing=~s/active color format:/output format:/;
+my $pi5=sent_signal(mode=>$mode,connector=>parse_modetest_connectors($pi5_listing)->{'HDMI-A-1'},packets=>$packets);
+is($pi5->{colorimetry},'BT.2020','Pi 5 Colorspace property supplies colourimetry');
+is($pi5->{format},'YCbCr 4:4:4','Pi 5 output format fallback remains supported');
+my $interlaced=card_model($requested,{%$sent,interlaced=>1},{});
+ok((grep { $_->{label} eq 'Resolution' && $_->{differs} } @{$interlaced->{rows}}),"progressive and interlaced timings disagree even with equal dimensions and refresh");
+
 is_deeply(text_levels("sdr"),{value=>143,label=>105,black=>0},"SDR codes against a 100-nit white");
 is(text_levels("hdr10")->{value},96,"HDR10 value code is PQ 25 nits");
 is(text_levels("hlg")->{value},95,"HLG value code on a 1000-nit display");

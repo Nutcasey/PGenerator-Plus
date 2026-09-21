@@ -12396,17 +12396,29 @@ sub webui_pattern_idle_refresh_allowed (@) {
 sub webui_pattern_file_idle_name (@) {
  my $name="";
  my $rgb="";
+ my $has_content=0;
  if(open(my $fh,"<",$command_file)) {
   while(my $line=<$fh>) {
+   $has_content=1 if($line=~/\S/);
    $name=$1 if($name eq "" && $line=~/^PATTERN_NAME=(.*)$/);
    $rgb=$1 if($rgb eq "" && $line=~/^RGB=(.*)$/);
   }
   close($fh);
+ } elsif(-e $command_file) {
+  return "unknown";
  }
  $name=~s/[\r\n]+//g;
  $rgb=~s/[\r\n\s]+//g;
  return "stop" if($name eq $pattern_start && $rgb=~/^0,0,0$/);
+ # Calman CommandRGB and Resolve can write a complete patch without a name.
+ # Only an empty file is idle; even an unnamed black patch belongs to its client.
+ return "unknown" if($name eq "" && $has_content);
  return $name;
+}
+
+sub webui_pattern_file_signature (@) {
+ my @st=Time::HiRes::stat($command_file);
+ return @st ? join(":",@st[0,1,7,9,10]) : "";
 }
 
 ###############################################
@@ -12625,25 +12637,19 @@ sub webui_idle_card_pattern (@) {
   unlink($file);
   return ("",$error);
  }
- # $var_dir ends in "/", so compare normalised paths or the fresh card
- # would be taken for an old one and deleted before the renderer loads it.
- foreach my $old (glob("$var_dir/running/idle_card_*.png")) {
-  (my $normalised=$old)=~s{//+}{/}g;
-  unlink($old) if($normalised ne $file && $normalised!~/idle_card_preview\.png$/);
- }
  my $positions=PGIdleCard::hop_positions($w,$h,$card_w,$card_h,$PGIdleCard::HOP_COUNT);
  # The frame around the card uses the stop frame's black, which in Dolby
  # Vision is tunnel black rather than code 0; the PNG matches it.
  my $pat=PGIdleCard::sequence_pattern(w=>$card_w,h=>$card_h,bg=>$black_rgb,image=>$file,positions=>$positions);
  my $elapsed_ms=int((&webui_idle_card_now()-$started)*1000);
- $_idle_card{shown}={
+ my $shown={
   signature=>PGIdleCard::model_signature($model,"$signal_mode:$w:$h"),
   checked=>&webui_idle_card_now(),
   card=>{w=>$card_w+0,h=>$card_h+0,screen_w=>$w+0,screen_h=>$h+0,hop_ms=>$PGIdleCard::HOP_MS+0,
    positions=>[map { [$_->[0]+0,$_->[1]+0] } @$positions],shown_at=>time(),headline=>$model->{headline},mismatches=>$model->{mismatches}+0},
  };
  &log("WebUI: idle card rendered (mode=$signal_mode card=${card_w}x$card_h screen=${w}x$h text=$levels->{value}/$levels->{label} mismatches=$model->{mismatches} render_ms=$elapsed_ms)");
- return ($pat,"");
+ return ($pat,"",$shown,$file);
 }
 
 # One pass of the idle timer, run by the renderer lane whenever it has been
@@ -12654,10 +12660,9 @@ sub webui_idle_card_tick (@) {
  $_idle_card{next_check}=$now+1;
  # Every writer renames a new file into place, so inode, size and mtime
  # change on each write; the idle clock starts when a change is first seen.
- my @st=stat($command_file);
- my $signature=@st ? "$st[1]:$st[7]:$st[9]" : "";
+ my $signature=&webui_pattern_file_signature();
  if($signature ne ($_idle_card{file_signature}||"")) {
-  my $name=@st ? &webui_pattern_file_idle_name() : "";
+  my $name=$signature ne "" ? &webui_pattern_file_idle_name() : "";
   $_idle_card{file_signature}=$signature;
   $_idle_card{pattern}=$name;
   $_idle_card{since}=$now;
@@ -12668,7 +12673,7 @@ sub webui_idle_card_tick (@) {
  if($pattern eq "screensaver") {
   if(!$enabled) {
    &webui_idle_card_note("off-clear","turned off; returning the display to black");
-   &webui_pattern('{"name":"stop","only_if_idle":true}');
+   &webui_pattern('{"name":"stop","only_if_idle":true,"only_if_unowned":true}');
    &webui_idle_card_status_publish("off","The idle card is turned off.");
    return;
   }
@@ -12681,7 +12686,7 @@ sub webui_idle_card_tick (@) {
    $shown->{checked}=$now;
    if(&webui_idle_card_stabilization_wanted()) {
     &webui_idle_card_note("stabilization","yielding to the stabilisation pattern");
-    &webui_pattern('{"name":"stop","only_if_idle":true}');
+    &webui_pattern('{"name":"stop","only_if_idle":true,"only_if_unowned":true}');
     return;
    }
    my $model=&webui_idle_card_model();
@@ -12689,7 +12694,17 @@ sub webui_idle_card_tick (@) {
    my $fresh=PGIdleCard::model_signature($model,"$signal_mode:".($w_s||1920).":".($h_s||1080));
    if($fresh ne ($shown->{signature}||"")) {
     &log("WebUI: idle card content changed; redrawing");
-    &webui_pattern('{"name":"screensaver","only_if_idle":true}');
+    my $result=&webui_pattern('{"name":"screensaver","only_if_idle":true,"only_if_unowned":true}');
+    my $reply=eval { JSON::PP::decode_json($result) } || {};
+    if(($reply->{status}||"") ne "ok" || $reply->{unchanged}) {
+     my $held=$reply->{unchanged} || ($reply->{error_code}||"") eq "pattern-owned";
+     my $retry=$held ? $IDLE_CARD_BLOCKED_RECHECK_S : $IDLE_CARD_FAILURE_BACKOFF_S;
+     $shown->{checked}=$now-$IDLE_CARD_REFRESH_S+$retry;
+     $_idle_card{next_check}=$now+$retry;
+     &webui_idle_card_status_publish($held ? "held" : "error",
+      $reply->{message}||"The display changed while the card was being drawn.");
+     return;
+    }
    }
   }
   &webui_idle_card_status_publish("showing","The card is on the TV.");
@@ -12726,7 +12741,7 @@ sub webui_idle_card_tick (@) {
   $_idle_card{retry_at}=$now+$IDLE_CARD_BLOCKED_RECHECK_S;
   return;
  }
- my $result=&webui_pattern('{"name":"screensaver","only_if_idle":true}');
+ my $result=&webui_pattern('{"name":"screensaver","only_if_idle":true,"only_if_unowned":true}');
  if($result=~/"status"\s*:\s*"ok"/ && $result!~/"unchanged"\s*:\s*true/) {
   &webui_idle_card_note("shown","shown after ${delay} s idle");
   &webui_idle_card_status_publish("showing","The card is on the TV.");
@@ -13428,6 +13443,14 @@ sub webui_pattern (@) {
  my ($name)=$body=~/"name"\s*:\s*"([^"]+)"/;
  return '{"status":"error","message":"Missing pattern name"}' if(!$name);
  $name=~s/[^a-zA-Z0-9_ -]//g;
+ my $idle_only=$body=~/"only_if_idle"\s*:\s*true/i;
+ my $unowned_only=$body=~/"only_if_unowned"\s*:\s*true/i;
+ my $idle_policy_request=$name eq "screensaver" || ($idle_only && $unowned_only);
+ if($name eq "screensaver" || $unowned_only) {
+  my $blocked=&webui_pattern_request_guard($body,"");
+  return $blocked if($blocked ne "");
+ }
+ my $idle_signature=$idle_only ? &webui_pattern_file_signature() : "";
  if(($name eq "stop" || $name eq "screensaver") && $body=~/"only_if_idle"\s*:\s*true/i) {
   my ($allowed,$current)=&webui_pattern_idle_refresh_allowed();
   if(!$allowed) {
@@ -13459,10 +13482,13 @@ sub webui_pattern (@) {
  my ($pattern_signal_range)=$body=~/"pattern_signal_range"\s*:\s*"?(\d+)"?/;
  my ($transport_signal_range)=$body=~/"transport_signal_range"\s*:\s*"?(\d+)"?/;
  $transport_signal_range=$signal_range if(!defined $transport_signal_range || $transport_signal_range eq "");
+ # The information card observes the current link, including an external
+ # client's range. Taking WebUI range ownership here can restart that link.
+ $transport_signal_range=$pgenerator_conf{"rgb_quant_range"} if($idle_policy_request);
  $transport_signal_range=&webui_preferred_rgb_quant_range() if(!defined $transport_signal_range || $transport_signal_range eq "");
  $pattern_signal_range=$signal_range if(!defined $pattern_signal_range || $pattern_signal_range eq "");
  $pattern_signal_range=$transport_signal_range if(!defined $pattern_signal_range || $pattern_signal_range eq "");
- &apply_source_rgb_quant_range("webui",$transport_signal_range);
+ &apply_source_rgb_quant_range("webui",$transport_signal_range) if(!$idle_policy_request);
  my ($color_format_body)=$body=~/"color_format"\s*:\s*"?(\d+)"?/;
  my $pattern_color_format=defined($color_format_body) ? int($color_format_body) : int($pgenerator_conf{"color_format"} || 0);
 	 # Standard DV's outer HDMI tunnel is RGB Full, but its inner source
@@ -13472,6 +13498,7 @@ sub webui_pattern (@) {
 	 local $webui_pattern_image_source_range=($pattern_color_format == 0) ? $source_range : "FULL";
 	 my $w=$w_s || 1920; my $h=$h_s || 1080;
  my $pat=""; my $img=&webui_pattern_diag_image_file($name); my $pat_bits=&webui_pattern_effective_bits("",$signal_mode);
+ my ($idle_card_shown,$idle_card_file);
  # Simulated-meter capture: raw patch codes (pre bit-scaling) recorded for
  # spotread_sim at the end of this sub. Named solids/complex patterns are
  # resolved just before the record call.
@@ -13654,15 +13681,9 @@ elsif($pat eq "" && $name eq "uploaded_diag_video") {
  # takes about a second, so an idle-only request re-checks the display after
  # it: a pattern written meanwhile by another lane or a TCP client wins.
  elsif($pat eq "" && $name eq "screensaver") {
-  my ($card_pat,$card_error)=&webui_idle_card_pattern($w,$h,$signal_mode,$black_rgb);
+  my ($card_pat,$card_error);
+  ($card_pat,$card_error,$idle_card_shown,$idle_card_file)=&webui_idle_card_pattern($w,$h,$signal_mode,$black_rgb);
   return '{"status":"error","message":"'.&_webui_json_escape($card_error).'"}' if($card_pat eq "");
-  if($body=~/"only_if_idle"\s*:\s*true/i) {
-   my ($allowed,$current)=&webui_pattern_idle_refresh_allowed();
-   if(!$allowed) {
-    $current=~s/[^a-zA-Z0-9_ -]//g;
-    return '{"status":"ok","pattern":"'.$current.'","unchanged":true}';
-   }
-  }
   $pat=$card_pat;
   $pat_bits=&webui_pattern_effective_bits("IMAGE",$signal_mode);
  }
@@ -13671,14 +13692,36 @@ elsif($pat eq "" && $name eq "uploaded_diag_video") {
  elsif($pat eq "") {
   return '{"status":"error","message":"Unknown pattern: '.$name.'"}';
  }
- &video_program_stop("$program_video_to_kill");
- # Ensure the C renderer binary is running (auto-start on first pattern)
+ &video_program_stop("$program_video_to_kill") if(!$idle_policy_request || !$idle_only);
+ # An automatic idle update must not start a renderer that has stopped or
+ # entered a settings apply while the image was being prepared.
  if(!&pattern_generator_is_running()) {
-  &pattern_generator_start(1);
-  Time::HiRes::sleep(0.5);
+  if(!$idle_policy_request || !$idle_only) {
+   &pattern_generator_start(1);
+   Time::HiRes::sleep(0.5);
+  }
   if(!&pattern_generator_is_running()) {
-   &log("WebUI: renderer failed to start for pattern $name");
-   return '{"status":"error","message":"Pattern renderer failed to start"}';
+   unlink($idle_card_file) if(defined($idle_card_file));
+   &log("WebUI: renderer unavailable for pattern $name");
+   return '{"status":"error","message":"Pattern renderer is not running"}';
+  }
+ }
+ # Rendering, driver readback and renderer startup can take seconds. Recheck
+ # ownership and the command after preparation, immediately before writing.
+ if($idle_policy_request || $unowned_only) {
+  my $blocked=&webui_pattern_request_guard($body,"");
+  if($blocked ne "") {
+   unlink($idle_card_file) if(defined($idle_card_file));
+   return $blocked;
+  }
+  if($idle_only) {
+   my ($allowed,$current)=&webui_pattern_idle_refresh_allowed();
+   if(!$allowed || &webui_pattern_file_signature() ne $idle_signature
+      || ($name eq "screensaver" && (&webui_idle_card_video_playing() || &webui_idle_card_stabilization_wanted()))) {
+    unlink($idle_card_file) if(defined($idle_card_file));
+    $current=~s/[^a-zA-Z0-9_ -]//g;
+    return '{"status":"ok","pattern":"'.$current.'","unchanged":true}';
+   }
   }
  }
  if($pattern_color_format == 0 && $pat !~/^SOURCE_RANGE=/m) {
@@ -13702,10 +13745,31 @@ elsif($pat eq "" && $name eq "uploaded_diag_video") {
  # the default FRAME for single-shot patterns that have none.
  $pat="PATTERN_NAME=$name\nBITS=$pat_bits\nSOURCE_MAX=$pattern_source_max\n".$pat;
  $pat.="FRAME=$frame_default\n" if($pat !~ /^FRAME=/m);
- open(my $fh,">","$command_file.tmp");
- print $fh $pat;
- close($fh);
- rename("$command_file.tmp","$command_file");
+ # Legacy clients have their own writer. Do not share its staging filename,
+ # and retain the old image/status unless the command is actually installed.
+ my $tmp="$command_file.webui.$$".".".threads->tid();
+ my $written=0;
+ if(open(my $fh,">",$tmp)) {
+  my $printed=print $fh $pat;
+  my $closed=close($fh);
+  $written=rename($tmp,$command_file) if($printed && $closed);
+ }
+ if(!$written) {
+  my $error="$!";
+  unlink($tmp);
+  unlink($idle_card_file) if(defined($idle_card_file));
+  &log("WebUI: failed to install pattern $name: $error");
+  return '{"status":"error","message":"Could not install the pattern command"}';
+ }
+ if(ref($idle_card_shown) eq "HASH") {
+  $_idle_card{shown}=$idle_card_shown;
+  # Retire old images only after the new command has been installed. A
+  # cancelled render must leave the displayed card and its metadata intact.
+  foreach my $old (glob("$var_dir/running/idle_card_*.png")) {
+   (my $normalised=$old)=~s{//+}{/}g;
+   unlink($old) if($normalised ne $idle_card_file && $normalised!~/idle_card_preview\.png$/);
+  }
+ }
  &create_return_file();
  # Record what is now on screen for the simulated meter. Patch/stabilization
  # captured raw codes above; named solid fields map to their 8-bit authoring
