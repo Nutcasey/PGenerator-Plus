@@ -38,6 +38,7 @@ struct ofxRPI4Window {
     static int bit_depth, colorspace_on, shader_init, isDoVi, is_std_DoVi;
     struct AVI { int output_format = 0, rgb_quant_range = 2, max_bpc = 8; };
     static AVI avi_info;
+    static bool usesColourShader() { return false; }
 };
 int ofxRPI4Window::bit_depth = 8, ofxRPI4Window::colorspace_on = 1;
 int ofxRPI4Window::shader_init = 0, ofxRPI4Window::isDoVi = 0, ofxRPI4Window::is_std_DoVi = 0;
@@ -73,6 +74,7 @@ public:
     void set_values();
     void log(const string &) {}
     void setBackground(int, int, int) {}
+    void restoreBackground() {}
     void setColor(int, int, int) {}
     void shader_begin(int) {}
     void shader_end(int) {}
