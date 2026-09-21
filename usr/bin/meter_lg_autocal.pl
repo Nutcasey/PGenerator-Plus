@@ -1440,6 +1440,49 @@ sub lg_autocal_sdr26_dpg_full_sample_index_for_ire {
 my @LG_AUTOCAL_SDR26_LIMITED_LADDER_CODES=(84,92,100,108,124,152,196,240,284,328,372,416,460,504,544,588,632,676,720,764,808,852,896,932,984,1023);
 my @LG_AUTOCAL_SDR26_LIMITED_LADDER_INDEXES=(21,30,38,47,64,94,141,188,235,282,329,375,422,469,512,559,606,653,700,747,794,841,888,926,981,1023);
 
+sub lg_autocal_dpg_index_for_code {
+ my ($code,$black,$white)=@_;
+ return undef if(!defined($code) || !defined($black) || !defined($white) || $white <= $black);
+ my $idx=int(($code-$black)*1023.0/($white-$black)+0.5);
+ return 0 if($idx < 0);
+ return 1023 if($idx > 1023);
+ return $idx;
+}
+
+sub lg_autocal_sdr26_limited_coordinates {
+ my ($code,$bits)=@_;
+ my ($black,$peak)=$bits==10 ? (64,1023) : (16,255);
+ # The measured reference is superwhite, labelled 109, at the final code.
+ # Keep labels for presentation; targets and native rows share actual codes.
+ my $fraction=($code-$black)/($peak-$black);
+ $fraction=0 if($fraction < 0);
+ $fraction=1 if($fraction > 1);
+ return (lg_autocal_dpg_index_for_code($code,$black,$peak),109.0*$fraction);
+}
+
+sub lg_autocal_hdr20_dpg_index_for_step {
+ my ($config,$step)=@_;
+ return undef if(ref($step) ne "HASH");
+ my $ire=defined($step->{ire}) ? $step->{ire} : $step->{stimulus};
+ return undef if(!defined($ire));
+ my @labels=(1.4,2,2.7,4,5,7,10,15,20,25,30,35,40,45,50,60,70,80,90,100);
+ my @indexes=(14,19,28,42,51,70,103,154,206,257,308,360,411,462,514,612,715,817,920,1023);
+ for my $k (0..$#labels) {
+  return $indexes[$k] if(abs($labels[$k]-$ire) < 0.05);
+ }
+ # Base anchors retain the native table. Fillers use their requested code,
+ # never interpolation between rounded percentage labels. DV source codes
+ # are legal-range even when their RGB tunnel uses full-range transport.
+ return undef if(!defined($step->{r}));
+ my $maximum=$step->{input_max}||255;
+ return undef if($maximum != 255 && $maximum != 1023 && $maximum != 4095);
+ my $range=$config->{pattern_signal_range}||$config->{signal_range}||$config->{transport_signal_range}||1;
+ my $limited=lc($config->{signal_mode}||"") eq "dv" || $range != 2;
+ my $scale=($maximum+1)/256;
+ return lg_autocal_dpg_index_for_code($step->{r},$limited ? 16*$scale : 0,
+  $limited ? 235*$scale : $maximum);
+}
+
 # DPG sample index for a Limited-domain 10-bit legal code, via the empirical
 # legal-expanded ladder above. Bit-identical to the previous in-line interp
 # in lg_autocal_sdr26_dpg_full_sample_index_for_ire(); extracted so the
@@ -14870,52 +14913,8 @@ sub lg_autocal_26_run_hdr20_dpg_greyscale {
 		log_line("HDR20 1D DPG greyscale: TEST MODE active -- calibrating only anchor IRE=$test_anchor_ire from snapshot (white_ref=".sprintf("%.4f",$test_white_ref).")");
 	}
 
-	# DPG index for a step from its actual displayed code (8-bit codes *4 into
-	# the 1024-pt DPG domain; 10-bit codes map 1:1).
-	# DPG index for a step: LG's uploaded 1D_DPG_DATA table is indexed AFTER
-	# the legal range is expanded into the TV's normalized 0-1023 LUT domain,
-	# so the patch IRE -> DPG index mapping is non-linear (a raw code*4 is
-	# only ~right mid-range and badly wrong at the ends, which made 100/90/5%
-	# edit the wrong slot). Use the authoritative HDR20 label->index table
-	# that the proven DDC path uses (pgenerator-lg @LG_DDC_1D_*_HDR20).
-	my @hdr20_idx_labels=(1.4,2,2.7,4,5,7,10,15,20,25,30,35,40,45,50,60,70,80,90,100);
-	my @hdr20_idx_values=(14,19,28,42,51,70,103,154,206,257,308,360,411,462,514,612,715,817,920,1023);
 	my $idx_for_step=sub {
-		my ($step)=@_;
-		return undef if(ref($step) ne "HASH");
-		my $ire=defined($step->{"ire"}) ? ($step->{"ire"}+0)
-			: (defined($step->{"stimulus"}) ? ($step->{"stimulus"}+0) : undef);
-		return undef if(!defined($ire));
-		for my $k (0..$#hdr20_idx_labels) {
-			return $hdr20_idx_values[$k] if(abs($hdr20_idx_labels[$k]-$ire) < 0.05);
-		}
-		# Below the first label, extrapolate along the first segment rather than
-		# clamping. No ladder slot sits below 1.4%, so pre-Dark-Detail runs are
-		# unaffected; the lowest HDR Dark Detail filler (1%) needs it. The old
-		# clamp returned index 14 for 1%, which is the 1.4% ladder slot's index,
-		# and two anchors on one index silently overwrite each other in
-		# lg_autocal_26_build_dpg_core. Extrapolated, 1% lands on index 11.
-		# Floored at 1: index 0 is pinned to black by the build.
-		if($ire > 0 && $ire < $hdr20_idx_labels[0]) {
-			my $span=$hdr20_idx_labels[1]-$hdr20_idx_labels[0];
-			if($span > 0) {
-				my $slope=($hdr20_idx_values[1]-$hdr20_idx_values[0])/$span;
-				my $x=int($hdr20_idx_values[0]+($ire-$hdr20_idx_labels[0])*$slope+0.5);
-				$x=1 if($x < 1);
-				return $x;
-			}
-		}
-		return $hdr20_idx_values[0] if($ire <= $hdr20_idx_labels[0]);
-		return $hdr20_idx_values[-1] if($ire >= $hdr20_idx_labels[-1]);
-		for my $k (0..$#hdr20_idx_labels-1) {
-			if($ire > $hdr20_idx_labels[$k] && $ire < $hdr20_idx_labels[$k+1]) {
-				my $f=($ire-$hdr20_idx_labels[$k])/($hdr20_idx_labels[$k+1]-$hdr20_idx_labels[$k]);
-				my $idx=int($hdr20_idx_values[$k]+($hdr20_idx_values[$k+1]-$hdr20_idx_values[$k])*$f+0.5);
-				$idx=0 if($idx<0); $idx=1023 if($idx>1023);
-				return $idx;
-			}
-		}
-		return undef;
+		return lg_autocal_hdr20_dpg_index_for_step($config,$_[0]);
 	};
 
 	my $current_dpg;
@@ -16318,11 +16317,9 @@ sub lg_autocal_26_sdr26_dpg_compute_target {
  my ($white_y,$rs,$black_y,$target_gamma)=@_;
  return undef unless(defined($white_y) && $white_y+0 > 0);
  return undef unless(ref($rs) eq "HASH");
- # Full-range steps carry target_stimulus = emitted wire-code fraction *100
- # (quantized 8bit<<2 codes sit up to ~2% relative off the nominal label at
- # low IRE). Target the curve at the EMITTED signal so the panel lands on
- # the continuous curve; external reference tools target EOTF(code/full-
- # scale) the same way. Limited steps have no target_stimulus (no change).
+ # The ladder stamps target_stimulus from the requested code in the same
+ # domain as its measured peak: 109 for Limited YCbCr, 100 otherwise.
+ # Percentage labels remain display labels, not exact signal coordinates.
  if(defined($rs->{"target_stimulus"})) {
   my %rs2=%$rs;
   my $ts=$rs->{"target_stimulus"}+0;
@@ -17557,20 +17554,16 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale {
  my $sdr26_peak_ire;
  my $sdr26_dpg_max_idx=1023; # 1D_DPG_DATA is always a 1024-pt table
  if($sdr26_ycbcr_limited) {
-  # YCbCr Limited legal-expanded 26-pt -- MUST stay byte-identical to the
-  # historical table (empirical, not formula-derived).
+  # Preserve the historical patch codes and labels. Native rows and targets
+  # are derived below from those codes, including every Dark Detail filler.
   @sdr26_labels=(2.3,3,4,5,7,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,99,105,109);
-  @sdr26_indexes=(21,30,38,47,64,94,141,188,235,282,329,375,422,469,512,559,606,653,700,747,794,841,888,926,981,1023);
   $sdr26_peak_ire=109.0;
   # Empirical 10-bit code table, paired BY POSITION with the ORIGINAL labels.
   # Snapshotted before the merge so ladder slots keep their exact table code
   # while fillers fall through to the formula below.
   my @sdr26_base_labels=@sdr26_labels;
   my @sdr26_base_codes=(84,92,100,108,124,152,196,240,284,328,372,416,460,504,544,588,632,676,720,764,808,852,896,932,984,1023);
-  # Merge labels + DPG indexes only. The indexes are empirical with no
-  # client-side counterpart, so interpolating them is correct; the CODES are
-  # not -- see below.
-  sdr26_merge_dark_detail_ladder(\@sdr26_labels,\@sdr26_indexes);
+  sdr26_merge_dark_detail_ladder(\@sdr26_labels);
   if($sdr26_bits==10) {
    foreach my $label (@sdr26_labels) {
     my $ire=$label+0;
@@ -17606,6 +17599,11 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale {
     return "Unable to encode 8-bit SDR YCbCr anchor $ire" if(ref($encoded) ne "HASH");
     push @sdr26_codes,$encoded->{"code"};
    }
+  }
+  foreach my $code (@sdr26_codes) {
+   my ($index,$target)=lg_autocal_sdr26_limited_coordinates($code,$sdr26_bits);
+   push @sdr26_indexes,$index;
+   push @sdr26_target_stims,$target;
   }
  } else {
   # Full OR RGB Limited: same 24-anchor SHAPE (2.3..95 + peak 100). No
@@ -17687,11 +17685,6 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale {
    }
   }
  }
- # Limited branch leaves @sdr26_target_stims empty; fill with undef entries
- # so the step-builder below can index it and find nothing to stamp.
- if(!@sdr26_target_stims) {
-  @sdr26_target_stims=(undef) x scalar(@sdr26_labels);
- }
  my $sdr26_input_max=($sdr26_limited && $sdr26_bits==10) ? 1023 : $sdr26_max;
  $state->{"sdr_1d_dpg_range"}=$sdr26_limited ? "limited" : "full";
  $state->{"sdr_1d_dpg_peak_ire"}=$sdr26_peak_ire+0;
@@ -17714,6 +17707,11 @@ sub lg_autocal_26_run_sdr_1d_dpg_greyscale {
  my $idx_for_sdr=sub {
   my ($step)=@_;
   return undef if(ref($step) ne "HASH");
+  if($sdr26_ycbcr_limited && defined($step->{r})) {
+   my ($index,$target)=lg_autocal_sdr26_limited_coordinates($step->{r},$sdr26_bits);
+   $step->{target_stimulus}=$target;
+   return $index;
+  }
   my $ire=defined($step->{"ire"}) ? ($step->{"ire"}+0)
    : (defined($step->{"stimulus"}) ? ($step->{"stimulus"}+0) : undef);
   return undef if(!defined($ire));
