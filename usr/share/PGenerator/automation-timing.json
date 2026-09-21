@@ -3,7 +3,7 @@
   "source": "Completed Raspberry Pi calibration stages, 18–20 September 2026. Point fractions from saved Point finished log events; includes final commit time.",
   "records": [
     {
-      "source": "20260918-181522-8a9142-0",
+      "source": "recorded-job-1",
       "job": {
         "signal_format": "hdr10",
         "display_type": "oled_generic",
@@ -32,12 +32,6 @@
           "colors-30",
           "saturations-24"
         ],
-        "device_identity": {
-          "firmware": "23.25.55",
-          "generation_id": "lg2022plus_oled",
-          "model_name": "OLED55G36LA",
-          "webos_release": "9.2.2"
-        },
         "stages": {
           "apply_all": 1,
           "calibration": 1,
@@ -65,24 +59,19 @@
       },
       "stages": {
         "item-started": {
-          "seconds": 1.05,
-          "completed_at": 1789749377.85121
+          "seconds": 1.05
         },
         "tv-setup-verified": {
-          "seconds": 136.08,
-          "completed_at": 1789749515.06233
+          "seconds": 136.08
         },
         "reset-and-reapply-verified": {
-          "seconds": 191.54,
-          "completed_at": 1789759564.91035
+          "seconds": 191.54
         },
         "panel-light-settled": {
-          "seconds": 75.99,
-          "completed_at": 1789759642.83422
+          "seconds": 75.99
         },
         "greyscale-done": {
           "seconds": 7421.89,
-          "completed_at": 1789767066.46623,
           "curve": {
             "total_steps": 37,
             "fractions": [
@@ -128,30 +117,25 @@
           }
         },
         "greyscale-settings-verified": {
-          "seconds": 50.57,
-          "completed_at": 1789767118.76881
+          "seconds": 50.57
         },
         "volume-done": {
           "seconds": 2882.69,
-          "completed_at": 1789770004.66318,
           "tail_seconds": 2772.69
         },
         "volume-settings-verified": {
-          "seconds": 40.77,
-          "completed_at": 1789770046.99793
+          "seconds": 40.77
         },
         "session-closed": {
-          "seconds": 78.52,
-          "completed_at": 1789770127.2453
+          "seconds": 78.52
         },
         "apply-all-done": {
-          "seconds": 40.91,
-          "completed_at": 1789770170.33485
+          "seconds": 40.91
         }
       }
     },
     {
-      "source": "20260918-181522-8a9142-1",
+      "source": "recorded-job-2",
       "job": {
         "signal_format": "sdr",
         "display_type": "oled_generic",
@@ -180,12 +164,6 @@
           "colors-30",
           "saturations-24"
         ],
-        "device_identity": {
-          "firmware": "23.25.55",
-          "generation_id": "lg2022plus_oled",
-          "model_name": "OLED55G36LA",
-          "webos_release": "9.2.2"
-        },
         "stages": {
           "apply_all": 1,
           "calibration": 1,
@@ -213,24 +191,19 @@
       },
       "stages": {
         "item-started": {
-          "seconds": 1.31,
-          "completed_at": 1789770355.27047
+          "seconds": 1.31
         },
         "tv-setup-verified": {
-          "seconds": 90.68,
-          "completed_at": 1789770447.27146
+          "seconds": 90.68
         },
         "reset-and-reapply-verified": {
-          "seconds": 826.82,
-          "completed_at": 1789771278.55326
+          "seconds": 826.82
         },
         "panel-light-settled": {
-          "seconds": 78.54,
-          "completed_at": 1789771359.73774
+          "seconds": 78.54
         },
         "greyscale-done": {
           "seconds": 3896.69,
-          "completed_at": 1789775258.43538,
           "curve": {
             "total_steps": 35,
             "fractions": [
@@ -274,30 +247,25 @@
           }
         },
         "greyscale-settings-verified": {
-          "seconds": 45.74,
-          "completed_at": 1789775306.13492
+          "seconds": 45.74
         },
         "volume-done": {
           "seconds": 694.09,
-          "completed_at": 1789776002.04566,
           "tail_seconds": 84.09
         },
         "volume-settings-verified": {
-          "seconds": 44.39,
-          "completed_at": 1789776048.69596
+          "seconds": 44.39
         },
         "session-closed": {
-          "seconds": 64.69,
-          "completed_at": 1789776115.37627
+          "seconds": 64.69
         },
         "apply-all-done": {
-          "seconds": 53,
-          "completed_at": 1789776170.31512
+          "seconds": 53
         }
       }
     },
     {
-      "source": "20260918-181522-8a9142-2",
+      "source": "recorded-job-3",
       "job": {
         "signal_format": "dv",
         "display_type": "oled_generic",
@@ -326,12 +294,6 @@
           "colors-30",
           "saturations-24"
         ],
-        "device_identity": {
-          "firmware": "23.25.55",
-          "generation_id": "lg2022plus_oled",
-          "model_name": "OLED55G36LA",
-          "webos_release": "9.2.2"
-        },
         "stages": {
           "apply_all": 1,
           "calibration": 1,
@@ -359,24 +321,19 @@
       },
       "stages": {
         "item-started": {
-          "seconds": 1.75,
-          "completed_at": 1789776359.14058
+          "seconds": 1.75
         },
         "tv-setup-verified": {
-          "seconds": 54.04,
-          "completed_at": 1789776414.78791
+          "seconds": 54.04
         },
         "reset-and-reapply-verified": {
-          "seconds": 119.73,
-          "completed_at": 1789776538.92488
+          "seconds": 119.73
         },
         "panel-light-settled": {
-          "seconds": 53.27,
-          "completed_at": 1789776594.20007
+          "seconds": 53.27
         },
         "greyscale-done": {
           "seconds": 4153.4,
-          "completed_at": 1789780749.63608,
           "curve": {
             "total_steps": 37,
             "fractions": [
@@ -422,29 +379,24 @@
           }
         },
         "greyscale-settings-verified": {
-          "seconds": 30.32,
-          "completed_at": 1789780782.97409
+          "seconds": 30.32
         },
         "volume-done": {
-          "seconds": 184.54,
-          "completed_at": 1789780970.03498
+          "seconds": 184.54
         },
         "volume-settings-verified": {
-          "seconds": 41.16,
-          "completed_at": 1789781013.68209
+          "seconds": 41.16
         },
         "session-closed": {
-          "seconds": 67.81,
-          "completed_at": 1789781084.09265
+          "seconds": 67.81
         },
         "apply-all-done": {
-          "seconds": 53.29,
-          "completed_at": 1789781139.90633
+          "seconds": 53.29
         }
       }
     },
     {
-      "source": "20260918-181522-8a9142-3",
+      "source": "recorded-job-4",
       "job": {
         "signal_format": "dv",
         "display_type": "oled_generic",
@@ -473,12 +425,6 @@
           "colors-30",
           "saturations-24"
         ],
-        "device_identity": {
-          "firmware": "23.25.55",
-          "generation_id": "lg2022plus_oled",
-          "model_name": "OLED55G36LA",
-          "webos_release": "9.2.2"
-        },
         "stages": {
           "apply_all": 1,
           "calibration": 1,
@@ -506,24 +452,19 @@
       },
       "stages": {
         "item-started": {
-          "seconds": 2.34,
-          "completed_at": 1789781287.09434
+          "seconds": 2.34
         },
         "tv-setup-verified": {
-          "seconds": 56.29,
-          "completed_at": 1789781345.44625
+          "seconds": 56.29
         },
         "reset-and-reapply-verified": {
-          "seconds": 192.9,
-          "completed_at": 1789781543.14271
+          "seconds": 192.9
         },
         "panel-light-settled": {
-          "seconds": 55.21,
-          "completed_at": 1789781600.63115
+          "seconds": 55.21
         },
         "greyscale-done": {
           "seconds": 4128.49,
-          "completed_at": 1789785731.44567,
           "curve": {
             "total_steps": 37,
             "fractions": [
@@ -569,29 +510,24 @@
           }
         },
         "greyscale-settings-verified": {
-          "seconds": 33.58,
-          "completed_at": 1789785768.5179
+          "seconds": 33.58
         },
         "volume-done": {
-          "seconds": 139.16,
-          "completed_at": 1789785910.43653
+          "seconds": 139.16
         },
         "volume-settings-verified": {
-          "seconds": 227.17,
-          "completed_at": 1789786141.16121
+          "seconds": 227.17
         },
         "session-closed": {
-          "seconds": 37.44,
-          "completed_at": 1789786181.07142
+          "seconds": 37.44
         },
         "apply-all-done": {
-          "seconds": 73,
-          "completed_at": 1789786256.8547
+          "seconds": 73
         }
       }
     },
     {
-      "source": "20260918-181522-8a9142-4",
+      "source": "recorded-job-5",
       "job": {
         "signal_format": "hdr10",
         "display_type": "oled_generic",
@@ -620,12 +556,6 @@
           "colors-30",
           "saturations-24"
         ],
-        "device_identity": {
-          "firmware": "23.25.55",
-          "generation_id": "lg2022plus_oled",
-          "model_name": "OLED55G36LA",
-          "webos_release": "9.2.2"
-        },
         "stages": {
           "apply_all": 1,
           "calibration": 1,
@@ -653,24 +583,19 @@
       },
       "stages": {
         "item-started": {
-          "seconds": 2.28,
-          "completed_at": 1789786386.40424
+          "seconds": 2.28
         },
         "tv-setup-verified": {
-          "seconds": 56.53,
-          "completed_at": 1789786445.1924
+          "seconds": 56.53
         },
         "reset-and-reapply-verified": {
-          "seconds": 219.67,
-          "completed_at": 1789786670.04483
+          "seconds": 219.67
         },
         "panel-light-settled": {
-          "seconds": 98.84,
-          "completed_at": 1789786771.83138
+          "seconds": 98.84
         },
         "greyscale-done": {
           "seconds": 7861.64,
-          "completed_at": 1789794636.10577,
           "curve": {
             "total_steps": 37,
             "fractions": [
@@ -716,30 +641,25 @@
           }
         },
         "greyscale-settings-verified": {
-          "seconds": 32.72,
-          "completed_at": 1789794671.85071
+          "seconds": 32.72
         },
         "volume-done": {
           "seconds": 1705.99,
-          "completed_at": 1789796381.44705,
           "tail_seconds": 1605.99
         },
         "volume-settings-verified": {
-          "seconds": 61.38,
-          "completed_at": 1789796446.33772
+          "seconds": 61.38
         },
         "session-closed": {
-          "seconds": 37.32,
-          "completed_at": 1789796486.45051
+          "seconds": 37.32
         },
         "apply-all-done": {
-          "seconds": 52.49,
-          "completed_at": 1789796541.86525
+          "seconds": 52.49
         }
       }
     },
     {
-      "source": "20260918-181522-8a9142-5",
+      "source": "recorded-job-6",
       "job": {
         "signal_format": "sdr",
         "display_type": "oled_generic",
@@ -768,12 +688,6 @@
           "colors-30",
           "saturations-24"
         ],
-        "device_identity": {
-          "firmware": "23.25.55",
-          "generation_id": "lg2022plus_oled",
-          "model_name": "OLED55G36LA",
-          "webos_release": "9.2.2"
-        },
         "stages": {
           "apply_all": 1,
           "calibration": 1,
@@ -801,24 +715,19 @@
       },
       "stages": {
         "item-started": {
-          "seconds": 2.53,
-          "completed_at": 1789796697.35439
+          "seconds": 2.53
         },
         "tv-setup-verified": {
-          "seconds": 78.47,
-          "completed_at": 1789796778.61517
+          "seconds": 78.47
         },
         "reset-and-reapply-verified": {
-          "seconds": 800.68,
-          "completed_at": 1789797585.72614
+          "seconds": 800.68
         },
         "panel-light-settled": {
-          "seconds": 126.96,
-          "completed_at": 1789797715.90559
+          "seconds": 126.96
         },
         "greyscale-done": {
           "seconds": 3698.63,
-          "completed_at": 1789801417.91753,
           "curve": {
             "total_steps": 35,
             "fractions": [
@@ -862,30 +771,25 @@
           }
         },
         "greyscale-settings-verified": {
-          "seconds": 32.88,
-          "completed_at": 1789801453.79636
+          "seconds": 32.88
         },
         "volume-done": {
           "seconds": 687.75,
-          "completed_at": 1789802144.7525,
           "tail_seconds": 92.75
         },
         "volume-settings-verified": {
-          "seconds": 63.9,
-          "completed_at": 1789802211.82558
+          "seconds": 63.9
         },
         "session-closed": {
-          "seconds": 56.58,
-          "completed_at": 1789802272.28859
+          "seconds": 56.58
         },
         "apply-all-done": {
-          "seconds": 62.51,
-          "completed_at": 1789802338.20755
+          "seconds": 62.51
         }
       }
     },
     {
-      "source": "20260920-103139-9b2f50-0",
+      "source": "recorded-job-7",
       "job": {
         "signal_format": "sdr",
         "display_type": "oled_generic",
@@ -914,12 +818,6 @@
           "colors-30",
           "saturations-24"
         ],
-        "device_identity": {
-          "firmware": "23.25.55",
-          "generation_id": "lg2022plus_oled",
-          "model_name": "OLED55G36LA",
-          "webos_release": "9.2.2"
-        },
         "stages": {
           "apply_all": 1,
           "calibration": 1,
@@ -947,24 +845,19 @@
       },
       "stages": {
         "item-started": {
-          "seconds": 0.36,
-          "completed_at": 1789893254.06512
+          "seconds": 0.36
         },
         "tv-setup-verified": {
-          "seconds": 35.58,
-          "completed_at": 1789893290.01062
+          "seconds": 35.58
         },
         "reset-and-reapply-verified": {
-          "seconds": 151.56,
-          "completed_at": 1789893443.14639
+          "seconds": 151.56
         },
         "panel-light-settled": {
-          "seconds": 311.21,
-          "completed_at": 1789893755.56336
+          "seconds": 311.21
         },
         "greyscale-done": {
           "seconds": 6010.78,
-          "completed_at": 1789899767.10983,
           "curve": {
             "total_steps": 35,
             "fractions": [
@@ -1008,25 +901,20 @@
           }
         },
         "greyscale-settings-verified": {
-          "seconds": 25.66,
-          "completed_at": 1789899793.81341
+          "seconds": 25.66
         },
         "volume-done": {
           "seconds": 13858.32,
-          "completed_at": 1789913653.67903,
           "tail_seconds": 94.04
         },
         "volume-settings-verified": {
-          "seconds": 42.03,
-          "completed_at": 1789913696.70616
+          "seconds": 42.03
         },
         "session-closed": {
-          "seconds": 55.24,
-          "completed_at": 1789913752.78268
+          "seconds": 55.24
         },
         "apply-all-done": {
-          "seconds": 28.45,
-          "completed_at": 1789913782.39765
+          "seconds": 28.45
         }
       }
     }

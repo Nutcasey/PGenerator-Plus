@@ -76,6 +76,28 @@ cmp_ok($tail,'>',1500,'HDR finishing estimate includes the measured long shadow-
 ok(!defined($volume->{time_estimate}{pass_remaining_seconds}),'frozen profile counters do not fabricate an active measurement pass');
 PGAutomationETA::update($volume,1600,[]);
 is($volume->{time_estimate}{stage_remaining_seconds},$tail-300,'finishing estimate counts down from its own phase start');
+for my $status (qw(complete failed stopped interrupted)) {
+ $volume->{worker_status}{status}=$status;
+ PGAutomationETA::update($volume,10000,[]);
+ ok(!defined($volume->{time_estimate}{stage_remaining_seconds}),"$status worker cannot grow a tail or fallback estimate");
+}
+my $cold={id=>'local',status=>'running',stage_started_at=>1000,active_item=>0,active_stage=>'greyscale-done',items=>[PGAutomation::clone($job)]};
+my $local=[{profile=>PGAutomationETA::profile($job),stage=>'greyscale-done',seconds=>600,completed_at=>1}];
+{
+ local $PGAutomationETA::BASELINES=PGAutomation::clone($data);
+ $_->{stages}{'greyscale-done'}{completed_at}=2000000000 for @{$PGAutomationETA::BASELINES->{records}};
+ PGAutomationETA::update($cold,1100,$local);
+ is($cold->{time_estimate}{stage_remaining_seconds},500,'older local measurements take precedence over a newer factory seed');
+}
+my $shape=PGAutomation::clone($cold);delete $shape->{time_estimate};
+$shape->{items}[0]{calibration}{target_delta_e}=.123;
+$shape->{worker_status}={status=>'failed',current_step=>4,total_steps=>$curve->{total_steps}};
+$shape->{worker_timing}={kind=>'grey',stage=>'greyscale-done',started_at=>1000,point_started_at=>1000,start_step=>0};
+PGAutomationETA::update($shape,1300,[]);
+ok(!defined($shape->{time_estimate}{stage_remaining_seconds}),'equal-resolution clocks cannot invent a zero-duration stage estimate');
+my $zero=PGAutomation::clone($cold);delete $zero->{time_estimate};
+PGAutomationETA::update($zero,1300,[{profile=>PGAutomationETA::profile($job),stage=>'greyscale-done',seconds=>0}]);
+ok(!defined($zero->{time_estimate}{stage_remaining_seconds}),'zero-duration history cannot grow an overdue fallback');
 my $large=$data->{records}[-1]{job};
 cmp_ok(PGAutomationETA::baseline($large,'volume-done')->{tail_seconds},'<',120,'large SDR profile retains measured finishing overhead rather than a percentage of its four-hour profile');
 done_testing();

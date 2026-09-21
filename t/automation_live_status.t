@@ -82,6 +82,14 @@ is(PGAutomation::read_json_file($run_file)->{runner_pid},$$,'a forced heartbeat 
  unlike($identity,qr/@{[$fresh-240]}/,'and does not restore the manifest\'s older one');
  main::_update_run(sub {$_[0]{worker_timing}=$clock->($fresh+120);});
  like($status->()->{time_estimate}{identity}||'',qr/@{[$fresh+120]}/,'a manifest write with a newer clock is still adopted');
+ for my $offset (0,30) {
+  my $point=$fresh+120;
+  main::_update_live(sub {$_[0]{worker_timing}={%{$clock->($point)},tail_started_at=>$point+$offset};});
+  PGAutomation::with_lock($run_file,sub {$_[0]{worker_timing}=$clock->($point);return $_[0];});
+  main::_update_live(sub {});
+  like($status->()->{time_estimate}{identity}||'',qr/"tail_started_at":@{[$point+$offset]}/,
+   "daemon republish preserves the tail clock at offset $offset");
+ }
  # The daemon edits the manifest too (queue edit while running). The next
  # tick must republish from it, not from the copy taken before.
  PGAutomation::with_lock($run_file,sub {push @{$_[0]{items}},{name=>'DV Filmmaker',status=>'queued'};$_[0]{queue_revision}=1;return $_[0];});
@@ -227,5 +235,17 @@ is($catalogue->{capability_profile_id},'fixture','the caller\'s copy is not chan
  isnt($status->()->{time_estimate}{stage_remaining_seconds},$prior,'new measured work changes the live remainder');
  is(PGAutomation::read_raw($run_file),$manifest,'live ETA does not rewrite the large manifest');
  ok(!exists($status->()->{items}[0]{calibration}),'private ETA context does not expand the status payload');
+ my $durable=PGAutomation::read_json_file($run_file)->{time_estimate};
+ {
+  local *PGAutomationETA::update=sub {die "simulated ETA failure\n"};
+  for (1..2) {
+   main::_update_live(sub {});
+   is_deeply($status->()->{time_estimate},$durable,'repeated advisory failure falls back to the durable estimate');
+  }
+ }
+ $clock=2025;main::_update_live(sub {});
+ is($status->()->{time_estimate}{calculated_at},2025,'live ETA recovers on the next successful calculation');
+ main::_update_run(sub {$_[0]{status}='paused';});
+ ok(!exists($status->()->{time_estimate}),'successful clearing on pause does not resurrect a saved estimate');
 }
 done_testing();

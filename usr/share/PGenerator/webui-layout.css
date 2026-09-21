@@ -304,6 +304,10 @@ body.layout-tablet .ui-choice:disabled:hover .ui-choice-description,body.layout-
   max-height:calc(100dvh - 20px)!important;margin:auto!important;overflow:auto
  }
 }
+/* Keep focus readable on touch devices without disabling browser pinch zoom. */
+@media(any-pointer:coarse){
+ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),select,textarea{font-size:max(16px,1em)!important}
+}
 /* Phone header: two fixed rows, brand and actions over one line of status, so
    a status change can never change its height and shove the page. Status that
    does not fit scrolls sideways; warnings lead so they stay in view. The layout

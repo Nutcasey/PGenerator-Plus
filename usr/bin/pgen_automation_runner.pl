@@ -229,13 +229,16 @@ sub _update_run {
 # manifest's size on the fast path.
 sub _compact_run { return PGAutomation::compact_run($_[0]); }
 
-# How far a worker_timing record has advanced. Both stamps only move forward:
-# a reset restarts the stage clock, and each point restarts the point clock.
+# How far a worker_timing record has advanced, including solve/upload after
+# the last measured point. A tail can start within the same clock tick.
 sub _timing_stamp {
     my ($timing) = @_;
     return -1 if ref($timing) ne 'HASH';
-    my ($started, $point) = ($timing->{started_at} || 0, $timing->{point_started_at} || 0);
-    return $point > $started ? $point : $started;
+    my $stamp = 0;
+    for my $key (qw(started_at point_started_at tail_started_at)) {
+        $stamp = $timing->{$key} if ($timing->{$key} || 0) > $stamp;
+    }
+    return $stamp;
 }
 
 sub _publish_status {
@@ -248,8 +251,12 @@ sub _publish_status {
         # carries the last durable copy; adopting it would roll a fresher
         # tick's point clock back and make the live estimate read the current
         # point as overdue.
+        my $incoming = _timing_stamp($run->{worker_timing});
+        my $live = _timing_stamp($LIVE{worker_timing});
         $LIVE{worker_timing} = $run->{worker_timing}
-            if _timing_stamp($run->{worker_timing}) >= _timing_stamp($LIVE{worker_timing});
+            if $incoming > $live || ($incoming == $live
+                && (!(($LIVE{worker_timing} || {})->{tail_started_at})
+                    || ($run->{worker_timing} || {})->{tail_started_at}));
         $STATUS_BASE_MTIME = defined($manifest_mtime) ? $manifest_mtime : PGAutomation::file_mtime($RUN_FILE);
     }
     return 0 if ref($STATUS_BASE) ne 'HASH';
@@ -258,8 +265,16 @@ sub _publish_status {
     my %status = (%$STATUS_BASE, map { exists($LIVE{$_}) ? ($_ => $LIVE{$_}) : () } @LIVE_KEYS);
     if (ref($ETA_CONTEXT) eq 'HASH') {
         my %timing=(%$ETA_CONTEXT,map {exists($LIVE{$_}) ? ($_=>$LIVE{$_}) : ()} (@LIVE_KEYS,'worker_timing'));
-        eval {PGAutomationETA::update(\%timing,time(),$ETA_HISTORY);1} or delete $timing{time_estimate};
-        $status{time_estimate}=$LIVE{time_estimate}=$timing{time_estimate};
+        my $ok = eval {PGAutomationETA::update(\%timing,time(),$ETA_HISTORY);1};
+        if ($ok && defined($timing{time_estimate})) {
+            $status{time_estimate}=$LIVE{time_estimate}=$timing{time_estimate};
+        } else {
+            delete $LIVE{time_estimate};
+            delete $status{time_estimate};
+            # A failed advisory calculation must not mask durable evidence.
+            $status{time_estimate}=$STATUS_BASE->{time_estimate}
+                if !$ok && ($status{status}||'') eq 'running' && defined($STATUS_BASE->{time_estimate});
+        }
     }
     $status{published_at} = time();
     return PGAutomation::write_json_atomic($STATUS_FILE, \%status, 0600) ? 1 : 0;

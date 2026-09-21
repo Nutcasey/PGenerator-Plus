@@ -8,6 +8,12 @@ use Test::More;
 
 ok(defined(do "$Bin/../usr/sbin/pgenerator-lg"),'LG helper loads') or die $@;
 my (%tv,@requests,@events,$connections,$closed,$scenario,$written);
+my $contracts=\&main::lg_setting_contracts;
+local *main::lg_setting_contracts=sub {
+ my $matrix=$contracts->(@_);
+ $matrix->{contracts}{contrast}{require_readback}=JSON::PP::false if $scenario eq 'ack-only';
+ return $matrix;
+};
 local *main::lg_authenticated_session=sub {
  ++$connections;
  return {status=>'ok',session=>{id=>$connections},client_key=>'fixture',
@@ -46,7 +52,7 @@ local *main::lg_request=sub {
 # Exercise the full helper workflow against a changing transport model. Each
 # scenario has a fresh capability store so earlier refusal evidence cannot
 # change a later scenario's preflight policy.
-for my $case (qw(ordinary special refused partial single-refused missing omitted invalid blocked exception)) {
+for my $case (qw(ordinary special refused partial single-refused missing omitted ack-only invalid blocked exception)) {
  local $ENV{PGENERATOR_LG_CAPABILITY_STORE}=tempdir(CLEANUP=>1);
  $scenario=$case;
  %tv=(brightness=>49,contrast=>84,color=>49,backlight=>50,hdrDynamicToneMapping=>'on');
@@ -80,10 +86,20 @@ for my $case (qw(ordinary special refused partial single-refused missing omitted
   is($result->{setting_verification}{brightness}{status},'verified',"$case retains earlier brightness verification");
   is($result->{setting_verification}{color}{status},'verified',"$case retains earlier colour verification");
   isnt($result->{setting_verification}{contrast}{status}||'','verified',"$case does not inherit stale contrast verification");
+  if($case eq 'single-refused') {
+   is($result->{setting_verification}{contrast}{status},'write_refused','refused retry retains explicit failure evidence');
+   like($result->{setting_verification}{contrast}{reason},qr/refuses contrast/,'refused retry explains the newest failure');
+  }
   is_deeply(\@write_keys,[[qw(brightness color contrast)],['contrast']],"$case retries only the unverified control");
   next;
  }
  is($result->{status},'ok',"$case succeeds");
+ if($case eq 'ack-only') {
+  is($result->{verification_state},'acknowledged_unverified','optional readback is not reported as verified');
+  is($result->{setting_verification}{contrast}{status},'acknowledged_unverified','optional readback keeps terminal acknowledgement');
+  is_deeply(\@write_keys,[[qw(brightness color contrast)]],'acknowledged optional-readback controls are written only once');
+  next;
+ }
  is($result->{verification_state},'verified',"$case is verified");
  for my $key (keys %$values) {
   is($result->{setting_verification}{$key}{status},'verified',"$case verifies $key individually");

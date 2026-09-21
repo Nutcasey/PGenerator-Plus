@@ -19,6 +19,14 @@ sub run {
   worker_timing=>{kind=>'grey',stage=>'greyscale-done',started_at=>1000,start_step=>0}};
 }
 my $r=run();
+is(PGAutomationETA::duration_model([{seconds=>1000,completed_at=>0},{seconds=>2000,completed_at=>1000000}])->{seconds},1500,
+ 'undated legacy samples contribute alongside dated measurements');
+is(PGAutomationETA::duration_model([map {{seconds=>$_*1000,completed_at=>$_*604800}} 1..3])->{seconds},2000,
+ 'weekly calibration samples retain a median across gaps');
+is(PGAutomationETA::duration_model([map {{seconds=>$_*1000,completed_at=>$_*604800}} 1..4])->{seconds},3000,
+ 'history remains limited to the three most recent compatible samples');
+is(PGAutomationETA::duration_model([{seconds=>1000,completed_at=>0},map {{seconds=>$_*1000,completed_at=>$_*604800}} 2..4])->{seconds},2500,
+ 'three dated measurements cannot crowd out undated legacy evidence');
 my $before=PGAutomation::clone($r);
 PGAutomationETA::update($r,1100,[]);
 is($r->{time_estimate}{scope},'unknown','no guessed ETA before sufficient elapsed time');

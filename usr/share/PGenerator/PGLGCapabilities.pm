@@ -12,6 +12,7 @@ use Fcntl qw(:flock);
 use Cwd ();
 use JSON::PP ();
 use Time::HiRes qw(time);
+use PGAutomation ();
 
 our @EXPORT_OK = qw(
  clear_lg_capability_cache
@@ -885,9 +886,9 @@ sub lg_record_setting_observations {
  my $lock_path=$path.'.lock';
  open(my $lock,'>>',$lock_path)
   or return {ok=>JSON::PP::false,error=>'observation-lock-unavailable',detail=>"$!"};
- if(!flock($lock,LOCK_EX)) {
+ if(!PGAutomation::lock_exclusive($lock,$options{lock_timeout})) {
   close($lock);
-  return {ok=>JSON::PP::false,error=>'observation-lock-failed',detail=>"$!"};
+  return {ok=>JSON::PP::false,error=>'observation-lock-failed',detail=>'Timed out waiting for the observation lock'};
  }
  my ($document)=_read_observation_document($identity,%options);
  my $normalized_identity=_normalized_identity($identity);

@@ -177,6 +177,49 @@ is_deeply([sort keys %{$r->{setting_contracts}}],['brightness','pictureMode'],'a
  $cache=main::lg_read_picture_settings_cache();
  is_deeply($cache->{contexts}{$cache->{current}}{picture_settings},
   {pictureMode=>'parallelMode',control1=>1,control2=>2,control3=>3},'concurrent partial reads retain every control');
+ # Failed index publication leaves a new context file behind. The next
+ # writer sweeps against the durable index before creating its own context.
+ my $orphan;
+ {
+  my $write=\&PGAutomation::write_json_atomic;
+  local *PGAutomation::write_json_atomic=sub {
+   return 0 if $_[0] eq main::lg_picture_settings_cache_path();
+   $orphan=$_[0] if $_[0]=~/picture-settings-cache/;
+   return $write->(@_);
+  };
+  ok(!$remember->('interruptedMode',{brightness=>25}),'index commit interruption is reported');
+ }
+ ok(-f $orphan,'interruption leaves a context outside the index');
+ ok($remember->('recoveredMode',{brightness=>50}),'later cache write recovers from the interruption');
+ ok(!-e $orphan,'later write reclaims the orphaned context');
+ $index=PGAutomation::read_json_file(main::lg_picture_settings_cache_path());
+ my ($evict)=sort {($index->{contexts}{$a}{updated_at}||0)<=>($index->{contexts}{$b}{updated_at}||0)} grep {$_ ne $index->{current}} keys %{$index->{contexts}};
+ # Give one old entry an unambiguous age and make unlink genuinely fail.
+ $index->{contexts}{$evict}{updated_at}=-1;
+ PGAutomation::write_json_atomic(main::lg_picture_settings_cache_path(),$index);
+ my $evict_path=main::lg_picture_settings_context_path($evict);
+ unlink($evict_path);mkdir($evict_path) or die $!;
+ ok(!$remember->('evictionFailure',{brightness=>25}),'failed eviction is reported');
+ is_deeply(PGAutomation::read_json_file(main::lg_picture_settings_cache_path()),$index,'failed eviction preserves the durable index entry');
+ rmdir($evict_path) or die $!;
+ ok($remember->('afterEvictionFailure',{brightness=>50}),'later write recovers after the deletion failure is removed');
+ {
+  my $blocked=main::lg_picture_settings_context_path('e'x64);
+  mkdir($blocked) or die $!;
+  my @events;
+  local *PGCalibrationLog::event=sub {push @events,[@_]};
+  ok($remember->('orphanCleanupBlocked',{brightness=>49}),'unremovable orphan cannot block fresh cached values');
+  ok(grep($_->[1] eq 'picture-settings-cache-prune-failed',@events),'orphan cleanup failure is logged');
+  ok(main::lg_remember_picture_settings('{"status":"ok","picture_settings":{}}','{}'),'unscoped answer still clears the current pointer when orphan cleanup fails');
+  ok(!exists(PGAutomation::read_json_file(main::lg_picture_settings_cache_path())->{current}),'cleanup failure cannot leave old values labelled current');
+  rmdir($blocked) or die $!;
+ }
+ for my $version (1,4) {
+  PGAutomation::write_json_atomic(main::lg_picture_settings_cache_path(),{schema_version=>$version,contexts=>{stale=>{}}});
+  is_deeply(main::lg_read_picture_settings_cache(),{},"schema $version cannot pass through as a current cache");
+ }
+ PGAutomation::write_json_atomic(main::lg_picture_settings_cache_path(),$old);
+ is_deeply(main::lg_read_picture_settings_cache(),$old,'legacy v2 remains readable before migration');
  ok(PGAutomation::write_atomic(main::lg_picture_settings_cache_path(),'[]'),'inject wrong index type');
  is_deeply(main::lg_read_picture_settings_cache(),{},'wrong index type is a cache miss');
 }

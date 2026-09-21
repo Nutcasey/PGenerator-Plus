@@ -20,25 +20,21 @@
 /* Phone steadiness. This must run before any other script registers.
    - The dashboard stays hidden until the first layout pass has restored the
      saved card order and collapse state; pgLayoutInit reveals it (4 s fallback).
-   - iOS zooms into any focused field under 16px and never zooms back out.
-     maximum-scale stops that, and iOS still allows pinch zoom.
-   - A phone toolbar or keyboard sliding changes only the viewport height, and
-     nothing in Tablet depends on height. Those resizes stop here instead of
-     re-running layout and redrawing every chart mid-scroll. Synthetic resize
-     events that the chart code dispatches itself still pass. */
+   - Touch inputs use at least 16px in CSS to avoid focus zoom without limiting
+     the operator's pinch zoom.
+   - Toolbar and keyboard height changes are labelled for the width-based
+     layout and chart handlers to skip. Other resize listeners still run;
+     header offsets, CSS viewport units and ResizeObservers handle height.
+     Synthetic chart resizes and orientation width changes remain untouched. */
 (function(){
- var root=document.documentElement,ua=navigator.userAgent||'';
+ var root=document.documentElement;
  root.setAttribute('data-pg-booting','1');
  setTimeout(function(){root.removeAttribute('data-pg-booting');},4000);
- if(/iPhone|iPad|iPod/.test(ua)||(/Macintosh/.test(ua)&&navigator.maxTouchPoints>1)){
-  var viewport=document.querySelector('meta[name="viewport"]');
-  if(viewport) viewport.setAttribute('content','width=device-width, initial-scale=1.0, maximum-scale=1.0');
- }
  if(!window.matchMedia||!window.matchMedia('(pointer:coarse)').matches) return;
  var width=window.innerWidth;
  window.addEventListener('resize',function(e){
   var now=window.innerWidth;
-  if(e.isTrusted&&now===width&&document.body&&document.body.classList.contains('layout-tablet')) e.stopImmediatePropagation();
+  if(e.isTrusted&&now===width&&document.body&&document.body.classList.contains('layout-tablet')) e.pgHeightOnlyTabletResize=true;
   width=now;
  });
 })();

@@ -7135,7 +7135,10 @@ sub lg_picture_set_in_session (@) {
    # A failed group may still have verified most values. Preserve that
    # evidence and retry only the remainder; an acknowledgement alone never
    # licenses skipping a required readback.
-   my @retry=grep {($verified{$_}{status}||'') ne 'verified'} @bulk;
+   my @retry=grep {
+    my $status=$verified{$_}{status}||'';
+    $status ne 'verified' && !($status eq 'acknowledged_unverified' && !$setting_contracts->{$_}{require_readback})
+   } @bulk;
    if(@retry) {
     &diag_log_append('picture_set:grouped-fallback',{ip=>$ip,controls=>scalar(@bulk),verified=>scalar(@bulk)-scalar(@retry),retry_keys=>\@retry,message=>$part->{message}||'Required readback not verified'});
     push @single,@retry;
@@ -7150,6 +7153,8 @@ sub lg_picture_set_in_session (@) {
    delete $verified{$key};
    $merge->($part,[$key]);
    if(($part->{status}||'') ne 'ok') {
+    $verified{$key}||={status=>'write_refused',expected=>$settings_to_apply->{$key},
+     reason=>$part->{message}||'The individual write failed',route=>$setting_contracts->{$key}{write}{route}||''};
     return {%$part,applied=>\%applied,previously_applied=>\%applied,picture_settings=>\%observed,
      setting_verification=>\%verified,setting_contracts=>$setting_contracts,failed_setting_key=>$key};
    }

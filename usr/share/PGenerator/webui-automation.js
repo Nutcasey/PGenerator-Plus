@@ -2019,24 +2019,57 @@ function pgAutomationSyncLiveMark(){
 }
 // The greyscale table lists measured patches only, so its live row is the most
 // recent real reading: one patch behind the charts' ghost while the meter is
-// still integrating. The table follows the run by itself; the page never moves.
+// still integrating. Manual scrolling pauses following until explicitly resumed.
 function pgAutomationMarkLiveTableRow(){
  document.querySelectorAll('tr.auto-live-row').forEach(tr=>tr.classList.remove('auto-live-row'));
  const mark=(typeof meterLiveMark==='function')?meterLiveMark():null;
  if(!mark)return;
- const rows=[...document.querySelectorAll('[data-pg-live] tr[data-ire]')];
- if(!rows.length)return;
- let row=null;
- rows.forEach(tr=>{
-  const ire=Number(tr.dataset.ire);
-  if(isFinite(ire)&&(mark.ire==null||ire<=Number(mark.ire)))row=tr;
+ // Both the observer and Automation can show this stage at once. Each
+ // view owns its highlight and scroll choice independently.
+ document.querySelectorAll('[data-pg-live]').forEach(section=>{
+  const rows=[...section.querySelectorAll('tr[data-ire]')];
+  if(!rows.length)return;
+  let row=null;
+  rows.forEach(tr=>{
+   const ire=Number(tr.dataset.ire);
+   if(isFinite(ire)&&(mark.ire==null||ire<=Number(mark.ire)))row=tr;
+  });
+  row=row||rows[rows.length-1];
+  row.classList.add('auto-live-row');
+  pgAutomationFollowTableRow(section,row);
  });
- row=row||rows[rows.length-1];
- row.classList.add('auto-live-row');
+}
+function pgAutomationFollowTableRow(section,row){
  const scroller=pgAutomationScrollerFor(row);
  if(!scroller)return;
+ const owner=Object.entries(pgAutomation.jobViews||{}).find(([view])=>pgAutomationJobTarget(view)?.contains(section));
+ // Keep preferences with the job because width/DPR changes rebuild sections.
+ const states=owner?(owner[1].tableFollow||(owner[1].tableFollow={})):section;
+ const key=owner?(section.dataset.sectionKey||'readings'):'_pgTableFollow';
+ const follow=states[key]||(states[key]={enabled:true,top:scroller.scrollTop});
+ if(follow.scroller!==scroller){
+  follow.scroller=scroller;
+  scroller.scrollTop=follow.top;
+  const button=document.createElement('button');
+  button.type='button';button.className='btn btn-sm';
+  button.textContent='Follow latest reading';button.hidden=follow.enabled;
+  scroller.before(button);
+  const pause=()=>{follow.enabled=false;button.hidden=false;};
+  button.addEventListener('click',()=>{follow.enabled=true;button.hidden=true;pgAutomationMarkLiveTableRow();});
+  scroller.addEventListener('wheel',pause,{passive:true});
+  scroller.addEventListener('touchmove',pause,{passive:true});
+  scroller.addEventListener('keydown',event=>{
+   if(['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(event.key))pause();
+  });
+  scroller.addEventListener('scroll',()=>{
+   if(Math.abs(scroller.scrollTop-follow.top)>1)pause();
+   follow.top=scroller.scrollTop;
+  },{passive:true});
+ }
+ if(!follow.enabled)return;
  const top=row.offsetTop-scroller.clientHeight/2+row.offsetHeight/2;
  scroller.scrollTop=Math.max(0,Math.min(top,scroller.scrollHeight-scroller.clientHeight));
+ follow.top=scroller.scrollTop;
 }
 function pgAutomationScrollerFor(el){
  let node=el&&el.parentElement;
@@ -2393,7 +2426,8 @@ async function pgAutomationRenderSectionCharts(view,sectionEl){
 
 // Rebuild snapshots after a window/screen change, even if measurements have
 // not changed. Reuse saved job data; resizing must never make device requests.
-if(typeof window!=='undefined')window.addEventListener('resize',()=>{
+if(typeof window!=='undefined')window.addEventListener('resize',event=>{
+ if(event.pgHeightOnlyTabletResize)return;
  clearTimeout(pgAutomation.graphResizeTimer);
  pgAutomation.graphResizeTimer=setTimeout(()=>{
   Object.entries(pgAutomation.jobViews||{}).forEach(([view,state])=>{

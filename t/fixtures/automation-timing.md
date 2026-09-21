@@ -3,11 +3,12 @@
 `usr/share/PGenerator/automation-timing.json` contains seven completed jobs
 from the Raspberry Pi's saved automation records, retrieved on 20 September
 2026 through the read-only item-artifact API. It contains timing and workload
-metadata only. The source identifier is the run ID followed by the item index.
+metadata only. Stable source labels identify the seven jobs without publishing
+run IDs, device identity, firmware or absolute checkpoint timestamps.
 
-The six-job run `20260918-181522-8a9142` covers two SDR hybrid-3 profiles, two
+The six-job run from 18 September 2026 covers two SDR hybrid-3 profiles, two
 HDR matrix profiles and two Dolby Vision profiles, all with Dark Detail and
-a 0.5 target. `20260920-103139-9b2f50`, item 0, supplies the stricter 0.2 SDR
+a 0.5 target. The first job from 20 September 2026 supplies the stricter 0.2 SDR
 greyscale and hybrid-9 colour profile. Recorded durations include checks,
 profiling, solve/upload and calibration-mode exit as separate stages.
 
@@ -26,7 +27,11 @@ calibration durations. There are no invented defaults for unobserved signal
 families or profiling methods. A different accuracy target may reuse point
 weights once live measurements establish its pace, but does not inherit the
 recorded total duration. Future completed greyscale passes save their own
-trajectories, and newer comparable timings supersede the factory priors.
+trajectories. Comparable local measurements take precedence over factory priors.
+The model uses up to three recent dated samples and three undated legacy
+samples per compatible workload. Weekly gaps do not expire measured history,
+and dated samples cannot displace evidence whose date is unknown. Durations
+and relative curves remain intact.
 Local history is optional. Completed checkpoints save a compact `timing.json`
 index; startup reads at most 100 such records, with heartbeat/stop checks
 between them. Legacy full manifests are limited to 2 MiB each and 8 MiB total.

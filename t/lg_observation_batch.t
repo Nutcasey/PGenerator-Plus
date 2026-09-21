@@ -6,6 +6,8 @@ use FindBin qw($Bin);
 use File::Temp qw(tempdir);
 use Test::More;
 use JSON::PP ();
+use Fcntl qw(:flock);
+use Time::HiRes ();
 use lib "$Bin/../usr/share/PGenerator";
 use PGLGCapabilities qw(lg_record_setting_observation lg_record_setting_observations);
 
@@ -66,6 +68,18 @@ is($settings->{brightness}{write}{count},13,'each batch contributes once');
 is(document()->{contexts}{$other->{context_hash}}{settings}{brightness}{read}{count},1,'concurrent changes do not cross inputs');
 
 # A failed atomic replacement must leave the previous evidence intact.
+$before=document();
+{
+ open(my $lock,'>>',$saved->{path}.'.lock') or die $!;
+ flock($lock,LOCK_EX) or die $!;
+ my $start=Time::HiRes::time();
+ my $blocked=lg_record_setting_observations($identity,$context,\@observations,store_root=>$store,lock_timeout=>.1);
+ is($blocked->{error},'observation-lock-failed','contended observation lock returns a bounded failure');
+ cmp_ok(Time::HiRes::time()-$start,'<',1,'lock contention does not strand the helper');
+ is_deeply(document(),$before,'timeout leaves earlier evidence unchanged');
+ close($lock);
+ ok(lg_record_setting_observations($identity,$context,\@observations,store_root=>$store)->{ok},'observation writes recover after the lock is released');
+}
 $before=document();
 mkdir($saved->{path}.'.tmp.'.$$) or die $!;
 my $failed=lg_record_setting_observations($identity,$context,\@observations,store_root=>$store);

@@ -77,7 +77,8 @@ sub lg_read_picture_settings_cache (@) {
  my $path=&lg_picture_settings_cache_path();
  my $store=PGAutomation::read_json_file($path);
  return {} if(ref($store) ne 'HASH');
- return $store if(($store->{schema_version}||0)!=3);
+ return $store if(($store->{schema_version}||0)==2);
+ return {} if(($store->{schema_version}||0)!=3);
  my $id=$store->{current}||'';
  my $context_path=&lg_picture_settings_context_path($id);
  my $cache=$context_path && ref($store->{contexts}) eq 'HASH' && exists($store->{contexts}{$id})
@@ -93,6 +94,26 @@ sub lg_picture_settings_context_path (@) {
  my ($id)=@_;
  return '' if(!defined($id) || $id !~ /\A[0-9a-f]{64}\z/);
  return &lg_data_dir()."/picture-settings-cache/$id.json";
+}
+
+# Recover files left between a context write and the index commit. Run under
+# the index lock so an in-flight writer's new context cannot be swept away.
+sub lg_picture_settings_cache_sweep (@) {
+ my ($store)=@_;
+ return if(ref($store) ne 'HASH' || ($store->{schema_version}||0)!=3 || ref($store->{contexts}) ne 'HASH');
+ my $dir=&lg_data_dir().'/picture-settings-cache';
+ opendir(my $dh,$dir) or return;
+ my @ids=map {substr($_,0,64)} grep {/\A[0-9a-f]{64}\.json\z/} readdir($dh);
+ closedir($dh);
+ my ($failed,$error)=(0,'');
+ foreach my $id (@ids) {
+  next if(exists($store->{contexts}{$id}));
+  my $path=&lg_picture_settings_context_path($id);
+  if(!unlink($path) && -e $path) {$failed++;$error="$!";}
+ }
+ # Retry inaccessible orphans on the next write without blocking fresh data
+ # or clearing an unconfirmed current context.
+ PGCalibrationLog::event('Daemon','picture-settings-cache-prune-failed',{files=>$failed,reason=>$error}) if($failed);
 }
 
 # Split the old aggregate once, retaining the mode history and per-key ages.
@@ -144,6 +165,7 @@ sub lg_remember_picture_settings (@) {
  # An unscoped/virtual response must not leave an old coherent snapshot
  # labelled as current. Retain history but clear the current pointer.
  my ($ok)=PGAutomation::with_lock(&lg_picture_settings_cache_path(),sub {
+  &lg_picture_settings_cache_sweep($_[0]);
   my $store=&lg_picture_settings_cache_upgrade($_[0]);
   if(!$context){delete $store->{current};return $store;}
   my $id=sha256_hex(PGAutomation::encode_json($context));
@@ -173,7 +195,7 @@ sub lg_remember_picture_settings (@) {
   my @old=sort {($store->{contexts}{$b}{updated_at}||0)<=>($store->{contexts}{$a}{updated_at}||0)} grep {$_ ne $id} keys %{$store->{contexts}};
   foreach my $old (@old>31 ? @old[31..$#old] : ()) {
    my $old_path=&lg_picture_settings_context_path($old);
-   unlink($old_path) if($old_path);
+   die "Unable to prune picture-settings cache: $!\n" if($old_path && !unlink($old_path) && -e $old_path);
    delete $store->{contexts}{$old};
   }
   return $store;

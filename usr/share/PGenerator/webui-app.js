@@ -3288,7 +3288,7 @@ function pgLayoutInit(){
    pgLayoutPanelObserver.observe(dashboard,{subtree:true,attributes:true,attributeFilter:['style']});
   }catch(e){}
  }
- window.addEventListener('resize',()=>{
+ window.addEventListener('resize',event=>{
   const width=Math.round(window.innerWidth||0);
   const height=Math.round(window.innerHeight||0);
   // Chart code deliberately dispatches synthetic resize events after a
@@ -3299,6 +3299,7 @@ function pgLayoutInit(){
   pgLayoutViewportWidth=width;
   pgLayoutViewportHeight=height;
   pgUpdateHeaderOffset();
+  if(event.pgHeightOnlyTabletResize)return;
   if(pgLayoutResizeTimer) clearTimeout(pgLayoutResizeTimer);
   pgLayoutResizeTimer=setTimeout(()=>pgApplyLayout(),80);
  });

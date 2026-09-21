@@ -177,9 +177,13 @@ sub workload {
 
 sub duration_model {
  my ($samples)=@_;
- my @s=sort {($b->{completed_at}||0)<=>($a->{completed_at}||0)} @$samples;
- @s=grep {($_->{completed_at}||0)>=$s[0]{completed_at}-172800} @s if @s && $s[0]{completed_at};
- splice(@s,3) if @s>3;
+ my @dated=sort {$b->{completed_at}<=>$a->{completed_at}} grep {$_->{completed_at}} @$samples;
+ my @undated=grep {!$_->{completed_at}} @$samples;
+ # Bound both groups without pretending that an unknown legacy date is old.
+ # Weekly gaps do not expire dated measurements or exclude undated evidence.
+ splice(@dated,3) if @dated>3;
+ splice(@undated,3) if @undated>3;
+ my @s=(@dated,@undated);
  return undef if !@s;
  my @seconds=sort {$a<=>$b} map {$_->{seconds}} @s;
  my $middle=median(@seconds);
@@ -252,6 +256,7 @@ sub update {
  my $index=$preflight ? 0 : $run->{active_item};
  my $stage=$run->{active_stage}||'';
  my $worker=$run->{worker_status}||{};
+ my $worker_finished=($worker->{status}||'') =~ /^(?:complete|completed|done|failed|error|stopped|interrupted)$/;
  my $clock=$run->{worker_timing}||{};
  my $items=$run->{items}||[];
  # Recalculate immediately after queue edits, stage/pass changes or a resume.
@@ -280,7 +285,7 @@ sub update {
   }
   $model={%$model} if $model;
   my $prior=baseline($job,$next);
-  if ($prior && (!$model || $prior->{latest_at}>$model->{latest_at})) {$model={%$prior};$seeded=1;}
+  if ($prior && !$model) {$model={%$prior};$seeded=1;}
   $model->{curve}=$prior->{curve} if $model && !$model->{curve} && $prior && $prior->{curve};
   $model->{tail_seconds}=$prior->{tail_seconds} if $model && !defined($model->{tail_seconds}) && $prior && defined($prior->{tail_seconds});
   if (!$model && defined($live_stage_total) && $next eq $stage
@@ -339,18 +344,19 @@ sub update {
    $result->{adaptive}=JSON::PP::true;
   }
  }
- if ($stage eq 'volume-done' && $valid_clock && $clock->{tail_started_at} && $current_model && $current_model->{tail_seconds}) {
+ if ($stage eq 'volume-done' && $valid_clock && ($worker->{status}||'') eq 'running'
+     && $clock->{tail_started_at} && $current_model && $current_model->{tail_seconds}) {
   $current=remaining_from_history($current_model->{tail_seconds},$now-$clock->{tail_started_at});
  }
  my $curve=$current_model ? $current_model->{curve} : undef;
- if (!$curve && $stage eq 'greyscale-done' && $valid_clock && $completed>=3 && $elapsed>=120) {
+ if (!$curve && $stage eq 'greyscale-done' && $valid_clock && ($worker->{status}||'') eq 'running' && $completed>=3 && $elapsed>=120) {
   # A new accuracy target has no measured duration yet. Its identical point
   # order can still supply weights; only this run supplies the elapsed pace.
   my $shape=baseline($item,$stage,1);
   $curve=$shape->{curve} if $shape;
   if ($curve && $total==$curve->{total_steps} && $done>0 && $done<$total && $curve->{fractions}[$done]>0 && !defined($same)) {
    my $completed_elapsed=defined($clock->{point_started_at}) ? $clock->{point_started_at}-$clock->{started_at} : $elapsed;
-   $same=$completed_elapsed/$curve->{fractions}[$done];$approximate=1;
+   if ($completed_elapsed>0) {$same=$completed_elapsed/$curve->{fractions}[$done];$approximate=1;}
   }
  }
  if ($stage eq 'greyscale-done' && $valid_clock && defined($same) && $same>0 && ($worker->{status}||'') eq 'running'
@@ -372,7 +378,8 @@ sub update {
   $pass=$current;
   $result->{adaptive}=JSON::PP::true if $done>0;
  }
- if (!defined($current) && defined($same)) {
+ if (!defined($current) && defined($same) && $same>0
+     && !($worker_finished && $valid_clock && $stage =~ /^(?:greyscale|volume|pre-readings|post-readings)-done$/)) {
   $current=remaining_from_history($same,$now-($run->{stage_started_at}||$now));
  }
  $live_stage_total=$current+($now-($run->{stage_started_at}||$now)) if defined($pass) && defined($current);

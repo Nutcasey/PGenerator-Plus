@@ -15401,7 +15401,8 @@ function meterLiveTick(){
 
 if(typeof window!=='undefined'&&!window._pgLiveResizeBound){
  window._pgLiveResizeBound=true;
- window.addEventListener('resize',()=>{
+ window.addEventListener('resize',event=>{
+  if(event.pgHeightOnlyTabletResize)return;
   clearTimeout(window._pgLiveResizeTimer);
   window._pgLiveResizeTimer=setTimeout(()=>{if(pgLiveSurfaces.length) meterLiveRefreshSurfaces();},150);
  });
@@ -22423,7 +22424,8 @@ function meterRefreshActiveSeriesCharts(options){
 }
 
 let meterGreyscaleResizeTimer=null;
-window.addEventListener('resize',()=>{
+window.addEventListener('resize',event=>{
+ if(event.pgHeightOnlyTabletResize)return;
  if(meterActiveSeriesType!=='greyscale') return;
  if(meterGreyscaleResizeTimer) clearTimeout(meterGreyscaleResizeTimer);
  const resizeRevision=meterSeriesChartRevision;
