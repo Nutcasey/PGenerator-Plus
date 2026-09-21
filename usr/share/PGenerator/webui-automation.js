@@ -1991,7 +1991,7 @@ function pgAutomationPaintLiveFigures(){
  Object.entries(pgAutomation.jobViews||{}).forEach(([view,state])=>{
   pgAutomationJobTarget(view)?.querySelectorAll('details.auto-section-running').forEach(section=>{
    const current=!!active&&state.runId===active.runId&&state.index===active.index
-    &&state.data.active_stage===active.data.active_stage&&state.data.stage_started_at===active.data.stage_started_at;
+    &&state.data?.active_stage===active.data.active_stage&&state.data?.stage_started_at===active.data.stage_started_at;
    section.toggleAttribute('data-pg-live',current);
    const el=section.querySelector('.auto-section-figure');if(!el||!current)return;
    const live=state.sectionLive?.[section.dataset.sectionKey]||{};
