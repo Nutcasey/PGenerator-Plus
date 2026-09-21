@@ -186,7 +186,12 @@ published payload trees without checking AGENTS.md ignore rules)
   formulas (Perceptual/Absolute/Chromaticity, gain curve, plot-cache key, the
   selectable meterRgbBalanceNoiseFloor input incl. its html options, the
   Flat/Empirical noise-floor mode (per-step k·σ from repeat-reading scatter,
-  pre-gain samples, fallback to the flat value), the
+  pre-gain samples, fallback to the flat value), the noise-analysis-context
+  fingerprint (formula|grey-ref|gamma|gamut|whitept|tech|ccss — every input
+  that changes the recorded deviation quantity wipes the scatter store; the
+  sandbox's meterLiveRgbData has a __realCalc branch that runs the REAL
+  balance math — stubbed balance math is what hid the round-4/5 fabrications),
+  the
   Perceptual-only availability gating, the live-bar noise flags, and the
   within-noise dim + hover-title in the HTML live-RGB columns
   meterGreyTvColumnHtml. Brace-extracts the live functions from webui-app.js

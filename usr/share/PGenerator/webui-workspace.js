@@ -20042,6 +20042,12 @@ meterDisplayTypeEl.addEventListener('change',function(){
  }
  this.dataset.lastStableValue=v;
  meterApplyDisplayTypeSelection(v,{patchSizeDefault:true});
+ // The technology itself changes what measurements mean (calibration path,
+ // pattern defaults) and resets Meter Profile below — invalidate scatter
+ // immediately so a stale floor cannot annotate before the next reading
+ // (review #22 round 5 P2; the record-time context fingerprint is the
+ // backstop for programmatic resets that fire no event).
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  // Display Type owns calibration path (OLED/LCD/WRGB). Selecting a type
  // resets Meter Profile (CCSS) to Auto so the generic built-in for that
  // technology is used; the operator can then pick a custom/display CCSS.

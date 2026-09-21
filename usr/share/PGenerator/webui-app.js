@@ -14350,15 +14350,51 @@ let meterNoiseHistory=null;
 // different analysis views must never share a sigma, so a context change
 // observed at record time wipes the store before the new sample lands
 // (review #22 round 4, P1: switching views between repeats fabricated a
-// 10-cap floor). Keyed on formula|grey-ref only: the Flat/Empirical mode
-// select is a judgment switch, not a measurement context.
+// 10-cap floor). The fingerprint covers EVERY input that changes the
+// recorded deviation quantity, not just the two view selectors (review
+// #22 round 5, P1: Target Gamma 2.2->2.4 between two identical continuous
+// reads folded the L* target shift — 2.1 L* at 10 IRE — into sigma). The
+// Flat/Empirical mode select stays OUT: a judgment switch, not a
+// measurement context.
 let meterNoiseAnalysisContext=null;
+// The full fingerprint. Members beyond formula|grey-ref, with why:
+//  - gamma:   the resolved grey target gamma (meterGreyTargetGammaSelection
+//             re-derives the target curve; the dropdown handler edits the
+//             live series while continuous reads own the patch);
+//  - gamut:   meterAnalysisGamutKey — the lin-RGB matrix the L* deltas are
+//             taken through (the Target Gamut handler regrades live);
+//  - whitept: meterTargetWhitePoint — target XY (custom-D65 fields, and
+//             meterUseMeasuredWhiteTarget writes them programmatically);
+//  - tech:    the Display Type select — a technology change resets Meter
+//             Profile directly (no change event fires, review #22 round 5
+//             P2), so the effective correction identity must be tracked at
+//             record time where no event is guaranteed;
+//  - ccss:    the Meter Profile select value ('' = Auto: the technology's
+//             built-in curve — combined with tech above this IS the
+//             effective correction configuration).
+// Every read past the first two is individually guarded: a transient
+// accessor failure must not throw out of record — it yields the literal
+// 'err' token, and an err<->value flip wipes the store, which is the
+// fail-safe direction (over-wiping costs re-reads only).
+function meterNoiseAnalysisContextString(){
+ const parts=[meterRgbBalanceFormula(),meterGreyRefMode()];
+ try{ parts.push('g:'+String(meterGreyTargetGammaSelection()||'')); }catch(e){ parts.push('g:err'); }
+ try{ parts.push('gam:'+String(meterAnalysisGamutKey()||'')); }catch(e){ parts.push('gam:err'); }
+ try{ const wp=meterTargetWhitePoint(); parts.push('wp:'+(wp?wp.x+','+wp.y:'err')); }catch(e){ parts.push('wp:err'); }
+ try{ parts.push('tech:'+String((document.getElementById('meterDisplayType')||{}).value||'')); }catch(e){ parts.push('tech:err'); }
+ try{ parts.push('ccss:'+String((document.getElementById('meterCcssProfile')||{}).value||'')); }catch(e){ parts.push('ccss:err'); }
+ return parts.join('|');
+}
 // Check + (on change) wipe. Called at record time AND from both analysis
 // view-change handlers, so stale cross-view floors cannot annotate even in
-// the window between the switch and the next reading.
+// the window between the switch and the next reading. The gamma/gamut/
+// custom-white handlers already route through meterOnGreyRefChange, so the
+// widened fingerprint fires the handler-time wipe on those edits too;
+// programmatic edits (DV signal-mode gamma setVal, technology-driven CCSS
+// reset) have no event and are caught by the record-time sync.
 function meterSyncNoiseAnalysisContext(){
  try{
-  const ctx=meterRgbBalanceFormula()+'|'+meterGreyRefMode();
+  const ctx=meterNoiseAnalysisContextString();
   if(meterNoiseAnalysisContext===ctx) return;
   const had=meterNoiseAnalysisContext!==null;
   meterNoiseAnalysisContext=ctx;

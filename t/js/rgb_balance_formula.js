@@ -48,6 +48,7 @@ const FN_NAMES = [
   'meterFormatNoiseFloorValue',
   'meterNoiseHistoryStore',
   'meterSyncNoiseAnalysisContext',
+  'meterNoiseAnalysisContextString',
   'meterStepNoiseKey',
   'meterRecordReadingNoise',
   'meterReplaceReadings',
@@ -195,6 +196,15 @@ const document = { getElementById: (id) => {
   if (id === 'meterNoiseFloorModeStatus') {
     return (typeof globalThis.__modeStatus !== 'undefined' && globalThis.__modeStatus) || null;
   }
+  // Noise-context fingerprint reads (round 5): Display Type and Meter
+  // Profile selects must NOT fall through to __sel (a formula switch would
+  // alias into the tech/ccss fingerprint tokens and wipe on unrelated edits).
+  if (id === 'meterDisplayType') {
+    return (typeof globalThis.__techEl !== 'undefined' && globalThis.__techEl) || null;
+  }
+  if (id === 'meterCcssProfile') {
+    return (typeof globalThis.__ccssEl !== 'undefined' && globalThis.__ccssEl) || null;
+  }
   return (typeof globalThis.__sel !== 'undefined' && globalThis.__sel) || null;
 } , querySelectorAll: (sel) => {
   if (sel === '.noise-floor-preset') return globalThis.__presetBtns || [];
@@ -213,7 +223,14 @@ globalThis.__recIsGrey = true;
 globalThis.__recIsReal = true;
 function meterReadingIsGreyscale() { return globalThis.__recIsGrey; }
 function meterReadingIsRealMeasurement() { return globalThis.__recIsReal; }
-function meterLiveRgbData(rd) { return globalThis.__liveBal || null; }
+function meterLiveRgbData(rd) {
+  // Round 5 (P1 repro): with __realCalc set, run the REAL extracted
+  // balance math instead of returning __liveBal, so the gamma-target
+  // fabrication is exercised through rgbBalanceLstar rather than a stub
+  // (the stub was exactly the blind spot that hid the round-4/5 bug).
+  if (globalThis.__realCalc) return rgbBalance(rd, globalThis.__whiteRef, meterGreyRefMode(), 0);
+  return globalThis.__liveBal || null;
+}
 // Analysis-context tracking (review #22 round 4 P1): the module-level context
 // var must exist in the sandbox (only functions are brace-extracted).
 let meterNoiseAnalysisContext = null;
@@ -231,11 +248,15 @@ function meterDeltaEForm() { return 'deitp'; }
 function meterGrayWorldWeight() { return null; }
 function meterReadingXYZ(rd) { return rd ? { X: rd.X, Y: rd.Y, Z: rd.Z } : null; }
 function meterResolveGreyRefMode(m) { return m || 'relative'; }
-function meterTargetWhitePoint() { return { X: 0.9505, Y: 1.0, Z: 1.0890 }; } // D65-ish, matches app default
+function meterTargetWhitePoint() { return globalThis.__wpOverride || { x: 0.3127, y: 0.3290, X: 0.9505, Y: 1.0, Z: 1.0890 }; } // D65-ish, matches app default
 function meterGreyTargetPeak(whiteY) { return whiteY; }
 function meterBlackReadingY() { return 0; }
+// Fingerprint members resolved from live controls (round 5): gamma dropdown
+// selection and the analysis gamut key, both stub-driven.
+function meterGreyTargetGammaSelection() { return globalThis.__gammaSel || 'bt1886'; }
+function meterAnalysisGamutKey() { return __gamutKey; }
 function meterGreyTargetLuminance(ire, Lw, Lb, code) {
-  return Lw * Math.pow(Math.max(0, Math.min(1, ire / 100)), 2.2); // fixed gamma 2.2; relative mode rescales target to measured Y, eotf tests assert against this same stub
+  return Lw * Math.pow(Math.max(0, Math.min(1, ire / 100)), globalThis.__targetGammaExp || 2.2); // default gamma 2.2; round-5 tests flip __targetGammaExp to prove the real balance math tracks the gamma target; relative mode rescales target to measured Y, eotf tests assert against this same stub
 }
 function meterReadingIsPeakHeadroom(rd) { return false; }
 function meterAnalysisGamut() { return { xyzToRgb: BT709_XYZ2RGB }; }
@@ -1538,6 +1559,158 @@ test('noise_analysis_context_switch_wipes_store', () => {
   globalThis.__sel = null; globalThis.__greyRef = null;
   globalThis.__noiseMode = null; globalThis.__noiseFloor = null;
   globalThis.__liveBal = null;
+});
+
+test('target_gamma_edit_wipes_scatter_real_calc', () => {
+  // Review #22 round 5 P1: the round-4 fingerprint keyed on formula|grey-ref
+  // only. Target Gamma is NOT in that pair yet rgbBalanceLstar's TARGET
+  // depends on it, so a live gamma edit 2.2->2.4 between two identical
+  // continuous reads folded the L* target shift into sigma (bench:
+  // perceptual|eotf, 100-nit white, 10% patch -> 3.08 L* fabricated floor,
+  // all channels wrongly 'within noise'). This test runs the REAL balance
+  // math (meterLiveRgbData -> rgbBalanceLstar via the __realCalc branch) —
+  // the stubbed-balance blind spot named in the review is what hid both
+  // round-4 and round-5 variants.
+  globalThis.__noiseMode = { value: 'empirical' };
+  globalThis.__noiseFloor = { value: '0.3' };
+  globalThis.__sel = { value: 'perceptual' };
+  globalThis.__greyRef = 'eotf';
+  globalThis.__whiteRef = { X: 100, Y: 100, Z: 114 };
+  globalThis.__realCalc = true;
+  globalThis.__gammaSel = '2.2';
+  globalThis.__targetGammaExp = 2.2;
+  S.meterReplaceReadings([]); // wipe store, seed refs
+  // Sample 1 under gamma 2.2 (first record seeds the context silently).
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 10, ire: 10 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 1, 'gamma-2.2 sample stored');
+  // Operator edits Target Gamma to 2.4 (the dropdown handler regrades the
+  // live series; continuous reads keep running). Identical XYZ, new ts.
+  globalThis.__gammaSel = '2.4';
+  globalThis.__targetGammaExp = 2.4;
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 11, ire: 10 }, { name: '10%' });
+  const h = S.meterNoiseHistoryStore().get('10%');
+  assert(h && h.vals.length === 1, 'target-gamma edit wiped the pre-edit sample');
+  assert(S.meterEmpiricalNoiseFloorFor({ name: '10%' }) === null,
+    'cross-gamma pair must NOT produce an empirical floor (single fresh sample)');
+  assertClose(S.meterRgbBalanceEffectiveNoiseFloor({ name: '10%' }), 0.3, 1e-9,
+    'effective floor after a gamma edit is the typed value, not a fabricated one');
+  // Same-context accumulation still works and the real math produces a
+  // genuine (finite) floor path: a distinct reading under the SAME gamma
+  // adds a second sample.
+  S.meterRecordReadingNoise({ X: 0.602, Y: 0.601, Z: 0.682, timestamp: 12, ire: 10 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 2,
+    'same-gamma repeat accumulates through the real balance calc');
+  // Cleanup: empty store + unset context so later blocks reseed cleanly.
+  S.meterReplaceReadings([]);
+  globalThis.__realCalc = false; globalThis.__gammaSel = null;
+  globalThis.__targetGammaExp = null; globalThis.__whiteRef = null;
+  globalThis.__sel = null; globalThis.__greyRef = null;
+  globalThis.__noiseMode = null; globalThis.__noiseFloor = null;
+});
+
+test('gamut_and_whitepoint_edits_wipe_scatter', () => {
+  // Round 5 P1 (companion vectors): the same live-series-edit class applies
+  // to the analysis gamut (the lin-RGB matrix) and the target white point
+  // (custom-D65 fields). Deviations recorded under two matrices/targets are
+  // different quantities. __liveBal stays constant here, so ANY wipe can
+  // only come from the fingerprint widening — exactly what is pinned.
+  globalThis.__noiseMode = { value: 'empirical' };
+  globalThis.__noiseFloor = { value: '0.3' };
+  globalThis.__sel = { value: 'perceptual' };
+  globalThis.__greyRef = 'relative';
+  globalThis.__liveBal = { R: 100.5, G: 100, B: 100, gain: 1 };
+  S.meterReplaceReadings([]);
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 20 }, { name: '10%' });
+  const prevGamut = S.setGamutKey('p3'); // Target Colorspace edit
+  S.meterRecordReadingNoise({ X: 0.601, Y: 0.601, Z: 0.681, timestamp: 21 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 1,
+    'analysis-gamut edit wiped the pre-edit sample');
+  S.meterReplaceReadings([]);
+  // White point: custom-D65 fields edited between identical-balance reads
+  // (fresh segment: returning to a previous fingerprint legitimately wipes
+  // the foreign-context samples too, so each vector starts from empty).
+  S.meterRecordReadingNoise({ X: 0.602, Y: 0.602, Z: 0.682, timestamp: 22 }, { name: '10%' });
+  globalThis.__wpOverride = { x: 0.3137, y: 0.3278, X: 0.9555, Y: 1.0, Z: 1.0760 }; // D50
+  S.meterRecordReadingNoise({ X: 0.603, Y: 0.603, Z: 0.683, timestamp: 23 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 1,
+    'target-white-point edit wiped the previous-target samples');
+  S.meterReplaceReadings([]);
+  S.setGamutKey(prevGamut); // restore sandbox gamut; store is empty so the restore-wipe is inert
+  globalThis.__wpOverride = null; globalThis.__sel = null;
+  globalThis.__greyRef = null; globalThis.__noiseMode = null;
+  globalThis.__noiseFloor = null; globalThis.__liveBal = null;
+});
+
+test('panel_technology_and_profile_wipe_scatter', () => {
+  // Review #22 round 5 P2: changing Display Type resets Meter Profile
+  // (CCSS) programmatically — no change event fires — so the CCSS handler's
+  // invalidation never runs and samples survive a correction-profile change
+  // (bench: oled_generic->lcd_wled with No Correction->Auto kept both
+  // samples and their 0.0828 floor). The fingerprint's tech+ccss tokens
+  // catch the reset at record time even with no event; the handler call
+  // (structural pin below) wipes eagerly on the user gesture.
+  globalThis.__noiseMode = { value: 'empirical' };
+  globalThis.__noiseFloor = { value: '0.3' };
+  globalThis.__sel = { value: 'perceptual' };
+  globalThis.__greyRef = 'relative';
+  globalThis.__liveBal = { R: 100.5, G: 100, B: 100, gain: 1 };
+  globalThis.__techEl = { value: 'oled_generic' };
+  globalThis.__ccssEl = { value: '' };
+  S.meterReplaceReadings([]);
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 30 }, { name: '10%' });
+  S.meterRecordReadingNoise({ X: 0.601, Y: 0.601, Z: 0.681, timestamp: 31 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 2, 'two samples accumulate under oled_generic');
+  // The technology handler's reset: select value flips AND ccss.value=''
+  // lands without any event. Next record must see a new fingerprint.
+  globalThis.__techEl.value = 'lcd_wled';
+  globalThis.__ccssEl.value = '';
+  S.meterRecordReadingNoise({ X: 0.602, Y: 0.602, Z: 0.682, timestamp: 32 }, { name: '10%' });
+  const h = S.meterNoiseHistoryStore().get('10%');
+  assert(h && h.vals.length === 1, 'technology change wiped the previous-technology samples');
+  assert(S.meterEmpiricalNoiseFloorFor({ name: '10%' }) === null,
+    'first reading after the tech change uses the typed fallback, not carried-over scatter');
+  // An explicit CCSS selection alone (same technology) also changes the
+  // fingerprint — the correction curve is a different quantity.
+  S.meterRecordReadingNoise({ X: 0.603, Y: 0.603, Z: 0.683, timestamp: 33 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 2, 'same-configuration repeat accumulates');
+  globalThis.__ccssEl.value = 'custom_myccss.ccss';
+  S.meterRecordReadingNoise({ X: 0.604, Y: 0.604, Z: 0.684, timestamp: 34 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 1,
+    'explicit CCSS selection wiped the Auto-profile samples');
+  S.meterReplaceReadings([]);
+  globalThis.__techEl = null; globalThis.__ccssEl = null;
+  globalThis.__sel = null; globalThis.__greyRef = null;
+  globalThis.__noiseMode = null; globalThis.__noiseFloor = null;
+  globalThis.__liveBal = null;
+});
+
+test('noise_fingerprint_members_and_tech_handler', () => {
+  // Structural pins for the round-5 fix: the fingerprint string carries the
+  // gamma, gamut, white-point, technology and profile members; the Display
+  // Type handler invalidates scatter directly (its CCSS reset fires no
+  // event, so the record-time fingerprint alone would defer the wipe).
+  const ctxSrc = extractFunction(srcText, 'meterNoiseAnalysisContextString');
+  for (const tok of ['meterGreyTargetGammaSelection', 'meterAnalysisGamutKey', 'meterTargetWhitePoint', 'meterDisplayType', 'meterCcssProfile']) {
+    assert(ctxSrc.includes(tok), 'fingerprint includes ' + tok);
+  }
+  // Fingerprint values actually change with the controls (behavior, through
+  // the sandbox): same formula/grey-ref, gamma edit -> different string.
+  globalThis.__sel = { value: 'perceptual' };
+  globalThis.__greyRef = 'relative';
+  globalThis.__gammaSel = '2.2';
+  const c1 = S.meterNoiseAnalysisContextString();
+  globalThis.__gammaSel = '2.4';
+  const c2 = S.meterNoiseAnalysisContextString();
+  assert(c1 !== c2, 'fingerprint string changes when the target gamma changes');
+  globalThis.__gammaSel = '2.2';
+  assert(S.meterNoiseAnalysisContextString() === c1, 'fingerprint is stable for identical controls');
+  globalThis.__gammaSel = null; globalThis.__sel = null; globalThis.__greyRef = null;
+  // Handler pin: the Display Type change handler calls the invalidation.
+  const techIdx = wsText.indexOf("meterDisplayTypeEl.addEventListener('change'");
+  assert(techIdx >= 0, 'Display Type handler anchor present');
+  const techBlock = wsText.slice(techIdx, wsText.indexOf('ccssFileInput', techIdx));
+  assert(techBlock.includes('meterInvalidateAllStepNoise'),
+    'Display Type change invalidates all scatter directly (its CCSS reset fires no event)');
 });
 
 test('view_change_handlers_sync_noise_context', () => {
