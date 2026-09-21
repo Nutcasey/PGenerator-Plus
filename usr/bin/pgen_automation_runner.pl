@@ -229,12 +229,27 @@ sub _update_run {
 # manifest's size on the fast path.
 sub _compact_run { return PGAutomation::compact_run($_[0]); }
 
+# How far a worker_timing record has advanced. Both stamps only move forward:
+# a reset restarts the stage clock, and each point restarts the point clock.
+sub _timing_stamp {
+    my ($timing) = @_;
+    return -1 if ref($timing) ne 'HASH';
+    my ($started, $point) = ($timing->{started_at} || 0, $timing->{point_started_at} || 0);
+    return $point > $started ? $point : $started;
+}
+
 sub _publish_status {
     my ($run, $manifest_mtime) = @_;
     if (ref($run) eq 'HASH') {
         $STATUS_BASE = _compact_run($run);
         $ETA_CONTEXT = PGAutomationETA::context($run,$ETA_HISTORY);
-        $LIVE{worker_timing} = $run->{worker_timing};
+        # The progress tick owns worker_timing just as it owns the heartbeat.
+        # This republish may be driven by the daemon's manifest write, which
+        # carries the last durable copy; adopting it would roll a fresher
+        # tick's point clock back and make the live estimate read the current
+        # point as overdue.
+        $LIVE{worker_timing} = $run->{worker_timing}
+            if _timing_stamp($run->{worker_timing}) >= _timing_stamp($LIVE{worker_timing});
         $STATUS_BASE_MTIME = defined($manifest_mtime) ? $manifest_mtime : PGAutomation::file_mtime($RUN_FILE);
     }
     return 0 if ref($STATUS_BASE) ne 'HASH';

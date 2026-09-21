@@ -70,6 +70,18 @@ is(PGAutomation::read_json_file($run_file)->{runner_pid},$$,'a forced heartbeat 
  PGAutomation::with_lock($run_file,sub {$_[0]{heartbeat}=$fresh-600;return $_[0];});
  main::_update_run(sub {$_[0]{checkpoint}='pre-readings-done';});
  cmp_ok($status->()->{heartbeat},'>=',$fresh,'a manifest write never rolls the live heartbeat back');
+ # worker_timing rides the same fast path and never reaches status.json on its
+ # own, so a republish taken from the manifest would silently hand the estimate
+ # an older point clock and make the patch under the meter look overdue.
+ my $clock=sub {my ($point)=@_;return {started_at=>$fresh-300,start_step=>0,kind=>'grey',stage=>'greyscale-done',series_key=>'',recent_point_seconds=>[],point_started_at=>$point};};
+ main::_update_live(sub {$_[0]{worker_timing}=$clock->($fresh);});
+ PGAutomation::with_lock($run_file,sub {$_[0]{worker_timing}=$clock->($fresh-240);$_[0]{queue_revision}=2;return $_[0];});
+ main::_update_live(sub {$_[0]{heartbeat}=time();});
+ my $identity=$status->()->{time_estimate}{identity}||'';
+ like($identity,qr/\Q$fresh\E/,'a republish after a daemon edit keeps the live point clock');
+ unlike($identity,qr/@{[$fresh-240]}/,'and does not restore the manifest\'s older one');
+ main::_update_run(sub {$_[0]{worker_timing}=$clock->($fresh+120);});
+ like($status->()->{time_estimate}{identity}||'',qr/@{[$fresh+120]}/,'a manifest write with a newer clock is still adopted');
  # The daemon edits the manifest too (queue edit while running). The next
  # tick must republish from it, not from the copy taken before.
  PGAutomation::with_lock($run_file,sub {push @{$_[0]{items}},{name=>'DV Filmmaker',status=>'queued'};$_[0]{queue_revision}=1;return $_[0];});

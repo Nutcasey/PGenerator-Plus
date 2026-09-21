@@ -14994,10 +14994,6 @@ let pgLiveEpoch=(typeof performance!=='undefined'&&performance.now)?performance.
 
 function pgLiveNow(){return (typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();}
 
-function pgLiveReducedMotion(){
- try{return window.matchMedia('(prefers-reduced-motion:reduce)').matches;}catch(e){return false;}
-}
-
 // toX/toY are affine in the normalised value, so two samples pin the mapping
 // exactly -- and unlike the closures they came from, four numbers survive being
 // written into an attribute on a baked image.
@@ -15332,11 +15328,17 @@ function meterLiveRefreshSurfaces(){
  if(mark){
   const keep=new Map(prev.map(s=>[s.host,s]));
   meterLiveHosts().forEach(found=>{
+   // A mark the chart cannot place -- a greyscale patch on the CIE plot, a
+   // stimulus off the drawn axis -- must leave nothing behind. Locate first
+   // and drop the overlay, or the previous patch's ring stays painted and
+   // names the wrong point for the rest of the run.
+   const spot=meterLiveLocate(found.plot,mark);
+   if(!spot){meterLiveDropOverlay(found.host);return;}
    const surface=keep.get(found.host)||{host:found.host};
    surface.plot=found.plot;
    surface.overlay=meterLiveOverlayFor(found.host);
    if(!surface.overlay||!meterLiveMeasure(surface)) return;
-   surface.spot=meterLiveLocate(found.plot,mark);
+   surface.spot=spot;
    next.push(surface);
   });
  }
