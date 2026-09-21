@@ -25,7 +25,7 @@ jobs:
         # loads the helper both need it. Everything else it uses is core.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libio-socket-ssl-perl
+          sudo apt-get install -y --no-install-recommends libio-socket-ssl-perl libegl1 libgles2 libgl1-mesa-dri g++
       - name: Syntax-check the AutoCal workers
         run: |
           perl -c usr/bin/meter_lg_autocal.pl
@@ -56,7 +56,13 @@ jobs:
           node -c usr/share/PGenerator/webui-automation.js
           node -c usr/share/PGenerator/webui-app.js
           node -c usr/share/PGenerator/webui-workspace.js
+      - name: Verify the renderer test compiler
+        run: |
+          printf 'int main(){return 0;}\n' > /tmp/cxx_probe.cpp
+          c++ -std=c++11 /tmp/cxx_probe.cpp -o /tmp/cxx_probe
       - name: Run the test suite
+        env:
+          PGEN_REQUIRE_SHADER_TESTS: '1'
         run: prove -v t/
 
   browser:
