@@ -197,4 +197,23 @@ my $slim=main::_slim_profile($catalogue);
 ok(!exists($slim->{settings_capabilities}) && !exists($slim->{picture_mode_catalogue}),'a job keeps the profile without the catalogues');
 is($slim->{capability_profile_hash},'a'x64,'and keeps what identifies the TV');
 is($catalogue->{capability_profile_id},'fixture','the caller\'s copy is not changed');
+
+{
+ my $clock=2000;local *main::time=sub {$clock};
+ my $seed=PGAutomation::read_json_file("$Bin/../usr/share/PGenerator/automation-timing.json")->{records}[1];
+ main::_update_run(sub {
+  my ($r)=@_;$r->{status}='running';$r->{active_item}=0;$r->{active_stage}='greyscale-done';$r->{stage_started_at}=1000;
+  $r->{items}=[{%{$seed->{job}},status=>'running'}];
+  $r->{worker_status}={status=>'running',current_step=>10,total_steps=>35};
+  $r->{worker_timing}={kind=>'grey',stage=>'greyscale-done',started_at=>1000,start_step=>0,point_started_at=>1990};
+ });
+ my $manifest=PGAutomation::read_raw($run_file);
+ my $prior=$status->()->{time_estimate}{stage_remaining_seconds};
+ $clock=2005;
+ main::_update_live(sub {$_[0]{worker_status}{current_step}=11;$_[0]{worker_timing}{point_started_at}=2005;});
+ is($status->()->{time_estimate}{calculated_at},2005,'new point recalculates ETA on the fast progress path');
+ isnt($status->()->{time_estimate}{stage_remaining_seconds},$prior,'new measured work changes the live remainder');
+ is(PGAutomation::read_raw($run_file),$manifest,'live ETA does not rewrite the large manifest');
+ ok(!exists($status->()->{items}[0]{calibration}),'private ETA context does not expand the status payload');
+}
 done_testing();

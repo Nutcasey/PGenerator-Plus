@@ -31,6 +31,7 @@ use PGLGCapabilities qw(
  lg_operation_contract
  lg_normalize_setting_value
  lg_record_setting_observation
+ lg_record_setting_observations
  lg_setting_contracts
  lg_setting_values_agree
  resolve_lg_capabilities
@@ -1359,6 +1360,18 @@ sub lg_current_input_info (@) {
  };
 }
 
+# Persist all evidence from one reply together; record storage failures without
+# confusing them with the outcome already observed on the TV.
+sub lg_save_setting_observations {
+ my ($generation,$context,$observations)=@_;
+ return if(!@$observations);
+ my $started=PGCalibrationLog::monotonic();
+ my $saved=lg_record_setting_observations($generation,$context,$observations);
+ &diag_log_append("settings:observations",{records=>scalar(@$observations),saved=>$saved->{ok} ? 1 : 0,
+  error=>$saved->{error}||"",duration_ms=>int(1000*(PGCalibrationLog::monotonic()-$started))});
+ return $saved;
+}
+
 sub lg_picture_get_workflow (@) {
  my ($ip,$client_key,$connect_timeout,$keys,$requested_picture_mode,$tv_input,$force_ddc_white_balance,$signal_mode,$include_current_input,$category)=@_;
  $keys=[] if(ref($keys) ne "ARRAY");
@@ -1439,16 +1452,14 @@ sub lg_picture_get_workflow (@) {
    next if(exists($supported{$key}) || exists($unsupported{$key}));
    $unsupported{$key}="No value returned by TV";
   }
+  my @observations;
   foreach my $key (keys(%supported)) {
    my $contract=$setting_contracts->{$key}||{};
    next if(($contract->{"read"}{"route"}||"") eq "ddc_state");
-   &lg_record_setting_observation($generation,{
-    category=>$category,signal_mode=>$signal_mode,picture_mode=>$requested_picture_mode,tv_input=>$tv_input,
-    context_confirmed=>$read_context_confirmed,
-   },$contract->{"wire_key"}||$key,"read",{
+   push(@observations,{key=>$contract->{"wire_key"}||$key,operation=>"read",result=>{
     status=>"supported",route=>$contract->{"read"}{"route"}||"ssap.settings",
     value_type=>ref($settings->{$key})||"scalar",
-   });
+   }});
   }
   if(ref($payload->{"unsupported_keys"}) eq "HASH") {
    foreach my $key (keys(%{$payload->{"unsupported_keys"}})) {
@@ -1456,14 +1467,15 @@ sub lg_picture_get_workflow (@) {
     my $reason=$payload->{"unsupported_keys"}{$key}||"TV rejected the key";
     my $observation_status=$reason =~ /(?:not support|not allowed|undefined|no matched|doesn'?t support|-1000)/i
      ? "unsupported" : "unavailable";
-    &lg_record_setting_observation($generation,{
-     category=>$category,signal_mode=>$signal_mode,picture_mode=>$requested_picture_mode,tv_input=>$tv_input,
-     context_confirmed=>$read_context_confirmed,
-    },$contract->{"wire_key"}||$key,"read",{
+    push(@observations,{key=>$contract->{"wire_key"}||$key,operation=>"read",result=>{
      status=>$observation_status,route=>$contract->{"read"}{"route"}||"ssap.settings",reason=>$reason,
-    });
+    }});
    }
   }
+  &lg_save_setting_observations($generation,{
+   category=>$category,signal_mode=>$signal_mode,picture_mode=>$requested_picture_mode,tv_input=>$tv_input,
+   context_confirmed=>$read_context_confirmed,
+  },\@observations);
   return {
    requested_picture_keys => $requested_keys,
    supported_picture_keys => [sort(keys(%supported))],
@@ -6687,8 +6699,27 @@ sub lg_picture_category_or_default (@) {
  return $category;
 }
 
+# One owner closes the connection after every result, including validation
+# failures and exceptions. Group fallback must not reconnect per control.
 sub lg_picture_set_workflow (@) {
- my ($ip,$client_key,$connect_timeout,$settings,$readback_keys,$tv_input,$keep_calibration_mode,$fallback_picture_mode,$calibration_mode_active,$reset_ddc_baseline,$verify_ddc_upload,$force_ddc_white_balance,$signal_mode,$category)=@_;
+ my ($ip,$client_key,$connect_timeout,$settings)=@_;
+ return &json_error("No picture settings were provided",{ip=>$ip}) if(ref($settings) ne 'HASH' || !%$settings);
+ my $started=PGCalibrationLog::monotonic();
+ my $auth=&lg_authenticated_session($ip,$client_key,$connect_timeout,$DEFAULT_PAIR_TIMEOUT,0);
+ return $auth if(($auth->{status}||'') ne 'ok');
+ my $result=eval { &lg_picture_set_in_session($auth,@_) };
+ my $error=$@;
+ &websocket_close($auth->{session});
+ die $error if $error;
+ &diag_log_append('picture_set:session-complete',{ip=>$ip,controls=>scalar(keys %$settings),
+  status=>$result->{status},verification_state=>$result->{verification_state}||'unknown',
+  duration_ms=>int(1000*(PGCalibrationLog::monotonic()-$started))});
+ return $result;
+}
+
+sub lg_picture_set_in_session (@) {
+ my $auth=shift;
+ my ($ip,$client_key,$connect_timeout,$settings,$readback_keys,$tv_input,$keep_calibration_mode,$fallback_picture_mode,$calibration_mode_active,$reset_ddc_baseline,$verify_ddc_upload,$force_ddc_white_balance,$signal_mode,$category,$grouped)=@_;
  $keep_calibration_mode=$keep_calibration_mode ? 1 : 0;
  $calibration_mode_active=$calibration_mode_active ? 1 : 0;
  $reset_ddc_baseline=$reset_ddc_baseline ? 1 : 0;
@@ -6705,8 +6736,6 @@ sub lg_picture_set_workflow (@) {
  $tv_input=lc($tv_input);
  $tv_input="" if($tv_input !~ /^hdmi[1-4](?:_pc)?$/);
  return &json_error("No picture settings were provided",{ ip => $ip }) if(!%{$settings});
- my $auth=&lg_authenticated_session($ip,$client_key,$connect_timeout,$DEFAULT_PAIR_TIMEOUT,0);
- return $auth if(($auth->{"status"}||"") ne "ok");
  my $session=$auth->{"session"};
  my $generation=&lg_generation_info($auth->{"system_info"},$auth->{"software_info"},$auth->{"hello_info"});
  if($tv_input eq "") {
@@ -6725,7 +6754,6 @@ sub lg_picture_set_workflow (@) {
  # different picture-mode namespaces for SDR / HDR10 / HLG / DV).
  my $mapped_caller_picture_mode=($caller_picture_mode ne "") ? &map_picture_mode_label_to_ddc_name($caller_picture_mode,$signal_mode,$generation) : "";
  if($caller_picture_mode ne "" && $mapped_caller_picture_mode eq "") {
-  &websocket_close($session);
   &diag_log_append("picture_set:invalid-label",{ ip => $ip, requested_picture_mode => $caller_picture_mode, signal_mode => $signal_mode });
   my $hint=$signal_mode ne ""
    ? "Switch the renderer to the matching signal mode (e.g. SDR for ISF dark room) or pick a $signal_mode picture mode (e.g. ".join(", ", &lg_picture_mode_signal_examples($signal_mode)).")."
@@ -6747,7 +6775,6 @@ sub lg_picture_set_workflow (@) {
  );
  my $picture_mode_contracts=(ref($picture_mode_matrix->{"contracts"}) eq "HASH") ? $picture_mode_matrix->{"contracts"} : {};
  if($picture_mode_only && ($picture_mode_contracts->{"pictureMode"}{"write_decision"}||"") =~ /^(?:blocked|not_applicable)$/) {
-  &websocket_close($session);
   return &json_error("The resolved LG capability profile does not permit this picture-mode write.",{
    ip=>$ip,error_code=>"setting-write-blocked",setting_key=>"pictureMode",
    setting_contract=>$picture_mode_contracts->{"pictureMode"},
@@ -6819,7 +6846,6 @@ sub lg_picture_set_workflow (@) {
   if($palm_switched) {
    my $picture_settings=&lg_ddc_virtual_picture_settings($ip,$active_picture_mode);
    $picture_settings->{"pictureMode"}=$active_picture_mode;
-   &websocket_close($session);
    my $message=$palm_verified
     ? "LG picture mode switched to '$active_picture_mode'."
     : "LG accepted the '$active_picture_mode' picture-mode command but cannot report the active mode on this generation. Confirm the mode on the TV before calibration.";
@@ -6869,7 +6895,6 @@ sub lg_picture_set_workflow (@) {
   }
   my $picture_settings=&lg_ddc_virtual_picture_settings($ip,$active_picture_mode);
   $picture_settings->{"pictureMode"}=$active_picture_mode if($active_picture_mode ne "");
-  &websocket_close($session);
   &lg_record_setting_observation($generation,{
    category=>$category,signal_mode=>$signal_mode,picture_mode=>$active_picture_mode,tv_input=>$tv_input,context_confirmed=>0,
   },"pictureMode","verify",{status=>"unavailable",route=>"virtual_ddc_target",reason=>"No hardware picture-mode transition was verified"});
@@ -6901,7 +6926,6 @@ sub lg_picture_set_workflow (@) {
  }
  if($picture_mode_only) {
   my $select=&lg_picture_mode_select($session,$ip,$active_picture_mode,$connect_timeout + 2,$generation,$tv_input,$signal_mode);
-  &websocket_close($session);
   if(!$select->{"verified"}) {
    my $failure=&lg_picture_mode_select_failure($caller_picture_mode,$select);
    # Only a post-write readback is "what the TV is on now"; the pre-write
@@ -6983,7 +7007,6 @@ sub lg_picture_set_workflow (@) {
   my $contract=(ref($setting_contracts->{$key}) eq "HASH") ? $setting_contracts->{$key} : {};
   my $decision=$contract->{"write_decision"}||"preflight_and_verified_readback_required";
   if($decision eq "blocked" || $decision eq "not_applicable") {
-   &websocket_close($session);
    my $reason=$decision eq "not_applicable"
     ? "The setting is not applicable to the current ".($signal_mode||"unknown")." signal context."
     : ($contract->{"availability"}||"") eq "hidden_in_mode"
@@ -7025,7 +7048,6 @@ sub lg_picture_set_workflow (@) {
     status=>"unavailable",route=>$contract->{"read"}{"route"}||"ssap.settings",
     reason=>"Preflight returned no value",
    });
-   &websocket_close($session);
    return &json_error("LG setting '$key' is not present in the firmware matrix and the TV did not return a preflight value, so it was not changed.",{
     ip=>$ip,
     error_code=>"setting-preflight-unavailable",
@@ -7046,7 +7068,6 @@ sub lg_picture_set_workflow (@) {
    $contract,$settings_to_apply->{$key},$preflight_settings->{$key}
   );
   if(!$valid) {
-   &websocket_close($session);
    return &json_error("Invalid value for LG setting '$key': $validation_error",{
     ip=>$ip,
     error_code=>"invalid-setting-value",
@@ -7079,32 +7100,65 @@ sub lg_picture_set_workflow (@) {
   delete($settings_to_apply->{"pictureMode"});
  }
  if(!%{$settings_to_apply}) {
-  &websocket_close($session);
   return &json_error("No writable LG picture settings were provided",{ ip => $ip, active_picture_mode => $active_picture_mode });
  }
- # Context-sensitive controls such as DTM and TruMotion have independent
- # requests and fallback routes. Validate the full batch above, then use the
- # same single-setting workflow for each key so verification stays per-key.
- if(!$native_white_balance && !$ddc_white_balance_only && keys(%{$settings_to_apply}) > 1) {
-  &websocket_close($session);
-  my (%applied,%observed,%verified);
-  my $batch_verified=1;
-  foreach my $key (sort(keys(%{$settings_to_apply}))) {
-   my $part=&lg_picture_set_workflow($ip,$client_key,$connect_timeout,{$key=>$settings_to_apply->{$key}},[$key],
-    $tv_input,$keep_calibration_mode,$active_picture_mode,$calibration_mode_active,0,0,0,$signal_mode,$category);
-   if(($part->{"status"}||"") ne "ok") {
-    $part->{"previously_applied"}=\%applied;
-    $part->{"failed_setting_key"}=$key;
-    return $part;
+ # Group only controls with the same ordinary settings transport. Special
+ # scopes and individual-access contracts keep their existing write/readback
+ # path, but share this authenticated connection with the rest of the batch.
+ if(!$grouped && !$native_white_balance && !$ddc_white_balance_only && keys(%{$settings_to_apply}) > 1) {
+  my (@bulk,@single);
+  foreach my $key (sort keys %{$settings_to_apply}) {
+   my $write=$setting_contracts->{$key}{write}||{};
+   if(($write->{route}||'') eq 'ssap.settings' && ($write->{access}||'') ne 'individual'
+      && !$write->{current_app} && !$write->{scope} && $key !~ /^(?:backlight|oledLight|oledPixelBrightness)$/) {
+    push @bulk,$key;
+   } else {
+    push @single,$key;
    }
-   $applied{$key}=$part->{"applied"}{$key};
-   $observed{$key}=$part->{"picture_settings"}{$key} if(exists($part->{"picture_settings"}{$key}));
-   $verified{$key}=$part->{"setting_verification"}{$key};
-   $batch_verified=0 if(($part->{"verification_state"}||"") ne "verified");
   }
-  return &json_ok({ip=>$ip,client_key=>$auth->{"client_key"},applied=>\%applied,picture_settings=>\%observed,
+  my (%applied,%observed,%verified);
+  my $merge=sub {
+   my ($part,$keys)=@_;
+   foreach my $key (@$keys) {
+    $applied{$key}=$part->{applied}{$key} if exists($part->{applied}{$key});
+    delete $observed{$key};
+    $observed{$key}=$part->{picture_settings}{$key} if exists($part->{picture_settings}{$key});
+    $verified{$key}=$part->{setting_verification}{$key} if exists($part->{setting_verification}{$key});
+   }
+  };
+  if(@bulk>1) {
+   &diag_log_append('picture_set:grouped',{ip=>$ip,category=>$category,picture_mode=>$active_picture_mode,keys=>\@bulk,controls=>scalar(@bulk)});
+   my $part=&lg_picture_set_in_session($auth,$ip,$client_key,$connect_timeout,
+    {map {$_=>$settings_to_apply->{$_}} @bulk},[@bulk],$tv_input,$keep_calibration_mode,
+    $active_picture_mode,$calibration_mode_active,0,0,0,$signal_mode,$category,1);
+   $merge->($part,\@bulk);
+   # A failed group may still have verified most values. Preserve that
+   # evidence and retry only the remainder; an acknowledgement alone never
+   # licenses skipping a required readback.
+   my @retry=grep {($verified{$_}{status}||'') ne 'verified'} @bulk;
+   if(@retry) {
+    &diag_log_append('picture_set:grouped-fallback',{ip=>$ip,controls=>scalar(@bulk),verified=>scalar(@bulk)-scalar(@retry),retry_keys=>\@retry,message=>$part->{message}||'Required readback not verified'});
+    push @single,@retry;
+   }
+  } else {
+   push @single,@bulk;
+  }
+  foreach my $key (sort @single) {
+   my $part=&lg_picture_set_in_session($auth,$ip,$client_key,$connect_timeout,{$key=>$settings_to_apply->{$key}},[$key],
+    $tv_input,$keep_calibration_mode,$active_picture_mode,$calibration_mode_active,0,0,0,$signal_mode,$category,1);
+   # The newest attempt owns this control's evidence, including failure.
+   delete $verified{$key};
+   $merge->($part,[$key]);
+   if(($part->{status}||'') ne 'ok') {
+    return {%$part,applied=>\%applied,previously_applied=>\%applied,picture_settings=>\%observed,
+     setting_verification=>\%verified,setting_contracts=>$setting_contracts,failed_setting_key=>$key};
+   }
+  }
+  my $verified_count=grep {($verified{$_}{status}||'') eq 'verified'} keys %{$settings_to_apply};
+  &diag_log_append('picture_set:batch-complete',{ip=>$ip,controls=>scalar(keys %{$settings_to_apply}),verified=>$verified_count,individual_controls=>scalar(@single)});
+  return &json_ok({ip=>$ip,client_key=>$auth->{client_key},applied=>\%applied,picture_settings=>\%observed,
    setting_verification=>\%verified,setting_contracts=>$setting_contracts,settings_matrix=>$setting_matrix,
-   verification_state=>$batch_verified ? "verified" : "acknowledged_unverified",active_picture_mode=>$active_picture_mode,
+   verification_state=>$verified_count==keys(%{$settings_to_apply}) ? 'verified' : 'acknowledged_unverified',active_picture_mode=>$active_picture_mode,
    lg_generation=>$generation,generation_profile=>&lg_generation_profile($generation)});
  }
  my $panel_light_only=$category eq "picture" ? 1 : 0;
@@ -7126,7 +7180,6 @@ sub lg_picture_set_workflow (@) {
   $mode_writable=1 if(@wb_keys && !grep { ($setting_contracts->{$_}{"availability"}||"") ne "available" } @wb_keys);
  }
  if(($ddc_white_balance_only || $native_white_balance) && !$panel_light_only && $active_picture_mode ne "" && !$mode_writable) {
-  &websocket_close($session);
   &diag_log_append("picture_set:preflight",{ ip => $ip, picture_mode => $active_picture_mode, blocked => "non-writable picture mode" });
   return {
    status => "error",
@@ -7191,7 +7244,6 @@ sub lg_picture_set_workflow (@) {
     && (($ddc_result->{"ddc_upload_verify_contract"}||"").($ddc_result->{"ddc_reset_verify_contract"}||"")) !~ /(?:unavailable|untrusted)/ ? 1 : 0;
    my $hardware_required=grep {($setting_contracts->{$_}{write}{route}||"") eq "ddc_1d" && $setting_contracts->{$_}{require_readback}} keys %$settings_to_apply;
    if($hardware_required && !$ddc_verified) {
-    &websocket_close($session);
     return &json_error("LG accepted the DDC upload but its required hardware readback was unavailable or untrusted.",{
      ip=>$ip,error_code=>"ddc-readback-unverified",verification_state=>"acknowledged_unverified",
      setting_contracts=>$setting_contracts,generation_profile=>&lg_generation_profile($generation),raw_response=>$ddc_result,
@@ -7218,7 +7270,6 @@ sub lg_picture_set_workflow (@) {
      reason=>$ddc_verified ? "DDC upload readback matched" : ($ddc_result->{"ddc_readback_unavailable_reason"}||"DDC readback was not verified"),
     });
    }
-   &websocket_close($session);
    &diag_log_append("picture_set:ddc1d-ok",{
     ip => $ip,
     picture_mode => $active_picture_mode,
@@ -7291,7 +7342,6 @@ sub lg_picture_set_workflow (@) {
    generation_profile => &lg_generation_profile($generation),
   });
   }
-  &websocket_close($session);
   &diag_log_append("picture_set:ddc1d-failure",{
    ip => $ip,
    picture_mode => $active_picture_mode,
@@ -7317,7 +7367,6 @@ sub lg_picture_set_workflow (@) {
  my $used_write_route="ssap.settings";
  my $response=&lg_request($session,"set_picture_settings","settings/setSystemSettings",$set_payload,$connect_timeout + 2);
  if(ref($response) ne "HASH") {
-  &websocket_close($session);
   &diag_log_append("picture_set:no-response",{ ip => $ip, picture_mode => $active_picture_mode });
   return &json_error("LG TV did not acknowledge picture settings update",{ ip => $ip });
  }
@@ -7455,13 +7504,11 @@ sub lg_picture_set_workflow (@) {
     $response=$luna_response;
    } else {
     if($failed) {
-    &websocket_close($session);
     &diag_log_append("picture_set:luna-failure",{ ip => $ip, picture_mode => $active_picture_mode, tv_input => $tv_input, category => $luna_payload->{"category"}||"", response => $luna_response, message => $luna_failure_message });
     return &json_permission_error("This LG client key cannot use the normal or Luna picture-settings write path. Pair With PIN once in Display to mint a fresh PIN-paired key, then future reconnects will reuse it.",{ ip => $ip, active_picture_mode => $active_picture_mode, raw_error => $failure_message, luna_error => $luna_failure_message });
     }
    }
   } elsif($failed) {
-   &websocket_close($session);
    return &json_error("LG TV rejected the panel-light control for this picture mode.",{ ip => $ip, active_picture_mode => $active_picture_mode, raw_error => $failure_message, raw_response => $response }) if($panel_light_only);
    return &json_error($failure_message,{ ip => $ip, active_picture_mode => $active_picture_mode, raw_response => $response });
   }
@@ -7529,14 +7576,13 @@ sub lg_picture_set_workflow (@) {
   (ref($set_payload->{dimension}) eq "HASH" && ($set_payload->{dimension}{input}||"") eq $tv_input
    && ($set_payload->{dimension}{pictureMode}||"") eq $active_picture_mode)
   || index(($set_payload->{category}||""),"picture\$".$tv_input.".".$active_picture_mode.".")==0);
+ my @observations;
  foreach my $key (sort(keys(%{$settings_to_apply}))) {
   my $contract=$setting_contracts->{$key}||{
    wire_key=>$key,write=>{route=>"ssap.settings"},verify=>{route=>"ssap.settings",comparator=>"scalar"},require_readback=>&json_true(),
   };
   my $write_route=$used_write_route;
-  &lg_record_setting_observation($generation,{
-   category=>$category,signal_mode=>$signal_mode,picture_mode=>$active_picture_mode,tv_input=>$tv_input,context_confirmed=>$scope_confirmed,
-  },$contract->{"wire_key"}||$key,"write",{status=>"acknowledged",route=>$write_route});
+  push(@observations,{key=>$contract->{"wire_key"}||$key,operation=>"write",result=>{status=>"acknowledged",route=>$write_route}});
   if(!$contract->{"require_readback"}) {
    $setting_verification{$key}={status=>"acknowledged_unverified",route=>$write_route,expected=>$settings_to_apply->{$key}};
    $all_required_verified=0;
@@ -7546,20 +7592,16 @@ sub lg_picture_set_workflow (@) {
    if($contract->{allow_unverified_readback} && !$write_unacknowledged && !$post_read_values_seen{$key}
       && lg_readback_unavailable_reason($post_read_errors{$key})) {
     $setting_verification{$key}={status=>'acknowledged_unverified',route=>$write_route,expected=>$settings_to_apply->{$key},reason=>'TV accepted the write; this matrix permits unavailable readback, not mismatched readback.'};
-    &lg_record_setting_observation($generation,{
-     category=>$category,signal_mode=>$signal_mode,picture_mode=>$active_picture_mode,tv_input=>$tv_input,context_confirmed=>$scope_confirmed,
-    },$contract->{wire_key}||$key,'verify',{status=>'unavailable',route=>$contract->{verify}{route}||'ssap.settings',reason=>$post_read_errors{$key}});
+    push(@observations,{key=>$contract->{wire_key}||$key,operation=>'verify',result=>{status=>'unavailable',route=>$contract->{verify}{route}||'ssap.settings',reason=>$post_read_errors{$key}}});
     $all_required_verified=0;
     next;
    }
    $setting_verification{$key}={status=>"missing_readback",route=>$contract->{"verify"}{"route"}||"ssap.settings",expected=>$settings_to_apply->{$key}};
    push(@verification_failures,$key);
    $all_required_verified=0;
-   &lg_record_setting_observation($generation,{
-    category=>$category,signal_mode=>$signal_mode,picture_mode=>$active_picture_mode,tv_input=>$tv_input,context_confirmed=>$scope_confirmed,
-   },$contract->{"wire_key"}||$key,"verify",{
+   push(@observations,{key=>$contract->{"wire_key"}||$key,operation=>"verify",result=>{
     status=>"unavailable",route=>$contract->{"verify"}{"route"}||"ssap.settings",reason=>"Post-write readback returned no value",
-   });
+   }});
    next;
   }
   my $agrees=$key eq "pictureMode"
@@ -7572,15 +7614,15 @@ sub lg_picture_set_workflow (@) {
   };
   push(@verification_failures,$key) if(!$agrees);
   $all_required_verified=0 if(!$agrees);
-  &lg_record_setting_observation($generation,{
-   category=>$category,signal_mode=>$signal_mode,picture_mode=>$active_picture_mode,tv_input=>$tv_input,context_confirmed=>$scope_confirmed,
-  },$contract->{"wire_key"}||$key,"verify",{
+  push(@observations,{key=>$contract->{"wire_key"}||$key,operation=>"verify",result=>{
    status=>$agrees ? "verified" : "mismatch",route=>$contract->{"verify"}{"route"}||"ssap.settings",
    reason=>$agrees ? "Post-write readback matched" : "Post-write readback did not match",
-  });
+  }});
  }
+ &lg_save_setting_observations($generation,{
+  category=>$category,signal_mode=>$signal_mode,picture_mode=>$active_picture_mode,tv_input=>$tv_input,context_confirmed=>$scope_confirmed,
+ },\@observations);
  if(@verification_failures) {
-  &websocket_close($session);
   my $first=$setting_verification{$verification_failures[0]}||{};
   my $missing=grep { ($setting_verification{$_}{"status"}||"") eq "missing_readback" } @verification_failures;
   &diag_log_append("picture_set:unverified",{
@@ -7602,7 +7644,6 @@ sub lg_picture_set_workflow (@) {
    raw_response=>$response,
   });
  }
- &websocket_close($session);
  &diag_log_append("picture_set:ok",{ ip => $ip, picture_mode => $active_picture_mode, applied => $settings_to_apply, settings_after => $settings_after });
  return &json_ok({
   ip => $ip,

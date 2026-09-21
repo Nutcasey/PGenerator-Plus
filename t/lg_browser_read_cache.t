@@ -111,4 +111,73 @@ is_deeply([sort keys %{$r->{setting_contracts}}],['brightness','pictureMode'],'a
  $cached=JSON::PP::decode_json(main::lg_browser_picture_settings_while_automation('{}'));
  ok(!exists $cached->{picture_settings}{brightness},'a changed compatibility profile cannot reuse old readings');
 }
+# The index stays small as history grows; reading the current mode must not
+# decode the capability catalogues of every previously visited mode.
+{
+ local $main::var_dir=tempdir(CLEANUP=>1);
+ mkdir main::lg_data_dir();
+ my $old={schema_version=>2,contexts=>{}};
+ for my $i (1..32) {
+  my $context={ip=>'192.0.2.2',profile=>('a'x64),input=>'hdmi4',mode=>'mode'.$i,signal=>'sdr',category=>'picture'};
+  my $id=PGAutomation::encode_json($context);
+  $old->{contexts}{$id}={context=>$context,picture_settings=>{pictureMode=>'mode'.$i,brightness=>$i},read_at=>{brightness=>123},
+   generation_profile=>{capability_profile_hash=>('a'x64),catalogue=>('x'x10000)},updated_at=>$i};
+  $old->{current}=$id;
+ }
+ ok(PGAutomation::write_json_atomic(main::lg_picture_settings_cache_path(),$old),'seed legacy history');
+ my $remember=sub {
+  my ($mode,$settings)=@_;
+  return main::lg_remember_picture_settings(JSON::PP::encode_json({status=>'ok',ip=>'192.0.2.2',current_input=>'hdmi4',
+   generation_profile=>{capability_profile_hash=>('a'x64)},picture_settings=>{pictureMode=>$mode,%$settings}}),'{}');
+ };
+ ok($remember->('mode32',{contrast=>85}),'migrate and merge a partial live read');
+ my $index=PGAutomation::read_json_file(main::lg_picture_settings_cache_path());
+ is($index->{schema_version},3,'history is now stored by context');
+ is(scalar(keys %{$index->{contexts}}),32,'migration preserves all contexts');
+ cmp_ok(-s main::lg_picture_settings_cache_path(),'<',5000,'index excludes bulky historical capabilities');
+ my $cache=main::lg_read_picture_settings_cache();
+ is($cache->{contexts}{$cache->{current}}{picture_settings}{brightness},32,'migration preserves older values within the same context');
+ is($cache->{contexts}{$cache->{current}}{read_at}{brightness},123,'migration preserves per-control ages');
+ ok($remember->('mode1',{contrast=>84}),'return to a historical context');
+ $cache=main::lg_read_picture_settings_cache();
+ is($cache->{contexts}{$cache->{current}}{picture_settings}{brightness},1,'returning to a mode retains its own partial history');
+ ok($remember->('newMode',{brightness=>50}),'visit a new context');
+ $index=PGAutomation::read_json_file(main::lg_picture_settings_cache_path());
+ is(scalar(keys %{$index->{contexts}}),32,'history remains bounded');
+ my @files=glob(main::lg_data_dir()."/picture-settings-cache/*.json");
+ is(scalar(@files),32,'pruned contexts do not accumulate on disk');
+
+ # Lost/corrupt cache data gives an empty answer, never values from another mode.
+ my $path=main::lg_picture_settings_context_path($index->{current});
+ ok(PGAutomation::write_atomic($path,'broken'),'inject corrupt context');
+ $cache=main::lg_read_picture_settings_cache();
+ is_deeply($cache->{contexts},{},'corrupt current context is a cache miss');
+ ok($remember->('newMode',{contrast=>82}),'a fresh read repairs the context');
+ $cache=main::lg_read_picture_settings_cache();
+ ok(!exists($cache->{contexts}{$cache->{current}}{picture_settings}{brightness}),'repair does not invent lost values');
+ my $before=PGAutomation::read_raw(main::lg_picture_settings_cache_path());
+ {
+  my $write=\&PGAutomation::write_json_atomic;
+  local *PGAutomation::write_json_atomic=sub {return 0 if $_[0]=~/picture-settings-cache/;return $write->(@_)};
+  ok(!$remember->('failedMode',{brightness=>25}),'failed context save is reported');
+ }
+ is(PGAutomation::read_raw(main::lg_picture_settings_cache_path()),$before,'failed save cannot publish a new current pointer');
+ # A valid JSON file for another context is still unusable under this ID.
+ my $wrong=$cache->{contexts}{$cache->{current}};
+ $wrong->{context}{input}='hdmi1';
+ ok(PGAutomation::write_json_atomic($path,$wrong),'inject context mismatch');
+ is_deeply(main::lg_read_picture_settings_cache()->{contexts},{},'mismatched context file is a cache miss');
+ my @children;
+ for my $i (1..3) {
+  my $pid=fork();die "fork: $!" if !defined $pid;
+  if(!$pid) {exit($remember->('parallelMode',{'control'.$i=>$i}) ? 0 : 1)}
+  push @children,$pid;
+ }
+ for (@children) {waitpid($_,0);is($?,0,'concurrent cache writer finished')}
+ $cache=main::lg_read_picture_settings_cache();
+ is_deeply($cache->{contexts}{$cache->{current}}{picture_settings},
+  {pictureMode=>'parallelMode',control1=>1,control2=>2,control3=>3},'concurrent partial reads retain every control');
+ ok(PGAutomation::write_atomic(main::lg_picture_settings_cache_path(),'[]'),'inject wrong index type');
+ is_deeply(main::lg_read_picture_settings_cache(),{},'wrong index type is a cache miss');
+}
 done_testing();

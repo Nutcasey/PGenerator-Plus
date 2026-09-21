@@ -95,6 +95,16 @@ is(scalar @{PGAutomationETA::samples($saved)},1,'only timed completed stages ent
 PGAutomation::write_json_atomic(PGAutomation::run_dir($saved->{id}).'/run.json',$saved);
 is(scalar @{PGAutomationETA::history('current')},1,'historical timings survive process restart');
 is(scalar @{PGAutomationETA::history($saved->{id})},0,'current run is not counted twice');
+{
+ PGAutomation::write_json_atomic(PGAutomation::run_dir($saved->{id}).'/timing.json',{version=>1,samples=>PGAutomationETA::samples($saved)});
+ my $read=\&PGAutomation::read_json_file;my ($manifests,$ticks)=(0,0);
+ no warnings 'redefine';
+ local *PGAutomation::read_json_file=sub {$manifests++ if $_[0]=~/\/run\.json$/;return $read->(@_)};
+ is(scalar @{PGAutomationETA::history('current',sub {$ticks++;1})},1,'compact timing history supplies the same completed samples');
+ is($manifests,0,'history loading avoids the complete manifest when a timing index exists');
+ is($ticks,1,'history loading gives the runner a heartbeat/stop opportunity between records');
+ is(scalar @{PGAutomationETA::history('current',sub {0})},0,'Stop can interrupt optional history loading');
+}
 $r=run();PGAutomationETA::update($r,1300,[]);$r->{time_estimate}{private}='secret';
 my $public=main::webui_automation_public_run($r);
 is($public->{time_estimate}{remaining_seconds},1260,'ETA reaches lightweight status API');
@@ -157,5 +167,13 @@ is($r->{time_estimate}{stage_remaining_seconds},1302,'a few fast points do not e
  PGAutomationETA::timing_profile($r->{items}[0],'volume-done');
  ok(!$pok->($r->{items}[0]{calibration}{solve_cube_size}),'ETA leaves solve_cube_size numeric in the manifest');
  ok(!$pok->($r->{items}[0]{calibration}{shadow_fix}),'ETA leaves shadow_fix numeric in the manifest');
+}
+{
+ my $r=run();$r->{items}[0]{checkpoints}=[{name=>'tv-setup-verified',status=>'done',duration_seconds=>20}];
+ my $context=PGAutomationETA::context($r,[]);
+ no warnings 'redefine';
+ local *PGAutomationETA::history_index=sub {die 'live update must reuse its index'};
+ PGAutomationETA::update($context,1300,[]);
+ ok($context->{time_estimate}{stage_remaining_seconds}>0,'live progress reuses the prepared history index');
 }
 done_testing();

@@ -162,7 +162,7 @@ sub _worker_summary {
     my ($status) = @_;
     return {} if ref($status) ne 'HASH';
     my %summary;
-    foreach my $key (qw(status current_name current_step total_steps current_delta_e message error_code debug)) {
+    foreach my $key (qw(status phase current_name current_step total_steps current_delta_e message error_code debug)) {
         $summary{$key} = $status->{$key} if exists($status->{$key});
     }
     return \%summary;
@@ -190,6 +190,7 @@ my @LIVE_KEYS = @PGAutomation::RUN_LIVE_KEYS;
 my %LIVE;
 my $STATUS_BASE;
 my $STATUS_BASE_MTIME;
+my $ETA_CONTEXT;
 
 sub _update_run {
     my ($callback) = @_;
@@ -232,12 +233,19 @@ sub _publish_status {
     my ($run, $manifest_mtime) = @_;
     if (ref($run) eq 'HASH') {
         $STATUS_BASE = _compact_run($run);
+        $ETA_CONTEXT = PGAutomationETA::context($run,$ETA_HISTORY);
+        $LIVE{worker_timing} = $run->{worker_timing};
         $STATUS_BASE_MTIME = defined($manifest_mtime) ? $manifest_mtime : PGAutomation::file_mtime($RUN_FILE);
     }
     return 0 if ref($STATUS_BASE) ne 'HASH';
     # Only the live keys overlay the compact manifest: a progress callback
     # may set other fields (worker_timing) that belong to the manifest alone.
     my %status = (%$STATUS_BASE, map { exists($LIVE{$_}) ? ($_ => $LIVE{$_}) : () } @LIVE_KEYS);
+    if (ref($ETA_CONTEXT) eq 'HASH') {
+        my %timing=(%$ETA_CONTEXT,map {exists($LIVE{$_}) ? ($_=>$LIVE{$_}) : ()} (@LIVE_KEYS,'worker_timing'));
+        eval {PGAutomationETA::update(\%timing,time(),$ETA_HISTORY);1} or delete $timing{time_estimate};
+        $status{time_estimate}=$LIVE{time_estimate}=$timing{time_estimate};
+    }
     $status{published_at} = time();
     return PGAutomation::write_json_atomic($STATUS_FILE, \%status, 0600) ? 1 : 0;
 }
@@ -1292,6 +1300,9 @@ sub _wait_worker {
     my ($timing_started,$timing_base,$timing_last)=($started,0,0);
     my $point_started=$started;
     my @point_seconds;
+    my @point_elapsed=(0);
+    my $timing_reset=0;
+    my $tail_started;
     my ($last_progress_write, $last_progress_digest, $last_manifest_write) = (0, '', time());
     my ($owned_pid, $owned_ticks) = (0, '');
     # A worker has not stamped its pid yet right after launch. Tolerate an
@@ -1359,13 +1370,19 @@ sub _wait_worker {
             }
         }
         my $step=0+($status->{current_step}||0);
+        $tail_started=$now if !defined($tail_started) && $ACTIVE_WORKER eq '3d'
+            && ($status->{phase}||'') =~ /^(?:building|upload|upload_probe|tone_map_upload|postcal_shadow.*|post_check|dpg_shadow_smoothing)$/;
         if ($state eq 'running' && $step<$timing_last) {
             ($timing_started,$timing_base)=($now,$step>0?$step-1:0);
             @point_seconds=();$point_started=$now;
+            @point_elapsed=(0);$timing_reset=1;
         } elsif ($state eq 'running' && $step>$timing_last) {
             if ($timing_last>0 && $now>$point_started) {
                 push @point_seconds,($now-$point_started)/($step-$timing_last);
                 shift @point_seconds while @point_seconds>5;
+                for my $point ($timing_last..$step-1) {
+                    $point_elapsed[$point]=$point_started-$timing_started+($now-$point_started)*($point-$timing_last+1)/($step-$timing_last);
+                }
             }
             $point_started=$now;
         }
@@ -1383,7 +1400,7 @@ sub _wait_worker {
         my $progress_update = sub {
             my ($run) = @_;
             $run->{worker_status} = _worker_summary($status);
-            $run->{worker_timing}={started_at=>$timing_started,start_step=>$timing_base,kind=>$ACTIVE_WORKER,stage=>$ACTIVE_STAGE,series_key=>$ACTIVE_SERIES_KEY||'',recent_point_seconds=>[@point_seconds]};
+            $run->{worker_timing}={started_at=>$timing_started,start_step=>$timing_base,kind=>$ACTIVE_WORKER,stage=>$ACTIVE_STAGE,series_key=>$ACTIVE_SERIES_KEY||'',recent_point_seconds=>[@point_seconds],point_started_at=>$point_started,tail_started_at=>$tail_started};
             $run->{active_stage} = $ACTIVE_STAGE;
             my $active_item = _active_item_number();
             $run->{active_item} = $active_item if defined($active_item);
@@ -1410,7 +1427,20 @@ sub _wait_worker {
             return {status=>'error',error_code=>'worker-identity-mismatch',message=>'Worker status is idle without this attempt\'s identity and no worker this attempt launched is alive; refusing to adopt or archive it'}
                 if $idle_unstamped && $ACTIVE_WORKER_ID;
         }
-        return $status if _status_terminal($state);
+        if (_status_terminal($state)) {
+            $status->{timing_tail_seconds}=$now-$tail_started if $state eq 'complete' && defined($tail_started) && $now>$tail_started;
+            # Save complete trajectories only. A reset/retry is not the same
+            # ordered pass, and must not train the next job's point weights.
+            if ($state eq 'complete' && !$timing_reset && $ACTIVE_WORKER eq 'grey'
+                && ($status->{total_steps}||0)>0 && $now>$timing_started) {
+                my $n=$status->{total_steps};
+                $point_elapsed[$n]=$now-$timing_started;
+                if (@point_elapsed==$n+1 && !grep {!defined($_)} @point_elapsed) {
+                    $status->{timing_curve}={total_steps=>0+$n,fractions=>[map {$_/($now-$timing_started)} @point_elapsed]};
+                }
+            }
+            return $status;
+        }
         return { status => 'error', error_code => 'worker-timeout', message => "$kind exceeded six hours" }
             if time() - $started >= 21600;
         _sleep_controlled(2) or return undef;
@@ -3094,6 +3124,7 @@ sub _calibration_greyscale_stage {
     _clear_active_worker();
     my $verified = $grey->{ddc_upload_verified} || $grey->{final_1d_lut_upload_verified};
     return {verified => $verified ? JSON::PP::true : 'unverifiable',
+        timing_curve => $grey->{timing_curve},
         final_1d_lut_upload_verified => $grey->{final_1d_lut_upload_verified},
         ddc_upload_verified => $grey->{ddc_upload_verified}};
 }
@@ -3213,7 +3244,8 @@ sub _calibration_volume_stage {
     }
     _clear_active_worker();
     return {verified => ($three_d->{terminal_commit_verified} || $three_d->{upload_verified})
-        ? JSON::PP::true : 'unverifiable', terminal_commit_verified => $three_d->{terminal_commit_verified}};
+        ? JSON::PP::true : 'unverifiable', terminal_commit_verified => $three_d->{terminal_commit_verified},
+        timing_tail_seconds=>$three_d->{timing_tail_seconds}};
 }
 
 # 1 when a Dolby Vision profile upload was dispatched in the latest attempt
@@ -3561,6 +3593,8 @@ sub _checkpoint_record {
     };
     if ($status eq 'done' && ($item->{active_stage}||'') eq $name && $item->{stage_started_at}) {
         $record->{duration_seconds}=time()-$item->{stage_started_at};
+        $record->{timing_curve}=$evidence->{timing_curve} if ref($evidence->{timing_curve}) eq 'HASH';
+        $record->{timing_tail_seconds}=$evidence->{timing_tail_seconds} if defined($evidence->{timing_tail_seconds});
     }
     $item->{checkpoints} ||= [];
     push @{$item->{checkpoints}}, $record;
@@ -3575,6 +3609,14 @@ sub _checkpoint_record {
         $run->{last_checkpoint} = $record;
         $run->{items}[$item_number] = $item if ref($run->{items}) eq 'ARRAY';
     });
+    if (ref($run_saved) eq 'HASH') {
+        my $timings={version=>1,samples=>PGAutomationETA::samples($run_saved)};
+        if (!PGAutomation::write_json_atomic("$RUN_DIR/timing.json",$timings,0600)) {
+            # An older index must not hide this checkpoint on the next run.
+            unlink "$RUN_DIR/timing.json";
+            _log('Unable to save optional calibration timing history; using manifest fallback');
+        }
+    }
     my $artifacts_saved = _copy_worker_files($item_number, 'grey', undef)
         && _copy_worker_files($item_number, '3d', undef)
         && _copy_worker_files($item_number, 'dv', undef);
@@ -5477,9 +5519,10 @@ sub _main {
     die "run manifest unavailable\n" if ref($run) ne 'HASH' || ($run->{token} || '') ne $TOKEN;
     return if ($run->{status} || '') eq 'paused';
     return if ($run->{status} || '') =~ /^(?:complete(?:-with-warnings)?|failed|stopped)$/;
-    $ETA_HISTORY=eval {PGAutomationETA::history($RUN_ID)} || [];
     _seed_lg_control_seconds($run);
     _heartbeat(1);
+    $ETA_HISTORY=eval {PGAutomationETA::history($RUN_ID,sub {_heartbeat();_refresh_control();return !$STOP_REQUESTED;})} || [];
+    $ETA_CONTEXT=PGAutomationETA::context($run,$ETA_HISTORY);
     _log_action('Automation runner started');
     if (_control()->{request} eq 'stop') {
         $STOP_REQUESTED = 1;

@@ -3011,11 +3011,28 @@ function pgPanelBelongsToActiveWorkspace(panel){
  return available&&((workspace===pgDesktopWorkspace)||!!globalPanel);
 }
 function pgSyncDesktopPanels(){
+ // Tablet order is the DOM order the operator drags into place. Writing the
+ // desktop order here too reshuffled the phone layout on every automation
+ // poll, and each viewport resize cleared it again.
+ if(!document.body.classList.contains('layout-desktop')){
+  pgPlaceAutomationObserverForTablet();
+  return;
+ }
  document.querySelectorAll('.dashboard > .card[data-desktop-workspace]').forEach(panel=>{
   panel.setAttribute('data-desktop-active',pgPanelBelongsToActiveWorkspace(panel)?'true':'false');
   const order=Number(panel.getAttribute('data-desktop-order')||0);
   if(Number.isFinite(order)) panel.style.order=String(order);
  });
+}
+// While a batch owns calibration, Tablet puts its read-only observer ahead of
+// the draggable cards (Display Settings stays pinned first by CSS). Desktop
+// shows the same card in the Calibration workspace instead.
+function pgPlaceAutomationObserverForTablet(){
+ const dash=document.querySelector('.dashboard');
+ const card=document.getElementById('pgAutomationCalibrationCard');
+ if(!dash||!card||card.parentNode!==dash||card.style.display==='none') return;
+ const first=dash.querySelector(':scope > .card');
+ if(first&&first!==card) dash.insertBefore(card,first);
 }
 function pgSyncMeterDesktopWorkspaceAvailability(){
  const desktop=document.body.classList.contains('layout-desktop');
@@ -3256,6 +3273,8 @@ function pgLayoutInit(){
  pgUpdateHeaderOffset();
  pgApplyLayout({resetWorkspace:true});
  meterSyncConfigurationCollapse();
+ // Reveal the dashboard after this task's order and collapse passes finish.
+ requestAnimationFrame(()=>document.documentElement.removeAttribute('data-pg-booting'));
  const header=document.querySelector('.header');
  if(header&&window.ResizeObserver){
   try{ new ResizeObserver(pgUpdateHeaderOffset).observe(header); }catch(e){}

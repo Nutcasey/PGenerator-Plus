@@ -304,3 +304,49 @@ body.layout-tablet .ui-choice:disabled:hover .ui-choice-description,body.layout-
   max-height:calc(100dvh - 20px)!important;margin:auto!important;overflow:auto
  }
 }
+/* Phone header: two fixed rows, brand and actions over one line of status, so
+   a status change can never change its height and shove the page. Status that
+   does not fit scrolls sideways; warnings lead so they stay in view. The layout
+   switch lives in UI Settings too, and Desktop needs 1024px anyway. Landscape
+   phones get the same bar; the full one would take a quarter of the screen. */
+@media(max-width:700px),(max-height:500px) and (pointer:coarse){
+ .header{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"brand actions" "status status";align-items:center;gap:4px 10px;padding:8px max(12px,env(safe-area-inset-right)) 6px max(12px,env(safe-area-inset-left))}
+ .header .logo{grid-area:brand;min-width:0;gap:8px;overflow:hidden}
+ .header .logo img{height:28px}
+ .header .logo > div{min-width:0}
+ .header .logo .ver{font-size:.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .header .hdr-right{display:contents}
+ .header .hdr-actions{grid-area:actions;flex-wrap:nowrap;gap:2px}
+ .header .layout-switch{display:none}
+ .header .status-bar{grid-area:status;width:auto;height:20px;justify-content:flex-start;flex-wrap:nowrap;gap:14px;font-size:.75rem;overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;scrollbar-width:none;-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 20px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 20px),transparent)}
+ .header .status-bar::-webkit-scrollbar{display:none}
+ .header .status-bar > span{flex:0 0 auto}
+ .header #hdmiWarnBadge,.header #meterUsbWarnBadge{order:-1}
+ .header #statusText{min-width:4.4ch}
+ .header #tempDisplay{min-width:5.6ch}
+ .header .status-bar .status-stack{flex-direction:row;flex-basis:auto;width:auto;max-width:none;gap:14px;margin-top:0}
+ .header .status-bar .status-stack > .status-line{width:auto;max-width:none}
+ .header .status-bar .status-stack .status-label{max-width:16em}
+}
+/* Calibration card on phones: one full-width column for the meter header and
+   an even two-column grid for targets, instead of fixed desktop widths that
+   left ragged edges and pushed the target rows past the card. */
+@media(max-width:700px){
+ body.layout-tablet .meter-card-header-row > .meter-card-header-col{flex:1 1 100%;max-width:none}
+ body.layout-tablet #meterSettingsGrid > .field{flex:1 1 calc(50% - 6px);width:auto;min-width:0}
+ body.layout-tablet #meterSettingsGrid > .field-display{flex-basis:100%}
+ body.layout-tablet #meterSettingsGrid > .field > select{width:100%}
+ body.layout-tablet #meterSettingsGrid .meter-target-white-row,
+ body.layout-tablet #meterSettingsGrid .meter-target-black-row{width:100%;flex-wrap:wrap;row-gap:6px}
+ body.layout-tablet #meterSettingsGrid .meter-target-use-measured{flex-basis:100%;padding-left:120px}
+ body.layout-tablet #meterEotfLuminanceGrid{grid-template-columns:minmax(0,1fr)!important}
+ body.layout-tablet #chartsGreyscaleFullWrap.lg-calibration-mode #meterGreyTvWrap{width:auto!important}
+ /* Greyscale chart options: one per row, selects in one right-hand column. */
+ body.layout-tablet #meterDeltaEBlock > div:first-child > label,
+ body.layout-tablet #meterNoiseFloorControl{flex:1 1 100%}
+ body.layout-tablet #meterDeltaEBlock > div:first-child > label > select{width:62%;margin-left:auto}
+ body.layout-tablet #meterNoiseFloorControl > label:first-child{flex:1 1 auto}
+ body.layout-tablet #meterRgbBalanceNoiseFloor{margin-left:auto}
+}
+/* The configuration toggle sits where every other card keeps its chevron. */
+body.layout-tablet #meterCard .meter-config-toggle{margin:0 -11px 0 auto;font-size:.8rem}

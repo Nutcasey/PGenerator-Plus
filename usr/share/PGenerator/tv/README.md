@@ -79,9 +79,13 @@ to use `settings.controls` for schemas, routes and verification policies;
 recipe targets are not manufacturer defaults or measured values.
 
 The shared `pgenerator-lg` picture read/write workflows resolve the contracts
-on every connection. They validate types, ranges and enum tokens, isolate
-context-sensitive requests, retry omissions from grouped reads, require a
-preflight read for unlisted writes, and compare post-write values using the
+on every connection. Picture writes validate the full request before changing
+controls, group compatible settings in one write, and verify each returned value.
+Special scopes and individual-access contracts retain separate writes on the
+same authenticated connection. A refused or partially verified group retries only
+unverified controls and retains earlier per-setting evidence if a later write
+fails. They validate types, ranges and enum tokens, retry omissions from grouped
+reads, require a preflight read for unlisted writes, and compare post-write values using the
 setting's semantics. Mismatched readback returns an error with per-key evidence;
 missing readback does too unless the matrix explicitly permits acknowledged-only
 operation for that control and signal. Native controls and PGenerator's fractional DDC arrays have
@@ -124,7 +128,8 @@ result is `acknowledged_unverified`, restoration failures are listed with the
 other unrestored protections, and an unreviewed platform receives nothing.
 
 Device observations live in `/var/lib/PGenerator/lg/capabilities`, outside
-the reviewed library. They are written atomically under a lock. Missing device
+the reviewed library. Each grouped reply saves its observations in one atomic transaction under a
+lock, including each control’s separate write and verification outcome. Missing device
 identity prevents persistence; observed refusals remain probeable because
 picture processing state can change within the same input/mode. A successful
 write still attempts verification on each subsequent operation. An explicitly
@@ -132,6 +137,13 @@ permitted acknowledged-only result never promotes the control to verified.
 Incomplete or unconfirmed contexts are not persisted. Scoped native reads
 carry input/mode dimensions, and post-write verification uses the accepted
 write's scope rather than searching another input for a matching value.
+
+Browser readback history uses a small index in
+`/var/lib/PGenerator/lg/last-picture-settings.json` and one file per TV/input/
+signal/mode/category context in `lg/picture-settings-cache/`. Up to 32 contexts
+are retained. The previous combined cache is migrated once; each subsequent
+read or update loads only the selected context. Per-control read times and
+context isolation are preserved.
 
 ## Best available settings on readback-limited TVs
 
