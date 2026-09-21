@@ -102,7 +102,7 @@ window.pgAutomationConfirmOverride=()=>true;
    pgAutomation.current=window.mockCurrent={run:{id:'checked',status:'failed',preflight_only:true,items:pgAutomation.queue.items.map(item=>({name:item.name||item.picture_mode,status:'checked'})),preflight_result:{scope:'queue',ready:0,message:'Queue blocked before calibration',checks:[{ok:0,level:'error',item_number:3,message:'Job four unsupported'}]}}};
    pgAutomationRenderLiveRun(pgAutomation.current.run);
   });
-  assert.match(await page.$eval('#pgAutomationLive',el=>el.textContent),/Last whole-queue check/,'check-only run is not reported as a calibration');
+  assert.match(await page.$eval('#pgAutomationLive',el=>el.textContent),/Last readiness check/,'check-only run is not reported as a calibration');
   assert.match(await page.$eval('#pgAutomationReadiness',el=>el.textContent),/Job four unsupported/,'late incompatibility is visible');
   // P1: the same saved result is not shown under a different (here empty) queue.
   await page.evaluate(()=>{pgAutomation.queue={name:'Test Queue',items:[]};pgAutomationRenderLiveRun(pgAutomation.current.run);});
