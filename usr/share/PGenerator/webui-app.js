@@ -2844,7 +2844,7 @@ function idleCardDuration(seconds){
 // it by up to a second.
 function idleCardHopIndex(card){
  if(!card||!Array.isArray(card.positions)||!card.positions.length) return -1;
- const hop=Number(card.hop_ms)||60000;
+ const hop=Number(card.hop_ms)||20000;
  const elapsed=Math.max(0,Date.now()-Number(card.shown_at||0)*1000);
  return Math.floor(elapsed/hop)%card.positions.length;
 }

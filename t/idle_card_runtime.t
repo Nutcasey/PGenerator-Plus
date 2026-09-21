@@ -97,6 +97,9 @@ ok(ref($main::_idle_card{shown}{card}) eq 'HASH','successful display publishes c
 is($range_changes,0,'card does not take range ownership or restart the current signal');
 is(request($auto_stop)->{pattern},'stop','automatic Hide clears the card');
 is($range_changes,0,'automatic Hide also preserves signal ownership');
+request($auto);
+is(request({name=>'stop',only_if_idle=>JSON::PP::true})->{pattern},'stop','browser Hide accepts the existing idle-only request');
+is($range_changes,0,'browser Hide preserves signal ownership without an extra flag');
 $now+=2; main::webui_idle_card_tick();
 is(PGAutomation::decode_json($main::_idle_card_status)->{state},'waiting','Hide re-arms the delay');
 
@@ -114,6 +117,7 @@ like(read_pattern(),qr/^PATTERN_NAME=stop/m,'late ownership leaves the output un
 my $before=$renders;
 is(request({name=>'screensaver'})->{error_code},'pattern-owned','Show now also respects ownership');
 is($renders,$before,'existing ownership blocks rendering immediately');
+is(request({name=>'stop',only_if_idle=>JSON::PP::true})->{error_code},'pattern-owned','existing idle-only callers also respect ownership');
 for my $reason ('video','stabilisation') {
  reset_idle(); $render_hook=sub {$reason eq 'video' ? $video=1 : $stabilise=1};
  ok(request($auto)->{unchanged},"$reason starting during render cancels the card");

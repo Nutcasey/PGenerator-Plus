@@ -173,7 +173,7 @@ ok((grep { $_ eq "label:\\\@/etc/passwd" } @args),"a leading @ cannot make Image
 ok((grep { /^label:.*50%%/s } @args),"percent escapes are neutralised");
 ok((grep { /\x{2260}/ } @args),"a differing row draws the not-equal marker");
 my $pattern=sequence_pattern(w=>800,h=>560,bg=>"0,0,0",image=>"/tmp/card.png",positions=>[[10,20],[30,40]]);
-is(scalar(() = $pattern=~/^FRAME=60000$/mg),2,"one minute per hop");
+is(scalar(() = $pattern=~/^FRAME=20000$/mg),2,"twenty seconds per hop");
 like($pattern,qr/POSITION=30,40\nIMAGE=\/tmp\/card\.png\nSOURCE_RANGE=FULL\nEND=1/,"frames reuse one image at a new position");
 is(picture_mode_label("filmMaker"),"Filmmaker","known LG mode names are readable");
 is(picture_mode_label("someNewMode"),"Some new mode","unknown modes are split into words");

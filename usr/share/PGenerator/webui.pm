@@ -13445,8 +13445,8 @@ sub webui_pattern (@) {
  $name=~s/[^a-zA-Z0-9_ -]//g;
  my $idle_only=$body=~/"only_if_idle"\s*:\s*true/i;
  my $unowned_only=$body=~/"only_if_unowned"\s*:\s*true/i;
- my $idle_policy_request=$name eq "screensaver" || ($idle_only && $unowned_only);
- if($name eq "screensaver" || $unowned_only) {
+ my $idle_policy_request=$name eq "screensaver" || ($name eq "stop" && $idle_only);
+ if($idle_policy_request || $unowned_only) {
   my $blocked=&webui_pattern_request_guard($body,"");
   return $blocked if($blocked ne "");
  }

@@ -36,7 +36,7 @@ our @EXPORT_OK=qw(
 # 100-nit reference white (HLG through a 1000-nit display's system gamma).
 our $VALUE_NITS=25;
 our $LABEL_NITS=12;
-our $HOP_MS=60000;
+our $HOP_MS=20000;
 our $HOP_COUNT=120;
 
 # Dolby Vision carries the PNG through the RGB tunnel, so its codes come from
