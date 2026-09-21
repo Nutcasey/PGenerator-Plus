@@ -3617,6 +3617,12 @@ sub _checkpoint_record {
     $item->{checkpoint_status} = $status;
     $item->{active_stage} = '';
     my $item_saved = _update_item_snapshot($item_number, $item);
+    # Invalidate before the manifest advances: an interrupted cache rewrite
+    # must leave history free to recover the newer checkpoint from run.json.
+    my $timing_cache = "$RUN_DIR/timing.json";
+    if (-e $timing_cache && !unlink($timing_cache)) {
+        _log('Unable to invalidate optional calibration timing history: '.$!);
+    }
     my $run_saved = _update_run(sub {
         my ($run) = @_;
         $run->{active_stage} = '';
@@ -3626,9 +3632,9 @@ sub _checkpoint_record {
     });
     if (ref($run_saved) eq 'HASH') {
         my $timings={version=>1,samples=>PGAutomationETA::samples($run_saved)};
-        if (!PGAutomation::write_json_atomic("$RUN_DIR/timing.json",$timings,0600)) {
+        if (!PGAutomation::write_json_atomic($timing_cache,$timings,0600)) {
             # An older index must not hide this checkpoint on the next run.
-            unlink "$RUN_DIR/timing.json";
+            unlink $timing_cache;
             _log('Unable to save optional calibration timing history; using manifest fallback');
         }
     }
