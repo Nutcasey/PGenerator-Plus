@@ -9,6 +9,87 @@ var pgAutomation = {
 };
 const PG_AUTOMATION_SERIES=[['Grey','greyscale-21','Greyscale'],['Colors','colors-30','ColorChecker'],['Sats','saturations-24','Saturation']];
 const PG_AUTOMATION_LABELS={deitp:'ΔE ITP',de2000:'ΔE2000',bt1886:'BT.1886 (2.4)','2.2':'Gamma 2.2','2.4':'Gamma 2.4',srgb:'sRGB',st2084:'ST 2084',hlg:'HLG',bt709:'BT.709',p3d65:'DCI-P3 / D65',bt2020:'BT.2020'};
+// Fields whose value changes the calibrated result. A job keeps template_id and
+// template_mode, so the pristine reference item can be rebuilt and compared
+// against it -- no stored copy of the template is needed.
+//
+// Workflow choices (stages, the pre/post series, the name) and anything derived
+// from the meter or link (ccss_override, refresh_rate, panel_light.key) are
+// deliberately absent: opting a job into extra sweeps is not "modified" in the
+// sense that matters, and a badge that lights up on every customised job is
+// noise -- which is the failure this is meant to prevent, not repeat.
+const PG_AUTOMATION_DRIFT_FIELDS=[
+ // target_luminance is deliberately absent, top level and under calibration.
+ // It is an input the runner overwrites with what it measured: a real finished
+ // SDR job carries 31.99 against the template's 100. "Copy this run to an
+ // editable queue" puts exactly that item back on the queue, so comparing it
+ // would badge a job nobody touched. panel_light.fixed_value below is the
+ // setting that actually drives it, and it does not move on its own.
+ 'picture_mode','signal_format','target_gamma','target_gamut','target_delta_e',
+ 'delta_e_formula','tv_gamma_follows_target','color_format','max_bpc','rgb_quant_range',
+ 'patch_size','delay_ms','settle_seconds','display_type','observer',
+ 'target_white.x','target_white.y',
+ 'panel_light.policy','panel_light.fixed_value',
+ 'panel_protection.disable',
+ 'calibration.target_gamma','calibration.target_gamut',
+ 'calibration.target_delta_e','calibration.delta_e_formula','calibration.method',
+ 'calibration.profile_source','calibration.lattice_size','calibration.solve_cube_size',
+ 'calibration.lattice_residuals','calibration.dark_detail','calibration.shadow_fix',
+ 'calibration.target_white.x','calibration.target_white.y',
+];
+function pgAutomationDriftAt(object,path){
+ return path.split('.').reduce((value,key)=>(value==null?undefined:value[key]),object);
+}
+// Compare like with like: JSON round trips turn true into 1 and 85 into "85",
+// and a job that came back from the Pi has been through that twice. Comparing
+// raw values would report every boolean as drift.
+function pgAutomationDriftSame(a,b){
+ if(a===undefined&&b===undefined)return true;
+ if(typeof a==='boolean'||typeof b==='boolean')return (a?1:0)===(b?1:0);
+ if(a==null||b==null)return a==null&&b==null;
+ return String(a)===String(b);
+}
+// The differences between a queued job and the reference template it was built
+// from, or null when there are none and for a job with no template to compare
+// against. Returns every differing field so the operator can judge intent --
+// naming them is the point; guessing which were deliberate is not.
+function pgAutomationTemplateDrift(item){
+ if(!item||!item.template_mode||!/^reference-settings-v/.test(item.template_id||''))return null;
+ let reference;
+ try{
+  reference=pgAutomationReferenceItems([item.template_mode],{
+   panel_key:item.panel_light&&item.panel_light.key,
+   ccss_override:item.ccss_override,refresh_rate:item.refresh_rate,
+  })[0];
+ }catch(error){return null;}
+ if(!reference)return null;
+ const drift=[];
+ for(const path of PG_AUTOMATION_DRIFT_FIELDS){
+  const was=pgAutomationDriftAt(reference,path),now=pgAutomationDriftAt(item,path);
+  if(!pgAutomationDriftSame(was,now))drift.push({field:path,was,now});
+ }
+ // The TV settings block is open-ended, so compare the union of both sides
+ // rather than a fixed list: a control the job added or dropped is drift too.
+ for(const key of new Set([...Object.keys(reference.settings||{}),...Object.keys(item.settings||{})])){
+  const was=(reference.settings||{})[key],now=(item.settings||{})[key];
+  if(!pgAutomationDriftSame(was,now))drift.push({field:'settings.'+key,was,now});
+ }
+ return drift.length?drift:null;
+}
+function pgAutomationDriftText(drift){
+ return drift.map(d=>d.field+': '+(d.was===undefined?'unset':d.was)+' → '+(d.now===undefined?'unset':d.now)).join('\n');
+}
+// A job named after its template but carrying different values is invisible
+// otherwise: the row shows only the name. Name the count on the row and the
+// fields on hover, so a job that is not what it says it is can be spotted
+// before it calibrates rather than afterwards in the run record.
+function pgAutomationDriftBadge(item){
+ const drift=pgAutomationTemplateDrift(item);
+ if(!drift)return '';
+ return '<span class="auto-pill auto-drift" title="Differs from the '+pgAutomationEscape(item.template_mode||'reference')
+  +' reference settings:\n'+pgAutomationEscape(pgAutomationDriftText(drift))+'">Modified from reference · '
+  +drift.length+' field'+(drift.length===1?'':'s')+'</span>';
+}
 const PG_AUTOMATION_REFERENCE_MODES=[
  {id:'dv-filmmaker',signal:'dv',mode:'dolbyVisionFilmMaker',name:'Dolby Vision Filmmaker'},
  {id:'dv-cinema',signal:'dv',mode:'dolbyVisionCinemaBright',name:'Dolby Vision Cinema Home'},
@@ -820,7 +901,7 @@ function pgAutomationRenderQueue(){
  pgAutomationEl('StartButton').style.display=pgAutomation.editingRunId?'none':'';
  pgAutomationEl('QueueItems').innerHTML=pgAutomation.queue.items.length?pgAutomation.queue.items.map((item,i)=>{
   const locked=pgAutomationQueueLocked(i);
-  return '<div class="auto-item" data-queue-index="'+i+'"><div><span class="auto-number">'+(i+1)+'</span>'+(locked?'':'<button type="button" class="auto-reorder" aria-label="Reorder job '+(i+1)+': '+pgAutomationEscape(item.name)+'" title="Drag to reorder; arrow keys move up or down" onpointerdown="pgAutomationDragStart(event,'+i+')" onkeydown="pgAutomationReorderKey(event,'+i+')">⠿</button>')+'</div><div><strong>'+pgAutomationEscape(item.name||'Job '+(i+1))+'</strong>'+pgAutomationJobSummary(item)+'<details class="auto-job-details"><summary>Settings and targets</summary>'+pgAutomationItemSummary(item)+'</details></div><div class="auto-actions">'+(locked?'<span class="auto-muted">'+pgAutomationEscape(item.status||'Locked')+'</span>':'<button class="btn btn-sm btn-secondary" onclick="pgAutomationQueueEdit('+i+')">Configure</button><details class="auto-menu"><summary aria-label="Actions for job '+(i+1)+'">More</summary><div class="auto-menu-panel"><button class="btn btn-sm btn-secondary" '+(i===0||pgAutomationQueueLocked(i-1)?'disabled ':'')+'onclick="pgAutomationQueueMove('+i+',-1)">Move up</button><button class="btn btn-sm btn-secondary" '+(i===pgAutomation.queue.items.length-1||pgAutomationQueueLocked(i+1)?'disabled ':'')+'onclick="pgAutomationQueueMove('+i+',1)">Move down</button><button class="btn btn-sm btn-secondary" onclick="pgAutomationQueueDuplicate('+i+')">Duplicate job</button><button class="btn btn-sm btn-secondary" onclick="pgAutomationQueueRemove('+i+')">Remove job</button></div></details>')+'</div></div>';
+  return '<div class="auto-item" data-queue-index="'+i+'"><div><span class="auto-number">'+(i+1)+'</span>'+(locked?'':'<button type="button" class="auto-reorder" aria-label="Reorder job '+(i+1)+': '+pgAutomationEscape(item.name)+'" title="Drag to reorder; arrow keys move up or down" onpointerdown="pgAutomationDragStart(event,'+i+')" onkeydown="pgAutomationReorderKey(event,'+i+')">⠿</button>')+'</div><div><strong>'+pgAutomationEscape(item.name||'Job '+(i+1))+'</strong>'+pgAutomationDriftBadge(item)+pgAutomationJobSummary(item)+'<details class="auto-job-details"><summary>Settings and targets</summary>'+pgAutomationItemSummary(item)+'</details></div><div class="auto-actions">'+(locked?'<span class="auto-muted">'+pgAutomationEscape(item.status||'Locked')+'</span>':'<button class="btn btn-sm btn-secondary" onclick="pgAutomationQueueEdit('+i+')">Configure</button><details class="auto-menu"><summary aria-label="Actions for job '+(i+1)+'">More</summary><div class="auto-menu-panel"><button class="btn btn-sm btn-secondary" '+(i===0||pgAutomationQueueLocked(i-1)?'disabled ':'')+'onclick="pgAutomationQueueMove('+i+',-1)">Move up</button><button class="btn btn-sm btn-secondary" '+(i===pgAutomation.queue.items.length-1||pgAutomationQueueLocked(i+1)?'disabled ':'')+'onclick="pgAutomationQueueMove('+i+',1)">Move down</button><button class="btn btn-sm btn-secondary" onclick="pgAutomationQueueDuplicate('+i+')">Duplicate job</button><button class="btn btn-sm btn-secondary" onclick="pgAutomationQueueRemove('+i+')">Remove job</button></div></details>')+'</div></div>';
  }).join(''):'<div class="auto-empty"><strong>No jobs in this queue</strong><p class="auto-muted">Add a job below, or select another queue above to see its jobs.</p></div>';
 }
 function pgAutomationQueueEdit(index){if(!pgAutomationQueueLocked(index))pgAutomationOpenEditor('queue',pgAutomation.queue.items[index],index);}
