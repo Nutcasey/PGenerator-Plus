@@ -69,10 +69,12 @@ require "$Bin/../usr/share/PGenerator/lg.pm";
  my $list=main::webui_automation_list_runs();
  is(scalar(@$list),70,'seventy runs are listed');
  is($list->[0]{queue_name},'Queue 70','newest first');
- is_deeply([sort keys %{$list->[0]}],[qw(completed_at created_at created_at_iso failure id queue_name status)],'a run row holds what the History row renders and nothing of the jobs');
+ is_deeply([sort keys %{$list->[0]}],[qw(completed_at created_at created_at_iso failure id preflight_only queue_name status)],'a run row holds what the History row renders and nothing of the jobs');
  is_deeply($list->[0]{failure},{stage=>'post-readings-done',message=>'Meter read failed',error_code=>'meter-read'},'the failure keeps its stage, message and code');
  my $public=main::webui_automation_public_run(PGAutomation::read_json_file(PGAutomation::run_dir('run-70').'/run.json'));
- is_deeply($list->[0],{map { ($_=>$public->{$_}) } qw(id queue_name status created_at created_at_iso completed_at failure)},'a row says what the live view says of the run');
+ # preflight_only is normalized to 0/1 on the row: it is re-encoded into the
+ # listing cache, where a JSON boolean would survive as a blessed object.
+ is_deeply($list->[0],{(map { ($_=>$public->{$_}) } qw(id queue_name status created_at created_at_iso completed_at failure)),preflight_only=>($public->{preflight_only}?1:0)},'a row says what the live view says of the run');
  my $bytes=length(PGAutomation::encode_json({status=>'ok',runs=>$list}));
  cmp_ok($bytes,'<',60000,"seventy six-job runs list under 60 KB ($bytes)");
  my $cache=PGAutomation::read_json_file(PGAutomation::run_dir('run-01').'/listing-cache.json');

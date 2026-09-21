@@ -14064,7 +14064,7 @@ sub webui_automation_job_detail (@) {
 # failure, which is all the row renders. Opening a run fetches the run. The
 # jobs, with their checks, warnings and checkpoints, used to ride along: 72
 # runs listed as 588 KB.
-our @WEBUI_LISTING_ROW_KEYS=qw(id queue_name status created_at created_at_iso completed_at failure);
+our @WEBUI_LISTING_ROW_KEYS=qw(id queue_name status created_at created_at_iso completed_at preflight_only failure);
 sub webui_automation_listing_run (@) {
  my ($run)=@_;
  return undef if(ref($run) ne "HASH");
@@ -14075,6 +14075,11 @@ sub webui_automation_listing_run (@) {
   status=>$run->{status}||"idle",
  };
  foreach my $key (qw(created_at created_at_iso completed_at)) { $row->{$key}=$run->{$key} if(exists($run->{$key})); }
+ # A readiness pass finishes "complete" exactly like a calibration, so History
+ # cannot tell them apart without this flag. Carry it as a plain 0/1 rather
+ # than the manifest's JSON boolean: the row is re-encoded into the listing
+ # cache, and a JSON::PP::Boolean survives that round trip as an object.
+ $row->{preflight_only}=$run->{preflight_only} ? 1 : 0;
  if(ref($run->{failure}) eq "HASH") {
   $row->{failure}={stage=>$run->{failure}{stage}||"",message=>$run->{failure}{message}||""};
   $row->{failure}{error_code}=$run->{failure}{error_code} if($run->{failure}{error_code});
@@ -14086,9 +14091,10 @@ sub webui_automation_listing_run (@) {
 # this version is replaced the first time History is listed: trimmed from
 # the old summary when that still matches the manifest, rebuilt from the
 # manifest otherwise.
-# 3: the row carries no items (19 Sep 2026); 2 still carried the trimmed job
-# list; 1 and unversioned carried the whole public run.
-our $WEBUI_LISTING_CACHE_VERSION=3;
+# 4: the row carries preflight_only (21 Sep 2026); 3: the row carries no items
+# (19 Sep 2026); 2 still carried the trimmed job list; 1 and unversioned
+# carried the whole public run.
+our $WEBUI_LISTING_CACHE_VERSION=4;
 sub webui_automation_listing_upgrade (@) {
  my ($old)=@_;
  # Anything short of a row (no run id, a failure that is not a record) is
@@ -14096,6 +14102,14 @@ sub webui_automation_listing_upgrade (@) {
  return undef if(ref($old) ne "HASH" || !defined($old->{id}) || ref($old->{id}) || $old->{id} eq "");
  return undef if(defined($old->{failure}) && ref($old->{failure}) ne "HASH");
  my %row=map { ($_=>$old->{$_}) } grep { exists($old->{$_}) } @WEBUI_LISTING_ROW_KEYS;
+ # Trimming only ever DROPS keys, so a pre-v4 summary carries no
+ # preflight_only. Default it rather than rebuild from the manifest: this trim
+ # path exists so an upgrade does not re-decode every run (72 of them take
+ # minutes on the appliance). 0 keeps a trimmed row identical in shape to a
+ # freshly built one, and the History badge is additive, so an old readiness
+ # pass stays unlabeled rather than being relabeled a calibration. Every new
+ # run carries the real value.
+ $row{preflight_only}=$old->{preflight_only} ? 1 : 0;
  $row{failure}={map { exists($old->{failure}{$_}) ? ($_=>$old->{failure}{$_}) : () } qw(stage message error_code)} if(ref($old->{failure}) eq "HASH");
  return \%row;
 }

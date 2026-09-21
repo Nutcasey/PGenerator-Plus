@@ -191,13 +191,13 @@
   </div>
   <div class="field"><label for="pgAutomationFinishPolicy">When the batch finishes</label><select id="pgAutomationFinishPolicy" onchange="pgAutomationFinishPolicyChanged()"><option value="restore-original">Restore original signal and picture mode where readable</option><option value="keep-last">Leave the final calibrated mode selected</option></select><small>Temporary protection settings are restored in both cases. An unreadable original picture mode is never guessed.</small></div>
   <div class="auto-toolbar auto-run-actions">
-   <button class="btn btn-sm btn-primary" id="pgAutomationStartButton" type="button" onclick="pgAutomationStart()">Run queue</button>
-   <button class="btn btn-sm btn-secondary" id="pgAutomationReadinessButton" type="button" onclick="pgAutomationReadiness()">Check Readiness</button>
+   <button class="btn btn-sm btn-primary" id="pgAutomationStartButton" type="button" title="Rechecks every job, then calibrates." onclick="pgAutomationStart()">Run queue</button>
+   <button class="btn btn-sm btn-secondary" id="pgAutomationReadinessButton" type="button" title="Checks the queue only. Does not calibrate." onclick="pgAutomationReadiness()">Check Readiness</button>
    <button class="btn btn-sm btn-primary" id="pgAutomationSavePendingButton" type="button" style="display:none" onclick="pgAutomationEditActiveQueue()">Save Pending Changes</button>
   </div>
   <div id="pgAutomationActionBlocker" class="auto-muted" role="status" hidden></div>
   <div id="pgAutomationReadiness" aria-live="polite"></div>
-  <p class="auto-muted">Check Readiness checks every job and restores any context it can independently read. On older TVs without mode readback, it checks compatibility without probing modes and reports limited verification. Run queue rechecks each job in its selected signal and mode before calibration.</p>
+  <p class="auto-muted"><strong>Run queue</strong> is the only action that calibrates; it rechecks each job in its selected signal and mode first, so a separate check is not required beforehand. <strong>Check Readiness</strong> validates every job and restores any context it can independently read, then stops without calibrating. On older TVs without mode readback, it checks compatibility without probing modes and reports limited verification.</p>
   <div class="auto-queue-header">
    <div><h3 id="pgAutomationJobsHeading">Jobs</h3><span id="pgAutomationQueueSaveState" class="auto-muted" aria-live="polite"></span></div>
    <div class="auto-actions">
