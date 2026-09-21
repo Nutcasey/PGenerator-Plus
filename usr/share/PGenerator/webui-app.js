@@ -2900,7 +2900,7 @@ function idleCardRender(st){
  if(enabled&&document.activeElement!==enabled) enabled.checked=!!st.enabled;
  const delay=document.getElementById('idleCardDelay');
  if(delay&&document.activeElement!==delay){
-  const v=String(st.delay_s||120);
+  const v=String(st.delay_s||30);
   if(![...delay.options].some(o=>o.value===v)) delay.add(new Option(idleCardDuration(v),v));
   delay.value=v;
  }

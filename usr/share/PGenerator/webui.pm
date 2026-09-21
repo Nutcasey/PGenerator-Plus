@@ -12448,7 +12448,7 @@ sub webui_idle_card_settings (@) {
  my $enabled=$pgenerator_conf{"screensaver_enabled"};
  $enabled=(!defined($enabled) || $enabled eq "" || $enabled ne "0") ? 1 : 0;
  my $delay=$pgenerator_conf{"screensaver_delay_s"};
- $delay=120 if(!defined($delay) || $delay !~ /^\d+$/);
+ $delay=30 if(!defined($delay) || $delay !~ /^\d+$/);
  $delay=int($delay);
  $delay=10 if($delay < 10);
  $delay=3600 if($delay > 3600);
