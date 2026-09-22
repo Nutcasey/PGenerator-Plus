@@ -1409,7 +1409,10 @@ function pgAutomationRenderLiveRun(run,execution){
  pgAutomationEl('StartButton').disabled=!!(occupied||pgAutomation.busy);
  pgAutomationEl('ReadinessButton').disabled=!!(occupied||pgAutomation.pendingChecks);
  const reason=run?.cleanup_required?'Cleanup is still required. Open Live Run and use Retry cleanup.':checking?'Readiness checks are in progress.':occupied?'The previous batch is '+run.status+'. Open Live Run to resume it or Stop it before starting a new queue.':pgAutomation.busy?'A start request is in progress.':'';
- for(const id of ['StartButton','ReadinessButton'])pgAutomationEl(id).title=reason;
+ // A blocker reason wins while set; when it clears, fall back to the standing
+ // explanation of what each action does rather than leaving the title empty.
+ const actionTitle={StartButton:'Rechecks every job, then calibrates.',ReadinessButton:'Checks the queue only. Does not calibrate.'};
+ for(const id of ['StartButton','ReadinessButton'])pgAutomationEl(id).title=reason||actionTitle[id];
  const blocker=pgAutomationEl('ActionBlocker');
  if(blocker){blocker.hidden=!reason;blocker.innerHTML=pgAutomationEscape(reason)+(occupied&&!checking?' <button type="button" class="btn btn-sm btn-secondary" onclick="pgAutomationTab(\'live\')">Open Live Run</button>':'');}
  pgAutomationEl('PauseButton').disabled=status!=='running'||run?.preflight_only||run?.active_stage==='queue-preflight';pgAutomationEl('ResumeButton').disabled=!!run?.preflight_only||!!run?.cleanup_required||!['paused','interrupted'].includes(status);
