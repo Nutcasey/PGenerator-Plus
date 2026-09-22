@@ -34,6 +34,13 @@ sub samples {
  return \@samples;
 }
 
+sub _cached_samples {
+ my ($path)=@_;
+ my $saved=(-f $path && -s $path<=1048576) ? PGAutomation::read_json_file($path) : undef;
+ return ref($saved) eq 'HASH' && ($saved->{version}||0)==1 && ref($saved->{samples}) eq 'ARRAY'
+  ? $saved->{samples} : undef;
+}
+
 sub history {
  my ($current_id,$tick)=@_;
  my $dir=PGAutomation::base_dir().'/runs';
@@ -47,18 +54,23 @@ sub history {
  for my $id (@ids) {
   last if ref($tick) eq 'CODE' && !$tick->();
   my $cache="$dir/$id/timing.json";
-  my $saved=(-f $cache && -s $cache<=1048576) ? PGAutomation::read_json_file($cache) : undef;
-  if (ref($saved) eq 'HASH' && ($saved->{version}||0)==1 && ref($saved->{samples}) eq 'ARRAY') {
-   push @samples,@{$saved->{samples}};next;
+  my $saved=_cached_samples($cache);
+  if (defined($saved)) {
+   push @samples,@$saved;next;
   }
   # Legacy manifests have no compact index. Bound both an individual parse
   # and total I/O; factory priors cover work beyond this startup budget.
   my $size=-s "$dir/$id/run.json";
-  next if !defined($size) || $size>2097152 || $legacy_bytes+$size>8388608;
-  $legacy_bytes+=$size;
-  my $run=PGAutomation::read_json_file("$dir/$id/run.json");
-  next unless ref($run) eq 'HASH';
-  push @samples,@{samples($run)};
+  if (defined($size) && $size<=2097152 && $legacy_bytes+$size<=8388608) {
+   $legacy_bytes+=$size;
+   my $run=PGAutomation::read_json_file("$dir/$id/run.json");
+   if (ref($run) eq 'HASH') {push @samples,@{samples($run)};next;}
+  }
+  # A failed/interrupted cache handover must not discard known timings when
+  # the manifest cannot be read. A readable manifest always takes precedence
+  # so its newer checkpoints cannot be hidden by this last-resort copy.
+  my $previous=_cached_samples("$cache.previous");
+  push @samples,@$previous if defined($previous);
  }
  return \@samples;
 }

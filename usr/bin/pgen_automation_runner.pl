@@ -3632,11 +3632,19 @@ sub _checkpoint_record {
     $item->{checkpoint_status} = $status;
     $item->{active_stage} = '';
     my $item_saved = _update_item_snapshot($item_number, $item);
-    # Invalidate before the manifest advances: an interrupted cache rewrite
-    # must leave history free to recover the newer checkpoint from run.json.
+    # Hide the old cache before the manifest advances, but retain it for a
+    # failed commit. Holding the manifest open prevents inode reuse while we
+    # check whether write_json_atomic published a replacement before failing.
     my $timing_cache = "$RUN_DIR/timing.json";
-    if (-e $timing_cache && !unlink($timing_cache)) {
-        _log('Unable to invalidate optional calibration timing history: '.$!);
+    my $timing_previous = "$timing_cache.previous";
+    my ($timing_manifest, $timing_staged);
+    if (-e $timing_cache) {
+        $timing_manifest = undef if !open($timing_manifest, '<', $RUN_FILE);
+        $timing_staged = rename($timing_cache, $timing_previous);
+        if (!$timing_staged) {
+            _log('Unable to retain previous optional calibration timing history: '.$!);
+            _log('Unable to invalidate optional calibration timing history: '.$!) if !unlink($timing_cache);
+        }
     }
     my $run_saved = _update_run(sub {
         my ($run) = @_;
@@ -3651,8 +3659,21 @@ sub _checkpoint_record {
             # An older index must not hide this checkpoint on the next run.
             unlink $timing_cache;
             _log('Unable to save optional calibration timing history; using manifest fallback');
+        } else {
+            _log('Unable to remove previous optional calibration timing history: '.$!)
+                if -e $timing_previous && !unlink($timing_previous);
+        }
+    } elsif ($timing_staged && $timing_manifest) {
+        my @before = stat($timing_manifest);
+        my @after = stat($RUN_FILE);
+        # A failed directory sync can report failure after the new checkpoint
+        # became visible. Never put its predecessor's cache back in that case.
+        if (@before && @after && $before[0] == $after[0] && $before[1] == $after[1]) {
+            _log('Unable to restore previous optional calibration timing history: '.$!)
+                if !rename($timing_previous, $timing_cache);
         }
     }
+    close($timing_manifest) if $timing_manifest;
     my $artifacts_saved = _copy_worker_files($item_number, 'grey', undef)
         && _copy_worker_files($item_number, '3d', undef)
         && _copy_worker_files($item_number, 'dv', undef);

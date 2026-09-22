@@ -37,6 +37,25 @@ const root=path.resolve(__dirname,'../../usr/share/PGenerator')+'/';
   const snapshot=()=>page.evaluate(()=>({verdict:document.querySelector('[data-job-verdict]').textContent,count:document.querySelector('[data-rendered-count]')?.dataset.renderedCount,draws}));
   assert.equal((await snapshot()).verdict,'1Average ΔE1Readings');
   assert.deepEqual(await page.evaluate(()=>({ire:liveMark.ire,phase:liveMark.phase,manual:meterSeriesSteps[0].name})),{ire:10,phase:'pending',manual:'manual 50%'},'marker uses the report series after manual globals are restored');
+  // A partially rebuilt section must remain renderable when its body returns.
+  assert.deepEqual(await page.evaluate(async()=>{
+   const section=document.querySelector('details.auto-section-running'),body=section.querySelector('.auto-section-body');
+   delete section.dataset.chartsReady;body.remove();
+   await pgAutomationRenderSectionCharts('live',section);
+   const skipped={busy:section.dataset.chartsBusy||'',reportBusy:pgAutomation.reportBusy};
+   section.append(body);
+   await pgAutomationRenderSectionCharts('live',section);
+   return {skipped,ready:section.dataset.chartsReady,count:body.querySelector('[data-rendered-count]').dataset.renderedCount};
+  }),{skipped:{busy:'',reportBusy:false},ready:'1',count:'1'},'missing body releases both render paths and the restored body renders');
+  assert.deepEqual(await page.evaluate(async()=>{
+   const section=document.querySelector('details.auto-section-running'),render=meterFullAutoCalBuildSnapshotReportSections;
+   delete section.dataset.chartsReady;
+   meterFullAutoCalBuildSnapshotReportSections=async()=>{throw new Error('simulated chart failure');};
+   try{await pgAutomationRenderSectionCharts('live',section);}finally{meterFullAutoCalBuildSnapshotReportSections=render;}
+   const failed={busy:section.dataset.chartsBusy||'',reportBusy:pgAutomation.reportBusy,ready:section.dataset.chartsReady||'',message:section.textContent.includes('simulated chart failure')};
+   await pgAutomationRenderSectionCharts('live',section);
+   return {failed,ready:section.dataset.chartsReady};
+  }),{failed:{busy:'',reportBusy:false,ready:'',message:true},ready:'1'},'renderer exceptions release both busy flags and allow retry');
   await page.evaluate(()=>{window.sectionBefore=document.querySelector('details.auto-section-running');});
   await page.evaluate(async()=>{data.live.snapshot.readings.push({name:'10%',ire:10,Y:3});await pgAutomationFetchJob('live',pgAutomation.jobViews.live);});
   await page.waitForFunction(()=>!pgAutomation.reportBusy);
@@ -80,6 +99,6 @@ const root=path.resolve(__dirname,'../../usr/share/PGenerator')+'/';
   assert.equal(await page.evaluate(()=>liveMark),null,'another job cannot borrow matching patch names from the previous job');
   assert.equal(await page.$('details[data-pg-live]'),null,'previous job charts stop receiving live overlays');
   assert.deepEqual(errors,[]);
-  console.log('PASS report headlines, folded charts, restored marker context and resumed jobs');
+  console.log('PASS missing-body/renderer recovery, report headlines, folded charts, restored marker context and resumed jobs');
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
