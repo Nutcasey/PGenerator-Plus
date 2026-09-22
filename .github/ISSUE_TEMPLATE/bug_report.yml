@@ -68,9 +68,9 @@ body:
     id: meter
     attributes:
       label: "Meter"
-      description: "Leave on \"None\" if no meter was involved"
+      description: "Leave on \"No meter\" if no meter was involved"
       options:
-        - "None"
+        - "No meter"
         - "i1Display Pro"
         - "i1Display Pro Plus"
         - "i1Pro / i1Pro 2"
