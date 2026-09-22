@@ -85,12 +85,13 @@ SKIP: {
     print $fh3 "package Changed; sub old_only { 1 } sub new_export { 1 } 1;\n";
     close $fh3;
 
-    # cp -an exits non-zero whenever it SKIPS an already-present destination
-    # file -- which is the common case here, since the tree being backfilled
-    # almost always already has at least the files this upload staged. That
-    # is success, not failure: the real script backgrounds this exact call
-    # with `2>/dev/null || true` for that reason. Check file state, not the
-    # exit code.
+    # cp -an's exit status on a SKIP (the destination already exists -- the
+    # common case here, since the backfilled tree almost always already holds
+    # the files this upload staged) is implementation-dependent: GNU coreutils
+    # returns 0, BSD/macOS cp returns 1. Either way the skip is the intended
+    # outcome, not a failure -- the staged file must win. That is why the real
+    # script ends this call with `2>/dev/null || true`, and why this test
+    # asserts file state rather than the exit code.
     system("cp -an $dir/installed/. $dir/staged/ 2>/dev/null");
 
     ok(-f "$dir/staged/Shared.pm", 'an installed-only sibling is backfilled into the staged tree');
