@@ -162,7 +162,7 @@ sub _worker_summary {
     my ($status) = @_;
     return {} if ref($status) ne 'HASH';
     my %summary;
-    foreach my $key (qw(status current_name current_step total_steps current_delta_e message error_code debug)) {
+    foreach my $key (qw(status phase current_name current_step total_steps current_delta_e message error_code debug)) {
         $summary{$key} = $status->{$key} if exists($status->{$key});
     }
     return \%summary;
@@ -190,6 +190,7 @@ my @LIVE_KEYS = @PGAutomation::RUN_LIVE_KEYS;
 my %LIVE;
 my $STATUS_BASE;
 my $STATUS_BASE_MTIME;
+my $ETA_CONTEXT;
 
 sub _update_run {
     my ($callback) = @_;
@@ -228,16 +229,55 @@ sub _update_run {
 # manifest's size on the fast path.
 sub _compact_run { return PGAutomation::compact_run($_[0]); }
 
+# How far a worker_timing record has advanced, including solve/upload after
+# the last measured point. A tail can start within the same clock tick.
+sub _timing_stamp {
+    my ($timing) = @_;
+    return -1 if ref($timing) ne 'HASH';
+    my $stamp = 0;
+    for my $key (qw(started_at point_started_at tail_started_at)) {
+        $stamp = $timing->{$key} if ($timing->{$key} || 0) > $stamp;
+    }
+    return $stamp;
+}
+
 sub _publish_status {
     my ($run, $manifest_mtime) = @_;
     if (ref($run) eq 'HASH') {
         $STATUS_BASE = _compact_run($run);
+        $ETA_CONTEXT = PGAutomationETA::context($run,$ETA_HISTORY);
+        # The progress tick owns worker_timing just as it owns the heartbeat.
+        # This republish may be driven by the daemon's manifest write, which
+        # carries the last durable copy; adopting it would roll a fresher
+        # tick's point clock back and make the live estimate read the current
+        # point as overdue.
+        my $incoming = _timing_stamp($run->{worker_timing});
+        my $live = _timing_stamp($LIVE{worker_timing});
+        $LIVE{worker_timing} = $run->{worker_timing}
+            if $incoming > $live || ($incoming == $live
+                && (!(($LIVE{worker_timing} || {})->{tail_started_at})
+                    || ($run->{worker_timing} || {})->{tail_started_at}));
         $STATUS_BASE_MTIME = defined($manifest_mtime) ? $manifest_mtime : PGAutomation::file_mtime($RUN_FILE);
     }
     return 0 if ref($STATUS_BASE) ne 'HASH';
     # Only the live keys overlay the compact manifest: a progress callback
     # may set other fields (worker_timing) that belong to the manifest alone.
     my %status = (%$STATUS_BASE, map { exists($LIVE{$_}) ? ($_ => $LIVE{$_}) : () } @LIVE_KEYS);
+    if (ref($ETA_CONTEXT) eq 'HASH') {
+        my %timing=(%$ETA_CONTEXT,map {exists($LIVE{$_}) ? ($_=>$LIVE{$_}) : ()} (@LIVE_KEYS,'worker_timing'));
+        my $ok = eval {PGAutomationETA::update(\%timing,time(),$ETA_HISTORY);1};
+        if ($ok && defined($timing{time_estimate})) {
+            $status{time_estimate}=$LIVE{time_estimate}=$timing{time_estimate};
+        } else {
+            delete $LIVE{time_estimate};
+            delete $status{time_estimate};
+            # Running estimates may fall back to durable evidence. Paused,
+            # stopping and terminal runs must not regain a live countdown,
+            # even when the advisory calculation fails before clearing it.
+            $status{time_estimate}=$STATUS_BASE->{time_estimate}
+                if !$ok && ($status{status}||'') eq 'running' && defined($STATUS_BASE->{time_estimate});
+        }
+    }
     $status{published_at} = time();
     return PGAutomation::write_json_atomic($STATUS_FILE, \%status, 0600) ? 1 : 0;
 }
@@ -1292,6 +1332,9 @@ sub _wait_worker {
     my ($timing_started,$timing_base,$timing_last)=($started,0,0);
     my $point_started=$started;
     my @point_seconds;
+    my @point_elapsed=(0);
+    my $timing_reset=0;
+    my $tail_started;
     my ($last_progress_write, $last_progress_digest, $last_manifest_write) = (0, '', time());
     my ($owned_pid, $owned_ticks) = (0, '');
     # A worker has not stamped its pid yet right after launch. Tolerate an
@@ -1359,13 +1402,19 @@ sub _wait_worker {
             }
         }
         my $step=0+($status->{current_step}||0);
+        $tail_started=$now if !defined($tail_started) && $ACTIVE_WORKER eq '3d'
+            && ($status->{phase}||'') =~ /^(?:building|upload|upload_probe|tone_map_upload|postcal_shadow.*|post_check|dpg_shadow_smoothing)$/;
         if ($state eq 'running' && $step<$timing_last) {
             ($timing_started,$timing_base)=($now,$step>0?$step-1:0);
             @point_seconds=();$point_started=$now;
+            @point_elapsed=(0);$timing_reset=1;
         } elsif ($state eq 'running' && $step>$timing_last) {
             if ($timing_last>0 && $now>$point_started) {
                 push @point_seconds,($now-$point_started)/($step-$timing_last);
                 shift @point_seconds while @point_seconds>5;
+                for my $point ($timing_last..$step-1) {
+                    $point_elapsed[$point]=$point_started-$timing_started+($now-$point_started)*($point-$timing_last+1)/($step-$timing_last);
+                }
             }
             $point_started=$now;
         }
@@ -1383,7 +1432,7 @@ sub _wait_worker {
         my $progress_update = sub {
             my ($run) = @_;
             $run->{worker_status} = _worker_summary($status);
-            $run->{worker_timing}={started_at=>$timing_started,start_step=>$timing_base,kind=>$ACTIVE_WORKER,stage=>$ACTIVE_STAGE,series_key=>$ACTIVE_SERIES_KEY||'',recent_point_seconds=>[@point_seconds]};
+            $run->{worker_timing}={started_at=>$timing_started,start_step=>$timing_base,kind=>$ACTIVE_WORKER,stage=>$ACTIVE_STAGE,series_key=>$ACTIVE_SERIES_KEY||'',recent_point_seconds=>[@point_seconds],point_started_at=>$point_started,tail_started_at=>$tail_started};
             $run->{active_stage} = $ACTIVE_STAGE;
             my $active_item = _active_item_number();
             $run->{active_item} = $active_item if defined($active_item);
@@ -1410,7 +1459,20 @@ sub _wait_worker {
             return {status=>'error',error_code=>'worker-identity-mismatch',message=>'Worker status is idle without this attempt\'s identity and no worker this attempt launched is alive; refusing to adopt or archive it'}
                 if $idle_unstamped && $ACTIVE_WORKER_ID;
         }
-        return $status if _status_terminal($state);
+        if (_status_terminal($state)) {
+            $status->{timing_tail_seconds}=$now-$tail_started if $state eq 'complete' && defined($tail_started) && $now>$tail_started;
+            # Save complete trajectories only. A reset/retry is not the same
+            # ordered pass, and must not train the next job's point weights.
+            if ($state eq 'complete' && !$timing_reset && $ACTIVE_WORKER eq 'grey'
+                && ($status->{total_steps}||0)>0 && $now>$timing_started) {
+                my $n=$status->{total_steps};
+                $point_elapsed[$n]=$now-$timing_started;
+                if (@point_elapsed==$n+1 && !grep {!defined($_)} @point_elapsed) {
+                    $status->{timing_curve}={total_steps=>0+$n,fractions=>[map {$_/($now-$timing_started)} @point_elapsed]};
+                }
+            }
+            return $status;
+        }
         return { status => 'error', error_code => 'worker-timeout', message => "$kind exceeded six hours" }
             if time() - $started >= 21600;
         _sleep_controlled(2) or return undef;
@@ -3094,6 +3156,7 @@ sub _calibration_greyscale_stage {
     _clear_active_worker();
     my $verified = $grey->{ddc_upload_verified} || $grey->{final_1d_lut_upload_verified};
     return {verified => $verified ? JSON::PP::true : 'unverifiable',
+        timing_curve => $grey->{timing_curve},
         final_1d_lut_upload_verified => $grey->{final_1d_lut_upload_verified},
         ddc_upload_verified => $grey->{ddc_upload_verified}};
 }
@@ -3213,7 +3276,8 @@ sub _calibration_volume_stage {
     }
     _clear_active_worker();
     return {verified => ($three_d->{terminal_commit_verified} || $three_d->{upload_verified})
-        ? JSON::PP::true : 'unverifiable', terminal_commit_verified => $three_d->{terminal_commit_verified}};
+        ? JSON::PP::true : 'unverifiable', terminal_commit_verified => $three_d->{terminal_commit_verified},
+        timing_tail_seconds=>$three_d->{timing_tail_seconds}};
 }
 
 # 1 when a Dolby Vision profile upload was dispatched in the latest attempt
@@ -3561,6 +3625,8 @@ sub _checkpoint_record {
     };
     if ($status eq 'done' && ($item->{active_stage}||'') eq $name && $item->{stage_started_at}) {
         $record->{duration_seconds}=time()-$item->{stage_started_at};
+        $record->{timing_curve}=$evidence->{timing_curve} if ref($evidence->{timing_curve}) eq 'HASH';
+        $record->{timing_tail_seconds}=$evidence->{timing_tail_seconds} if defined($evidence->{timing_tail_seconds});
     }
     $item->{checkpoints} ||= [];
     push @{$item->{checkpoints}}, $record;
@@ -3568,6 +3634,20 @@ sub _checkpoint_record {
     $item->{checkpoint_status} = $status;
     $item->{active_stage} = '';
     my $item_saved = _update_item_snapshot($item_number, $item);
+    # Hide the old cache before the manifest advances, but retain it for a
+    # failed commit. Holding the manifest open prevents inode reuse while we
+    # check whether write_json_atomic published a replacement before failing.
+    my $timing_cache = "$RUN_DIR/timing.json";
+    my $timing_previous = "$timing_cache.previous";
+    my ($timing_manifest, $timing_staged);
+    if (-e $timing_cache) {
+        $timing_manifest = undef if !open($timing_manifest, '<', $RUN_FILE);
+        $timing_staged = rename($timing_cache, $timing_previous);
+        if (!$timing_staged) {
+            _log('Unable to retain previous optional calibration timing history: '.$!);
+            _log('Unable to invalidate optional calibration timing history: '.$!) if !unlink($timing_cache);
+        }
+    }
     my $run_saved = _update_run(sub {
         my ($run) = @_;
         $run->{active_stage} = '';
@@ -3575,6 +3655,27 @@ sub _checkpoint_record {
         $run->{last_checkpoint} = $record;
         $run->{items}[$item_number] = $item if ref($run->{items}) eq 'ARRAY';
     });
+    if (ref($run_saved) eq 'HASH') {
+        my $timings={version=>1,samples=>PGAutomationETA::samples($run_saved)};
+        if (!PGAutomation::write_json_atomic($timing_cache,$timings,0600)) {
+            # An older index must not hide this checkpoint on the next run.
+            unlink $timing_cache;
+            _log('Unable to save optional calibration timing history; using manifest fallback');
+        } else {
+            _log('Unable to remove previous optional calibration timing history: '.$!)
+                if -e $timing_previous && !unlink($timing_previous);
+        }
+    } elsif ($timing_staged && $timing_manifest) {
+        my @before = stat($timing_manifest);
+        my @after = stat($RUN_FILE);
+        # A failed directory sync can report failure after the new checkpoint
+        # became visible. Never put its predecessor's cache back in that case.
+        if (@before && @after && $before[0] == $after[0] && $before[1] == $after[1]) {
+            _log('Unable to restore previous optional calibration timing history: '.$!)
+                if !rename($timing_previous, $timing_cache);
+        }
+    }
+    close($timing_manifest) if $timing_manifest;
     my $artifacts_saved = _copy_worker_files($item_number, 'grey', undef)
         && _copy_worker_files($item_number, '3d', undef)
         && _copy_worker_files($item_number, 'dv', undef);
@@ -5477,9 +5578,10 @@ sub _main {
     die "run manifest unavailable\n" if ref($run) ne 'HASH' || ($run->{token} || '') ne $TOKEN;
     return if ($run->{status} || '') eq 'paused';
     return if ($run->{status} || '') =~ /^(?:complete(?:-with-warnings)?|failed|stopped)$/;
-    $ETA_HISTORY=eval {PGAutomationETA::history($RUN_ID)} || [];
     _seed_lg_control_seconds($run);
     _heartbeat(1);
+    $ETA_HISTORY=eval {PGAutomationETA::history($RUN_ID,sub {_heartbeat();_refresh_control();return !$STOP_REQUESTED;})} || [];
+    $ETA_CONTEXT=PGAutomationETA::context($run,$ETA_HISTORY);
     _log_action('Automation runner started');
     if (_control()->{request} eq 'stop') {
         $STOP_REQUESTED = 1;

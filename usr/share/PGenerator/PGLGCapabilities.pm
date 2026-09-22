@@ -12,6 +12,7 @@ use Fcntl qw(:flock);
 use Cwd ();
 use JSON::PP ();
 use Time::HiRes qw(time);
+use PGAutomation ();
 
 our @EXPORT_OK = qw(
  clear_lg_capability_cache
@@ -19,6 +20,7 @@ our @EXPORT_OK = qw(
  lg_recipe
  lg_normalize_setting_value
  lg_record_setting_observation
+ lg_record_setting_observations
  lg_setting_contracts
  lg_setting_values_agree
  load_lg_library
@@ -852,9 +854,21 @@ sub _context_observations {
 
 sub lg_record_setting_observation {
  my ($identity,$context,$key,$operation,$result,%options)=@_;
+ return lg_record_setting_observations($identity,$context,[{key=>$key,operation=>$operation,result=>$result}],%options);
+}
+
+# A grouped TV reply is one evidence transaction. Validate every record before
+# locking, then read and replace the shared document once for the whole batch.
+sub lg_record_setting_observations {
+ my ($identity,$context,$observations,%options)=@_;
  return {ok=>JSON::PP::false,error=>'invalid-observation'}
-  if(ref($identity) ne 'HASH' || ref($context) ne 'HASH' || !defined($key) || ref($key)
-     || $key eq '' || $operation !~ /^(?:read|write|verify|roundtrip)$/ || ref($result) ne 'HASH');
+  if(ref($identity) ne 'HASH' || ref($context) ne 'HASH' || ref($observations) ne 'ARRAY' || !@$observations);
+ foreach my $observation (@$observations) {
+  return {ok=>JSON::PP::false,error=>'invalid-observation'}
+   if(ref($observation) ne 'HASH' || !defined($observation->{key}) || ref($observation->{key})
+      || $observation->{key} eq '' || ref($observation->{operation})
+      || ($observation->{operation}||'') !~ /^(?:read|write|verify|roundtrip)$/ || ref($observation->{result}) ne 'HASH');
+ }
  return {ok=>JSON::PP::false,error=>'device-identity-unavailable'}
   if(!(_normalized_identity($identity)->{'device_id'}||''));
  # Evidence is scoped to a physical TV, input, signal and picture mode.
@@ -872,9 +886,9 @@ sub lg_record_setting_observation {
  my $lock_path=$path.'.lock';
  open(my $lock,'>>',$lock_path)
   or return {ok=>JSON::PP::false,error=>'observation-lock-unavailable',detail=>"$!"};
- if(!flock($lock,LOCK_EX)) {
+ if(!PGAutomation::lock_exclusive($lock,$options{lock_timeout})) {
   close($lock);
-  return {ok=>JSON::PP::false,error=>'observation-lock-failed',detail=>"$!"};
+  return {ok=>JSON::PP::false,error=>'observation-lock-failed',detail=>'Timed out waiting for the observation lock'};
  }
  my ($document)=_read_observation_document($identity,%options);
  my $normalized_identity=_normalized_identity($identity);
@@ -892,18 +906,22 @@ sub lg_record_setting_observation {
  $entry={context=>$normalized_context,settings=>{}} if(ref($entry) ne 'HASH');
  $entry->{'context'}=$normalized_context;
  $entry->{'settings'}={} if(ref($entry->{'settings'}) ne 'HASH');
- $entry->{'settings'}{$key}={} if(ref($entry->{'settings'}{$key}) ne 'HASH');
- my $previous=$entry->{'settings'}{$key}{$operation};
- my $count=(ref($previous) eq 'HASH' ? int($previous->{'count'}||0) : 0)+1;
- my %record=(
-  status=>_context_value($result->{'status'}||'unknown'),
-  route=>_context_value($result->{'route'}),
-  reason=>defined($result->{'reason'}) && !ref($result->{'reason'}) ? "$result->{'reason'}" : '',
-  count=>$count,
-  last_seen=>0+sprintf('%.3f',time()),
- );
- $record{'value_type'}=$result->{'value_type'} if(defined($result->{'value_type'}) && !ref($result->{'value_type'}));
- $entry->{'settings'}{$key}{$operation}=\%record;
+ my $observed_at=0+sprintf('%.3f',time());
+ foreach my $observation (@$observations) {
+  my ($key,$operation,$result)=@{$observation}{qw(key operation result)};
+  $entry->{'settings'}{$key}={} if(ref($entry->{'settings'}{$key}) ne 'HASH');
+  my $previous=$entry->{'settings'}{$key}{$operation};
+  my $count=(ref($previous) eq 'HASH' ? int($previous->{'count'}||0) : 0)+1;
+  my %record=(
+   status=>_context_value($result->{'status'}||'unknown'),
+   route=>_context_value($result->{'route'}),
+   reason=>defined($result->{'reason'}) && !ref($result->{'reason'}) ? "$result->{'reason'}" : '',
+   count=>$count,
+   last_seen=>$observed_at,
+  );
+  $record{'value_type'}=$result->{'value_type'} if(defined($result->{'value_type'}) && !ref($result->{'value_type'}));
+  $entry->{'settings'}{$key}{$operation}=\%record;
+ }
  $document->{'contexts'}{$context_hash}=$entry;
  my $tmp=$path.'.tmp.'.$$;
  my $ok=eval {

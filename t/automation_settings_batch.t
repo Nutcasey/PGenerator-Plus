@@ -18,7 +18,7 @@ make_path(PGAutomation::run_dir('batch-test').'/items');
 }
 # TV setup reads every control first and rewrites only the ones that differ;
 # the first pass writes each category in one helper session (the helper
-# writes and reads back each control inside that session) and a readback
+# groups compatible controls and isolates special routes) and a readback
 # verifies them together. Anything unverified takes the per-control path.
 local *main::_log=sub {};
 my @actions;local *main::_log_action=sub {push @actions,$_[0]};

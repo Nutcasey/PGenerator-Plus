@@ -3511,13 +3511,15 @@ function meterGreyTvColumnHtml(channelKey,label,color,tvValue,liveEntry,halfRang
 	 // liveEntry.noise: deviation is inside the meter noise floor (Perceptual)
 	 // — dim the fill so it reads as "not a real error", same convention as the
 	 // canvas live-RGB bars. The dim alone is cryptic, so also carry a hover
-	 // title naming the floor: without it the faded bar looks like a render bug.
+	 // title naming the floor: without it the faded bar looks like a render
+	 // bug. liveEntry.floor is the EFFECTIVE floor this point was judged
+	 // against (empirical k·σ once history exists, else the flat number).
 	 const isNoise=!!(liveEntry&&liveEntry.noise);
 	 const noiseOpacity=isNoise?'opacity:.45;':'';
 	 // Hover explanation for a dimmed fill; plain text, no quotes introduced.
 	 const noiseTitleAttr=isNoise
-	 	? ' title="Deviation is within the meter noise floor (±'+meterRgbBalanceNoiseFloor()+' L* pre-gain) — noise, not a real error."'
-	 	: '';
+	 	 ? ' title="Deviation is within the meter noise floor (±'+meterFormatNoiseFloorValue(liveEntry.floor)+' L* pre-gain'+(liveEntry.floorNote||'')+') — noise, not a real error."'
+	 	 : '';
 	 const fillStyle=(delta==null)
 	 	  ? 'display:none;'
 	 	  : 'top:'+(delta>=0?(50-magnitude):50)+'%;height:'+magnitude+'%;background:'+color+';color:'+color+';border-radius:'+(delta>=0?'4px 4px 0 0':'0 0 4px 4px')+';'+noiseOpacity;
@@ -3949,10 +3951,14 @@ async function meterGreyAdjustCurrentStepChannel(channel,deltaStep){
 			   capabilities:response.picture_capabilities||state.capabilities||null
 			  };
 			  if(window.lgStatusState){
-			   window.lgStatusState.calibrationMode=!!response.calibration_mode;
-			   if(response.calibration_picture_mode) window.lgStatusState.calibrationPictureMode=response.calibration_picture_mode;
+			  window.lgStatusState.calibrationMode=!!response.calibration_mode;
+			  if(response.calibration_picture_mode) window.lgStatusState.calibrationPictureMode=response.calibration_picture_mode;
 			  }
-		  return true;
+			  // The write changed what this patch measures: drop the step's
+			  // scatter history so the old-setting samples cannot skew the
+			  // empirical floor of the new setting (re-reads rebuild σ).
+			  if(typeof meterInvalidateStepNoise==='function') meterInvalidateStepNoise(targetStep);
+			  return true;
 	 }catch(e){
 	  meterLgGreyState={status:'error',picture:previousPicture,needsRepair:false,message:'Unable to reach the LG TV control API.'};
 	  toast('Unable to reach the LG TV control API.',true);
@@ -4263,6 +4269,9 @@ async function meterAutoCalWritePanelLight(key,value,omitPictureMode){
   return meterAutoCalWritePanelLight(key,value,true);
  }
  if(!r||r.status!=='ok') throw new Error((r&&(r.repair_hint||r.message))||'Unable to adjust display panel light.');
+ // Panel light is panel-wide: scatter for every step was taken under the
+ // old luminance.
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  const pic=r.picture_settings||{};
  const readback=Number(pic[key]);
  if(Number.isFinite(readback)){
@@ -5333,6 +5342,9 @@ async function meterAutoCalWriteClipControl(key,value,pictureMode){
   _timeoutMs:20000
  });
  if(!r||r.status!=='ok') throw new Error((r&&(r.repair_hint||r.message))||'Unable to adjust '+key);
+ // Clip controls are panel-wide: every step's scatter was taken under the
+ // old value. (meterAutoCalWritePanelLight shares this path's semantics.)
+ if(typeof meterLgTrimKeyAffectsPatch==='function'&&meterLgTrimKeyAffectsPatch(key)&&typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  const pic=r.picture_settings||{};
  const readback=Number(pic[key]);
  return Number.isFinite(readback)?readback:settings[key];
@@ -5569,6 +5581,9 @@ async function meterAutoCalResetDdc(){
  if(response.ddc_reset_verified!==true){
   throw new Error('LG picture mode reset did not verify against the TV 1D LUT readback.');
  }
+ // The baseline reset zeroed every WB offset: scatter from the previous
+ // session's curve describes a setting that no longer exists.
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  // SDR reference reset: after the DDC white-balance / 1D LUT baseline is
  // cleared, run the reference SDR workflow (gamma-disable CAL_START/CAL_END
  // + identity BT.709 3D LUT / 1D DPG / 3x3 matrix outside cal mode). This
@@ -7973,7 +7988,9 @@ async function meterFullAutoCalCaptureReportSet(stage){
  return true;
 }
 
-async function meterFullAutoCalBuildSnapshotReportSections(entries){
+async function meterFullAutoCalBuildSnapshotReportSections(entries,options){
+ const buildOpts=options||{};
+ const summaryOnly=!!buildOpts.summaryOnly;
  const previousReportGamma=window._meterSnapshotReportTargetGamma;
  const previousReportContext=window._meterSnapshotReportContext;
  const reportControls=['meterTargetGamma','meterTargetGamut','meterDeltaEForm','meterColorDeltaEForm','meterCustomD65Enabled','meterTargetWhiteX','meterTargetWhiteY']
@@ -7993,20 +8010,22 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries){
  let sectionHtml='';
  try{
   for(const entry of entries){
+   const key=(entry&&entry.key)||'';
    if(entry&&entry.notice){
-    sectionHtml+=meterBuildNoticeReportSection(entry.title||'Full AutoCal',entry.notice);
+    sectionHtml+=meterBuildNoticeReportSection(entry.title||'Full AutoCal',entry.notice,key);
     continue;
    }
    const snap=entry&&entry.snapshot;
    const title=(entry&&entry.title)||'Measurement';
    if(!meterSeriesSnapshotHasReadings(snap)){
-    sectionHtml+=meterBuildEmptySeriesReportSection(title);
+    sectionHtml+=meterBuildEmptySeriesReportSection(title,key);
     continue;
    }
-   if(snap.transport_context_inferred){
-    sectionHtml+=meterBuildNoticeReportSection('Saved transport settings',
-     'Some transport settings were not recorded. Missing values use the automation runner defaults (RGB, 10-bit, Full range), not the current output. Verify the original settings before treating these charts as calibration evidence.');
-   }
+   // The caveat belongs inside the section it qualifies, so a reader cannot
+   // fold the charts away from the warning about how they were measured.
+   const notice=snap.transport_context_inferred
+    ?'Some transport settings were not recorded. Missing values use the automation runner defaults (RGB, 10-bit, Full range), not the current output. Verify the original settings before treating these charts as calibration evidence.'
+    :'';
    // Report each job against its saved targets, not the operator's current
    // single-calibration selectors. No change events or TV writes are sent.
    // Keep transport and phase scoped across animation frames as well: another
@@ -8025,6 +8044,7 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries){
    meterRecoverSeries({
     series_id:null,
     snapshot_report:true,
+    _skip_chart_draw:summaryOnly,
     cache_key:snap.cache_key,
     type:snap.type,
     points:snap.points,
@@ -8044,10 +8064,19 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries){
    if(snap.lg_autocal_26_best_known){
     // Use the same current/best-known combination as the single AutoCal view.
     meterReadings=meterAutoCalStatusChartReadings(snap);
-    drawAllCharts();
+    if(!summaryOnly) drawAllCharts();
    }
-   await meterPrepareCurrentSeriesForReport();
-   sectionHtml+=meterBuildCurrentSeriesReportSection(title);
+   if(!summaryOnly) await meterPrepareCurrentSeriesForReport();
+   sectionHtml+=meterBuildCurrentSeriesReportSection(title,{key,notice,summaryOnly});
+   // Capture the chart's series while its saved context is installed. The
+   // finally block restores the operator's unrelated manual series.
+   if(typeof buildOpts.onSeries==='function')buildOpts.onSeries(entry,{
+    steps:meterSeriesSteps.map(step=>{
+     if(step.target_x!=null&&step.target_y!=null)return {...step};
+     const target=meterTargetChromaticityForReading(step);
+     return target?{...step,target_x:target.x,target_y:target.y}:{...step};
+    }),readings:meterReadings.slice()
+   });
   }
  } finally {
   if(previousReportContext===undefined)delete window._meterSnapshotReportContext;
@@ -8062,7 +8091,7 @@ async function meterFullAutoCalBuildSnapshotReportSections(entries){
   if(typeof meterSeriesCacheDirtyKeys!=='undefined') Array.from(meterSeriesCacheDirtyKeys).forEach(key=>{if(!Object.prototype.hasOwnProperty.call(meterSeriesCache,key))meterSeriesCacheDirtyKeys.delete(key);});
   meterPersistSeriesCache();
   if(restore.key){
-   meterRestoreSeriesFromCache(restore.key);
+   meterRestoreSeriesFromCache(restore.key,{skipChartDraw:summaryOnly});
    if(restore.selectedName&&restore.pinned){
     const sel=(meterReadings||[]).find(r=>r&&r.name===restore.selectedName);
     if(sel) showColorReadingDetail(sel,{pin:true});
@@ -12053,7 +12082,14 @@ async function meterRunSeries(options){
   if(meterSelectionWillMeasureWhite) meterWhiteReading=null;
  }else{
   meterClearSelectionBaseline();
-  meterReplaceReadings([]);
+  // keepNoiseHistory=true: a full re-run is the SAME meter+target+panel
+  // measurement context — and 'run the series twice' IS the documented
+  // scatter-accumulation affordance. The default wipe here deleted pass 1
+  // the instant pass 2 started, so the store could never exceed 1 sample
+  // per step no matter how many runs were done (bench: pinned at 'pass 1
+  // done — re-run'). Stale-context wipes stay where they belong: Clear,
+  // reload, disconnect, series switch — none of which is a re-run.
+  meterReplaceReadings([],true);
   meterWhiteReading=savedWhiteSnapshot;
   meterSeriesBaselineBlack=savedBlackSnapshot;
  }
@@ -12372,10 +12408,22 @@ async function meterPollSeries(){
 	    :(Array.isArray(meterReadings)?meterReadings:[]);
 	   meterReplaceReadings(meterAttachSeriesMeta(
 	    meterRestoreSelectionWhiteReference(meterMergeSeriesReadings(baseline,incoming))
-	   ));
+	   ),true);
 	  }else{
-	   meterReplaceReadings(incoming);
+	   meterReplaceReadings(incoming,true);
 	  }
+  // Empirical noise history: a series IS a repeat-reading source — the
+  // operator's 'run the series twice' affordance only exists if each
+  // delivered measurement feeds the scatter store. The consecutive-XYZ
+  // dedupe inside the recorder collapses the per-second poll re-delivery
+  // of unchanged readings into one sample per actual measurement, while a
+  // second run's fresh meter variance records as genuine scatter.
+  // (Bench-reported defect: two full 21-pt runs left the coverage count
+  // at zero — the recorder was wired only to single-read and continuous
+  // paths, and the poll's wholesale replace wiped any history it saw.)
+  try{
+   incoming.forEach(rd=>{ if(rd&&!rd.error&&meterReadingHasLuminance(rd)) meterRecordReadingNoise(rd,rd); });
+  }catch(e){}
   // Only set white reference from actual 100% reading — never use
   // "brightest so far" during a running series, because that changes
   // every poll cycle and causes all ΔE / RGB balance values to shift.
@@ -12383,8 +12431,13 @@ async function meterPollSeries(){
   if(white) meterWhiteReading=white;
   // Selection mid-greys: restore the pre-run white so we never invent a
   // synthetic peak from the brightest selected patch after the run.
+  // keepNoiseHistory=true: this white re-seat replaces the array EVERY poll
+  // cycle of a selection run — with the default wipe it deleted the scatter
+  // the record loop above had just stored, so 'run the series twice' on a
+  // selected subset could never accumulate a sample (same defect class as
+  // the main poll replace fixed in 5d3028e1, this is its sibling site).
   if(meterSeriesSelectionRunActive&&!meterSelectionWillMeasureWhite){
-   meterReplaceReadings(meterRestoreSelectionWhiteReference(meterReadings));
+   meterReplaceReadings(meterRestoreSelectionWhiteReference(meterReadings),true);
   }
   // If we don't yet have an actual 100% measurement, use the same mode-aware
   // synthetic reference as one-off reads. Never replace a still-valid selection
@@ -12474,7 +12527,10 @@ async function meterPollSeries(){
   // greyscale error math keeps the original series peak.
   if(meterSeriesSelectionRunActive&&!meterSelectionWillMeasureWhite){
    try{
-    meterReplaceReadings(meterAttachSeriesMeta(meterRestoreSelectionWhiteReference(meterReadings||[])));
+    // keepNoiseHistory=true: the run just finished; this re-seat is a
+    // presentation fixup of the SAME measurement context, not a series
+    // switch, so the scatter the run built must survive it.
+    meterReplaceReadings(meterAttachSeriesMeta(meterRestoreSelectionWhiteReference(meterReadings||[])),true);
     const isColorDone=meterActiveSeriesType==='colors'||meterActiveSeriesType==='saturations';
     const sortedDone=isColorDone?[...meterReadings]:[...meterReadings].sort((a,b)=>(a.ire||0)-(b.ire||0));
     drawAllCharts(sortedDone);
@@ -13957,6 +14013,7 @@ function drawRGBChartPreset(gsSteps){
  });
  const refY=(100-yMin)/(yMax-yMin);
  drawDashedLine(ctx,chart,[[0,refY],[1,refY]],'#555');
+ meterLivePlotPublish(ctx,chart,{steps:gsSteps,target:[[0,refY],[1,refY]]});
 }
 function drawDeltaEPreset(gsSteps){
  const ctx=getChartCtx('chartDeltaE');
@@ -14242,6 +14299,7 @@ function drawGammaValueChart(gs,allSteps,readingMap){
  });
  if(tgtPts.length>1) drawDashedLine(ctx,chart,tgtPts,'#ffb74d');
  if(mPts.length>1) drawLine(ctx,chart,mPts,'#7ecbff',2);
+ meterLivePlotPublish(ctx,chart,{steps:xSteps,target:tgtPts,measured:mPts});
  // Marker on every measured gamma point: without these the first interior
  // read of a series (e.g. 5% right after 100%/0%) has no neighbour to draw
  // a line to and the chart stays blank until the next patch lands.
@@ -14335,6 +14393,12 @@ function meterQueueRunningGreyscaleChartRefresh(readings){
 }
 
 function drawAllCharts(readings){
+ try{meterLiveMarkFromPatchStep();}catch(e){}
+ try{return drawAllChartPlots(readings);}
+ finally{try{meterLiveRefreshSurfaces();}catch(e){}}
+}
+
+function drawAllChartPlots(readings){
  if(typeof meter3dLutChartsBlocked==='function'&&meter3dLutChartsBlocked()){
   try{ if(typeof meterSync3dLutTabChartVisibility==='function') meterSync3dLutTabChartVisibility(); }catch(e){}
   return;
@@ -14964,6 +15028,489 @@ function meterDrawStickyYAxis(ctx,opts,pad,h){
  meterDrawChartYZoomHelp(ac,pad);
 }
 
+// --- Live chart layer -------------------------------------------------------
+// One answer to "which patch is the meter on, and where does that sit on this
+// chart". Plot renderers publish a small plain-data description of their axes;
+// everything that marks the live patch is painted on a separate overlay canvas,
+// so following a run never repaints a plot. The description is plain data on
+// purpose: it is copied onto the baked <img> of a report chart, which is what
+// lets the Automation panel mark a live patch on a picture of a chart it never
+// drew itself. Adding a new annotation means adding a painter here, not
+// touching any of the seven renderers.
+const PG_LIVE_CYCLE_MS=2400;
+const PG_LIVE_CHART_IDS=['chartRGB','chartDeltaE','chartGammaValue','chartEOTF','chartGamma','chartCIE'];
+let pgLiveMark=null;
+let pgLiveFrame=0;
+let pgLiveSurfaces=[];
+let pgLiveEpoch=(typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+
+function pgLiveNow(){return (typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();}
+
+// toX/toY are affine in the normalised value, so two samples pin the mapping
+// exactly -- and unlike the closures they came from, four numbers survive being
+// written into an attribute on a baked image.
+function meterLivePlotPublish(ctx,chart,opts){
+ if(!ctx||!chart||!ctx.canvasId) return;
+ const canvas=document.getElementById(ctx.canvasId);
+ if(!canvas) return;
+ const o=opts||{};
+ const plot={
+  kind:o.kind||'series',
+  x0:chart.toX(0),x1:chart.toX(1),
+  y0:chart.toY(0),y1:chart.toY(1),
+  clip:{l:chart.pad.l,t:chart.pad.t,w:chart.w,h:chart.h},
+  w:ctx.w,h:ctx.h
+ };
+ if(Array.isArray(o.target)&&o.target.length>1) plot.target=meterLiveThinCurve(o.target);
+ if(Array.isArray(o.measured)&&o.measured.length>1) plot.measured=meterLiveThinCurve(o.measured);
+ if(o.barW) plot.barW=o.barW;
+ if(o.steps) plot.xByIre=meterLiveStepX(ctx.canvasId,o.steps);
+ canvas._pgLivePlot=plot;
+}
+
+// Publishing travels into an HTML attribute, so a 1,024-patch curve is worth
+// thinning. Three decimals is finer than a pixel on any chart we draw.
+function meterLiveThinCurve(points){
+ const out=[];
+ const stride=points.length>256?Math.ceil(points.length/256):1;
+ for(let i=0;i<points.length;i+=stride){
+  const p=points[i];
+  if(!p||p[0]==null||p[1]==null||!isFinite(p[0])||!isFinite(p[1])) continue;
+  out.push([Math.round(p[0]*1000)/1000,Math.round(p[1]*1000)/1000]);
+ }
+ const last=points[points.length-1];
+ if(stride>1&&last&&isFinite(last[0])&&isFinite(last[1])) out.push([Math.round(last[0]*1000)/1000,Math.round(last[1]*1000)/1000]);
+ return out;
+}
+
+// The x of a patch is already solved for hover hit-testing; reuse the same
+// helpers so a marker can never disagree with the tooltip naming that point.
+function meterLiveStepX(canvasId,steps){
+ const list=meterGreyscaleInteractionStepsForChart(canvasId,Array.isArray(steps)?steps:[]);
+ const map={};
+ list.forEach((step,idx)=>{
+  if(!step||step.ire==null) return;
+  const x=meterGreyscaleInteractionXForChart(canvasId,step,list,idx);
+  if(x!=null&&isFinite(x)) map[step.ire]=Math.round(x*10000)/10000;
+ });
+ return map;
+}
+
+// CIE works in chromaticity, not normalised chart space, so it publishes its
+// own ranges. The inset is a second viewport onto the same data.
+function meterLiveCiePublish(ctx,geom,inset){
+ if(!ctx||!ctx.canvasId||!geom) return;
+ const canvas=document.getElementById(ctx.canvasId);
+ if(!canvas) return;
+ const plot={
+  kind:'cie',w:ctx.w,h:ctx.h,
+  clip:{l:geom.pad.l,t:geom.pad.t,w:geom.w,h:geom.h},
+  xMin:geom.xMin,xMax:geom.xMax,yMin:geom.yMin,yMax:geom.yMax
+ };
+ if(inset) plot.inset=inset;
+ canvas._pgLivePlot=plot;
+}
+
+function meterLiveCieInset(ctx,inset){
+ if(!ctx||!ctx.canvasId) return;
+ const canvas=document.getElementById(ctx.canvasId);
+ if(canvas&&canvas._pgLivePlot&&canvas._pgLivePlot.kind==='cie') canvas._pgLivePlot.inset=inset;
+}
+
+// Resolve a run's live status against the series that drew the charts. The
+// numeric stimulus fields come first: they are exact, and on the appliance they
+// travel on the job's live snapshot. The name is a display string with the
+// stage glued on ("SDR26 1D DPG sdr26_50%"), so it is matched loosely and
+// last. Resolving against the series the charts came from -- not whatever the
+// last render left in the globals -- is what stops a mark landing on the wrong
+// chart's patch.
+function meterLiveResolveStatusMark(status,steps,forcePhase,readings){
+ const list=Array.isArray(steps)&&steps.length?steps
+  :((typeof meterSeriesSteps!=='undefined'&&Array.isArray(meterSeriesSteps))?meterSeriesSteps:[]);
+ if(!status||!list.length) return null;
+ const near=(a,b)=>isFinite(Number(a))&&isFinite(Number(b))&&Math.abs(Number(a)-Number(b))<0.001;
+ const byStimulus=v=>list.find(s=>s&&[s.ire,s.stimulus,s.patch_stimulus,s.signal_r_pct,s.ddc_target_ire,s.autocal_order_ire].some(c=>near(c,v)))||null;
+ let step=null;
+ for(const v of [status.current_ire,status.current_step_ire,status.patch_ire,status.current_stimulus,status.active_stimulus,status.current_ddc_target_ire,status.current_ddc_array_ire]){
+  if(v==null||v===''||!isFinite(Number(v))) continue;
+  step=byStimulus(v);
+  if(step) break;
+ }
+ const name=String(status.current_name||'').trim();
+ if(!step&&name){
+  step=list.find(s=>s&&String(s.name||'')===name)
+   ||list.find(s=>s&&s.name&&new RegExp('(^|[\\s_/:-])'+String(s.name).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'$').test(name))
+   ||null;
+  if(!step){const pct=name.match(/([0-9]+(?:\.[0-9]+)?)%/);if(pct) step=byStimulus(pct[1]);}
+ }
+ if(!step) return null;
+ // Settled means a real reading exists for this step in the series shown. A
+ // caller that knows those readings passes them; the Profiler's own live
+ // series is the fallback.
+ let rd=null;
+ if(Array.isArray(readings)&&readings.length){
+  const key=String(step.name||'');
+  rd=readings.find(r=>r&&String(r.name||'')===key&&(typeof meterReadingIsRealMeasurement!=='function'||meterReadingIsRealMeasurement(r)))
+   ||readings.find(r=>r&&near(r.ire,step.ire)&&(typeof meterReadingIsRealMeasurement!=='function'||meterReadingIsRealMeasurement(r)))||null;
+ } else if(typeof meterFindReadingForStep==='function'){
+  const found=meterFindReadingForStep(step);
+  if(found&&(typeof meterReadingIsRealMeasurement!=='function'||meterReadingIsRealMeasurement(found))) rd=found;
+ }
+ // A colour patch that has not been read has no chromaticity of its own, so
+ // fall back to the same target maths the CIE inset already trusts.
+ let tx=step.target_x,ty=step.target_y;
+ if((tx==null||ty==null)&&typeof meterTargetChromaticityForReading==='function'){
+  try{const t=meterTargetChromaticityForReading(step);if(t&&t.x>0&&t.y>0){tx=t.x;ty=t.y;}}catch(e){}
+ }
+ return {
+  name:step.name||name,ire:step.ire,
+  x:tx!=null?tx:(rd&&rd.x),
+  y:ty!=null?ty:(rd&&rd.y),
+  phase:forcePhase||(rd?'settled':'pending')
+ };
+}
+
+function meterLiveMark(){return pgLiveMark;}
+
+// phase: 'pending' while the meter integrates, 'settled' once the value lands,
+// 'held' when the run is paused or stopped. Stillness always means the same
+// thing, so 'held' keeps the ring and drops the breathing.
+function meterLiveMarkSet(mark){
+ const was=pgLiveMark;
+ if(!mark){
+  if(!was) return;
+  // Leaving is a fade, not a cut: an abrupt vanish reads as a glitch rather
+  // than as a stage completing.
+  pgLiveFadeFrom=was;
+  pgLiveFadeUntil=pgLiveNow()+PG_LIVE_FADE_MS;
+  pgLiveMark=null;
+  meterLiveRefreshSurfaces();
+  return;
+ }
+ const next={
+  name:mark.name!=null?String(mark.name):'',
+  ire:mark.ire!=null&&isFinite(Number(mark.ire))?Number(mark.ire):null,
+  x:mark.x!=null&&isFinite(Number(mark.x))?Number(mark.x):null,
+  y:mark.y!=null&&isFinite(Number(mark.y))?Number(mark.y):null,
+  phase:mark.phase||'pending'
+ };
+ const changed=!was||was.name!==next.name||was.ire!==next.ire||was.phase!==next.phase
+  ||was.x!==next.x||was.y!==next.y;
+ pgLiveMark=next;
+ if(changed){
+  // A settled mark flares once from the moment it lands, so its fade is timed
+  // from arrival rather than from the shared cycle.
+  next.at=pgLiveNow();
+  meterLiveRefreshSurfaces();
+ } else {
+  next.at=was.at;
+ }
+}
+
+// Derive the mark from whatever the meter loop is holding. Called from the
+// draw path so the Profiler needs no extra wiring.
+function meterLiveMarkFromPatchStep(){
+ // While the Automation panel watches a run it does not drive, that run's
+ // worker status owns the mark. This pass is only drawing the run's saved
+ // measurements off-screen and has no live patch of its own to offer.
+ if(typeof pgAutomationRunIsLive==='function'&&pgAutomationRunIsLive()) return;
+ const step=(typeof meterCurrentPatchStep!=='undefined')?meterCurrentPatchStep:null;
+ if(!step||!step.name){meterLiveMarkSet(null);return;}
+ const rd=(typeof meterFindReadingForStep==='function')?meterFindReadingForStep(step):null;
+ const settled=!!(rd&&typeof meterReadingIsRealMeasurement==='function'&&meterReadingIsRealMeasurement(rd));
+ meterLiveMarkSet({
+  name:step.name,ire:step.ire,
+  x:step.target_x!=null?step.target_x:(rd&&rd.x),
+  y:step.target_y!=null?step.target_y:(rd&&rd.y),
+  phase:settled?'settled':'pending'
+ });
+}
+
+// Where the ring goes. A patch that has not been read yet has no measurement to
+// sit on, so the ghost rests on the chart's own target curve at that stimulus:
+// the place the reading is expected to land. Once it lands the ring moves to
+// the measured curve, where the chart publishes one.
+function meterLiveLocate(plot,mark){
+ if(!plot||!mark) return null;
+ if(plot.kind==='cie') return meterLiveLocateCie(plot,mark);
+ const xN=meterLiveMarkXNorm(plot,mark);
+ if(xN==null) return null;
+ const px=plot.x0+(plot.x1-plot.x0)*xN;
+ if(px<plot.clip.l-2||px>plot.clip.l+plot.clip.w+2) return null;
+ if(plot.kind==='bars'){
+  return {kind:'bars',x:px,base:plot.y0,top:plot.y1,w:Math.max(6,plot.barW||10)};
+ }
+ const curve=(mark.phase==='settled'&&plot.measured)?plot.measured:plot.target;
+ const yN=meterLiveCurveAt(curve,xN);
+ if(yN==null) return null;
+ return {kind:'point',x:px,y:plot.y0+(plot.y1-plot.y0)*yN};
+}
+
+function meterLiveMarkXNorm(plot,mark){
+ if(!plot.xByIre||mark.ire==null) return null;
+ const hit=plot.xByIre[mark.ire];
+ return hit!=null&&isFinite(hit)?hit:null;
+}
+
+function meterLiveCurveAt(curve,xN){
+ if(!Array.isArray(curve)||curve.length===0) return null;
+ if(curve.length===1) return curve[0][1];
+ for(let i=1;i<curve.length;i++){
+  const a=curve[i-1],b=curve[i];
+  if(xN>=Math.min(a[0],b[0])&&xN<=Math.max(a[0],b[0])){
+   const span=b[0]-a[0];
+   return span?a[1]+(b[1]-a[1])*((xN-a[0])/span):a[1];
+  }
+ }
+ // Outside the drawn curve: pin to whichever end is nearer rather than vanish.
+ return xN<curve[0][0]?curve[0][1]:curve[curve.length-1][1];
+}
+
+function meterLiveLocateCie(plot,mark){
+ if(!(mark.x>0)||!(mark.y>0)) return null;
+ const out=[];
+ const spanX=plot.xMax-plot.xMin,spanY=plot.yMax-plot.yMin;
+ if(spanX>0&&spanY>0&&mark.x>=plot.xMin&&mark.x<=plot.xMax&&mark.y>=plot.yMin&&mark.y<=plot.yMax){
+  out.push({kind:'point',scale:0.85,
+   x:plot.clip.l+(mark.x-plot.xMin)/spanX*plot.clip.w,
+   y:plot.clip.t+plot.clip.h-(mark.y-plot.yMin)/spanY*plot.clip.h});
+ }
+ const ins=plot.inset;
+ if(ins&&ins.size>0){
+  const iSpanX=ins.xMax-ins.xMin,iSpanY=ins.yMax-ins.yMin;
+  if(iSpanX>0&&iSpanY>0&&mark.x>=ins.xMin&&mark.x<=ins.xMax&&mark.y>=ins.yMin&&mark.y<=ins.yMax){
+   out.push({kind:'point',scale:1.35,
+    x:ins.x+(mark.x-ins.xMin)/iSpanX*ins.size,
+    y:ins.y+ins.size-(mark.y-ins.yMin)/iSpanY*ins.size});
+  }
+ }
+ return out.length?{kind:'multi',points:out}:null;
+}
+
+// --- Live overlay surfaces --------------------------------------------------
+// An overlay is a transparent canvas laid exactly over a plot (a live <canvas>
+// in the Meter Profiler, or the baked <img> of the same chart in the Automation
+// panel). Nothing under it is ever redrawn to animate. Everything that costs
+// layout -- measuring the host, locating the mark on the plot -- happens once
+// when the surfaces are refreshed; a frame is a clear and a few strokes.
+let pgLiveFadeFrom=null;
+let pgLiveFadeUntil=0;
+const PG_LIVE_FADE_MS=400;
+let pgLiveMotionQuery=null;
+
+function pgLiveReducedMotion(){
+ try{
+  if(!pgLiveMotionQuery) pgLiveMotionQuery=window.matchMedia('(prefers-reduced-motion:reduce)');
+  return pgLiveMotionQuery.matches;
+ }catch(e){return false;}
+}
+
+function meterLiveOverlayFor(host){
+ if(!host||!host.parentNode) return null;
+ let el=host._pgLiveOverlay;
+ if(el&&el.parentNode!==host.parentNode){el.remove();el=null;host._pgLiveOverlay=null;}
+ if(!el){
+  el=document.createElement('canvas');
+  el.className='pg-live-overlay';
+  el.style.cssText='position:absolute;pointer-events:none;z-index:4';
+  el.setAttribute('aria-hidden','true');
+  host.parentNode.insertBefore(el,host.nextSibling);
+  host._pgLiveOverlay=el;
+ }
+ return el;
+}
+
+// Size and place the overlay over its host. Layout reads live here and only
+// here; the frame loop never touches the DOM.
+function meterLiveMeasure(surface){
+ const host=surface.host,el=surface.overlay;
+ const parent=host.parentNode;
+ try{
+  if(parent instanceof HTMLElement&&getComputedStyle(parent).position==='static') parent.style.position='relative';
+ }catch(e){}
+ const w=host.offsetWidth,h=host.offsetHeight;
+ if(!(w>0&&h>0)) return false;
+ const dpr=Math.max(1,Math.min(2,(typeof pgCanvasPixelRatio==='function')?pgCanvasPixelRatio():1));
+ const bw=Math.round(w*dpr),bh=Math.round(h*dpr);
+ if(el.width!==bw||el.height!==bh){el.width=bw;el.height=bh;}
+ el.style.left=host.offsetLeft+'px';
+ el.style.top=host.offsetTop+'px';
+ el.style.width=w+'px';
+ el.style.height=h+'px';
+ surface.sx=bw/(surface.plot.w||w);
+ surface.sy=bh/(surface.plot.h||h);
+ return true;
+}
+
+function meterLiveDropOverlay(host){
+ if(host&&host._pgLiveOverlay){host._pgLiveOverlay.remove();host._pgLiveOverlay=null;}
+}
+
+// A plot published onto a baked image arrives as JSON in an attribute. Parse it
+// once and keep it on the element.
+function meterLiveImagePlot(img){
+ if(img._pgLivePlot) return img._pgLivePlot;
+ const raw=img.getAttribute('data-pg-plot');
+ if(!raw) return null;
+ try{img._pgLivePlot=JSON.parse(raw);}catch(e){img._pgLivePlot=null;}
+ return img._pgLivePlot;
+}
+
+function meterLiveHosts(){
+ const hosts=[];
+ PG_LIVE_CHART_IDS.forEach(id=>{
+  const c=document.getElementById(id);
+  if(c&&c._pgLivePlot&&c.offsetWidth>0&&c.offsetHeight>0) hosts.push({host:c,plot:c._pgLivePlot});
+ });
+ try{
+  document.querySelectorAll('[data-pg-live] img[data-pg-plot]').forEach(img=>{
+   const plot=meterLiveImagePlot(img);
+   if(plot&&img.offsetWidth>0&&img.offsetHeight>0) hosts.push({host:img,plot:plot});
+  });
+ }catch(e){}
+ return hosts;
+}
+
+// Rebuild the surface list from what is on the page now. Safe to call often:
+// a host that has not moved keeps its overlay and only re-measures.
+function meterLiveRefreshSurfaces(){
+ const prev=pgLiveSurfaces;
+ const mark=pgLiveMark||(pgLiveNow()<pgLiveFadeUntil?pgLiveFadeFrom:null);
+ const next=[];
+ if(mark){
+  const keep=new Map(prev.map(s=>[s.host,s]));
+  meterLiveHosts().forEach(found=>{
+   // A mark the chart cannot place -- a greyscale patch on the CIE plot, a
+   // stimulus off the drawn axis -- must leave nothing behind. Locate first
+   // and drop the overlay, or the previous patch's ring stays painted and
+   // names the wrong point for the rest of the run.
+   const spot=meterLiveLocate(found.plot,mark);
+   if(!spot){meterLiveDropOverlay(found.host);return;}
+   const surface=keep.get(found.host)||{host:found.host};
+   surface.plot=found.plot;
+   surface.overlay=meterLiveOverlayFor(found.host);
+   if(!surface.overlay||!meterLiveMeasure(surface)) return;
+   surface.spot=spot;
+   next.push(surface);
+  });
+ }
+ const live=new Set(next.map(s=>s.host));
+ prev.forEach(s=>{if(!live.has(s.host)) meterLiveDropOverlay(s.host);});
+ pgLiveSurfaces=next;
+ if(next.length) meterLiveSchedule(); else meterLiveStop();
+}
+
+function meterLiveSchedule(){
+ if(pgLiveFrame||typeof requestAnimationFrame!=='function') return;
+ pgLiveFrame=requestAnimationFrame(meterLiveTick);
+}
+
+function meterLiveStop(){
+ if(pgLiveFrame&&typeof cancelAnimationFrame==='function') cancelAnimationFrame(pgLiveFrame);
+ pgLiveFrame=0;
+}
+
+function meterLiveTick(){
+ pgLiveFrame=0;
+ const now=pgLiveNow();
+ const fading=!pgLiveMark&&now<pgLiveFadeUntil;
+ const mark=pgLiveMark||(fading?pgLiveFadeFrom:null);
+ if(!mark){
+  pgLiveSurfaces.forEach(s=>meterLiveDropOverlay(s.host));
+  pgLiveSurfaces=[];
+  return;
+ }
+ // One clock for the whole panel: the banner, the section dots and every halo
+ // ping on the same cycle, so the page reads as one thing happening.
+ const cyclePhase=((now-pgLiveEpoch)%PG_LIVE_CYCLE_MS)/PG_LIVE_CYCLE_MS;
+ const still=pgLiveReducedMotion()||mark.phase==='held';
+ const fade=fading?Math.max(0,1-(now-(pgLiveFadeUntil-PG_LIVE_FADE_MS))/PG_LIVE_FADE_MS):1;
+ let alive=false;
+ pgLiveSurfaces.forEach(s=>{
+  if(!s.host.isConnected||!s.spot) return;
+  alive=true;
+  const g=s.overlay.getContext('2d');
+  if(!g) return;
+  g.setTransform(s.sx,0,0,s.sy,0,0);
+  g.clearRect(0,0,s.plot.w||s.overlay.width,s.plot.h||s.overlay.height);
+  g.globalAlpha=fade;
+  meterLivePaint(g,s.plot,s.spot,mark,still?null:cyclePhase);
+  g.globalAlpha=1;
+ });
+ if(!alive){pgLiveSurfaces=[];return;}
+ if((pgLiveMark&&!still)||fading) meterLiveSchedule();
+}
+
+if(typeof window!=='undefined'&&!window._pgLiveResizeBound){
+ window._pgLiveResizeBound=true;
+ window.addEventListener('resize',event=>{
+  if(event.pgHeightOnlyTabletResize)return;
+  clearTimeout(window._pgLiveResizeTimer);
+  window._pgLiveResizeTimer=setTimeout(()=>{if(pgLiveSurfaces.length) meterLiveRefreshSurfaces();},150);
+ });
+}
+
+// --- Painters ---------------------------------------------------------------
+// Hue is already spoken for as data on these charts -- R/G/B traces, amber EOTF
+// and luminance, a red delta bar, and every hue at once on the horseshoe. The
+// live marker is distinguished by form instead: a thin ring over a dark stroke,
+// which survives both themes and the pale corners of the CIE plot. Empty ring:
+// waiting for a value. Ring with a core: a value has landed.
+const PG_LIVE_INK='rgba(255,255,255,0.82)';
+const PG_LIVE_UNDER='rgba(0,0,0,0.55)';
+const PG_LIVE_RING=5;
+
+function meterLiveStroke(g,path,width){
+ g.lineCap='round';g.lineJoin='round';
+ g.strokeStyle=PG_LIVE_UNDER;g.lineWidth=width+1.6;path();g.stroke();
+ g.strokeStyle=PG_LIVE_INK;g.lineWidth=width;path();g.stroke();
+}
+
+function meterLivePaint(g,plot,spot,mark,cyclePhase){
+ if(!spot) return;
+ g.save();
+ if(plot.clip){g.beginPath();g.rect(plot.clip.l-8,plot.clip.t-8,plot.clip.w+16,plot.clip.h+16);g.clip();}
+ if(spot.kind==='multi') spot.points.forEach(p=>meterLivePaintPoint(g,p,mark,cyclePhase,p.scale||1));
+ else if(spot.kind==='bars') meterLivePaintSlot(g,spot,mark,cyclePhase);
+ else meterLivePaintPoint(g,spot,mark,cyclePhase,1);
+ g.restore();
+}
+
+// The halo is a ripple: it leaves the ring quickly and slows as it fades, the
+// way a ping does, rather than sliding out at a constant rate.
+function meterLiveHalo(g,x,y,r,cyclePhase){
+ if(cyclePhase==null) return;
+ const ease=1-Math.pow(1-cyclePhase,3);
+ const alpha=0.55*Math.pow(1-cyclePhase,1.6);
+ if(alpha<0.015) return;
+ g.save();
+ g.globalAlpha=g.globalAlpha*alpha;
+ g.strokeStyle=PG_LIVE_INK;g.lineWidth=1.2;
+ g.beginPath();g.arc(x,y,r+2+ease*r*2.6,0,Math.PI*2);g.stroke();
+ g.restore();
+}
+
+function meterLivePaintPoint(g,spot,mark,cyclePhase,scale){
+ const r=PG_LIVE_RING*scale;
+ meterLiveHalo(g,spot.x,spot.y,r,cyclePhase);
+ meterLiveStroke(g,()=>{g.beginPath();g.arc(spot.x,spot.y,r,0,Math.PI*2);},1.1);
+ if(mark.phase!=='settled') return;
+ g.fillStyle=PG_LIVE_INK;
+ g.beginPath();g.arc(spot.x,spot.y,r*0.42,0,Math.PI*2);g.fill();
+}
+
+// A bar has no height until it is read, so the pending patch shows the slot it
+// will occupy rather than a height nobody measured. The dashes are legible at
+// bar size in a way they never were on a five-pixel ring.
+function meterLivePaintSlot(g,spot,mark,cyclePhase){
+ const w=spot.w,x=spot.x-w/2,top=Math.min(spot.base,spot.top),h=Math.abs(spot.base-spot.top);
+ g.save();
+ if(mark.phase!=='settled') g.setLineDash([4,3]);
+ if(cyclePhase!=null) g.globalAlpha=g.globalAlpha*(0.5+0.4*Math.pow(1-cyclePhase,1.6));
+ meterLiveStroke(g,()=>{g.beginPath();g.rect(x,top,w,h);},1.1);
+ g.restore();
+}
+
 function drawChartGrid(ctx,opts){
  const pad=opts.pad||{t:20,r:15,b:30,l:45};
  const w=ctx.w-pad.l-pad.r, h=ctx.h-pad.t-pad.b;
@@ -15231,18 +15778,28 @@ function drawRGBChart(gs,allSteps,readingMap){
  // Reference line at 100%
  const refY=(100-yMin)/(yMax-yMin);
  drawDashedLine(ctx,chart,[[0,refY],[1,refY]],'#555');
+ meterLivePlotPublish(ctx,chart,{steps:xSteps,target:[[0,refY],[1,refY]]});
  // Noise-floor zone: under Perceptual the 'within meter noise' threshold at
- // each IRE is floor x that point's shadow gain, so the zone widens toward
- // black. Shading it shows where the hover tooltip will say 'within meter
+ // each IRE is that point's effective floor x its shadow gain, so the zone
+ // widens toward black — from the flat operator number, or in empirical mode
+ // from k·σ of the point's own repeat-reading scatter once history exists.
+ // Shading it shows where the hover tooltip will say 'within meter
  // noise' before the operator has to hover. Pure annotation — plotted values
  // and the axis scale are untouched; clipping keeps it inside the plot under
  // a box-zoom.
- const noiseFloor=meterRgbBalanceActiveNoiseFloor();
- if(noiseFloor>0){
+ const noiseFloorLive=meterRgbBalanceNoiseFloorAnnotationLive();
+ if(noiseFloorLive){
   // chart.toX/toY take NORMALIZED [0,1] view coordinates (same convention as
   // refY and the rPts/gPts/bPts points above), not data values — convert.
   const toNorm=v=>(v-yMin)/(yMax-yMin);
-  const zone=[];
+  // Segments, not one list: a point whose effective floor is 0 (empirical
+  // mode, no usable scatter, empty typed fallback) has NOTHING to annotate
+  // — connecting across it would shade a band over a point whose accessor
+  // verdict was 'off' (review #22 round 4 P2: band and per-point judgement
+  // disagreed on partially characterised series). Each contiguous run of
+  // floored points gets its own polygon; the gaps stay clear.
+  const zoneSegments=[];
+  let zoneSeg=[];
   xSteps.forEach((step,idx)=>{
    const bal=balMap[step.ire];
    // Same point set as the trace: a noChroma (zero-light) step has no
@@ -15255,10 +15812,12 @@ function drawRGBChart(gs,allSteps,readingMap){
    const rdZone=readingMap&&readingMap[step.ire];
    if(!rdZone) return;
    const gain=meterPerceptualRgbBalanceGain(rdZone);
-   const dev=noiseFloor*gain;
-   zone.push({x:meterGreyCategoryChartX(xSteps,idx),hi:toNorm(100+dev),lo:toNorm(100-dev)});
+   const dev=meterRgbBalanceEffectiveNoiseFloor(rdZone)*gain;
+   if(!(dev>0)){ if(zoneSeg.length>1) zoneSegments.push(zoneSeg); zoneSeg=[]; return; }
+   zoneSeg.push({x:meterGreyCategoryChartX(xSteps,idx),hi:toNorm(100+dev),lo:toNorm(100-dev)});
   });
-  if(zone.length>1){
+  if(zoneSeg.length>1) zoneSegments.push(zoneSeg);
+  zoneSegments.forEach(zone=>{
    ctx.save();
    ctx.beginPath();ctx.rect(chart.pad.l,chart.pad.t,chart.w,chart.h);ctx.clip();
    ctx.beginPath();
@@ -15278,8 +15837,13 @@ function drawRGBChart(gs,allSteps,readingMap){
    // Name the band where it is widest (the leftmost plotted step sits toward
    // black): without this the shading reads as an unexplained watermark until
    // the operator hovers a point. Pill style matches the EOTF '0% =' label.
+   // Text names the mode: flat mode shows the operator constant (it is the
+   // same for every point); empirical stays generic because per-point floors
+   // vary with σ and the exact number lives in each point's tooltip.
    const zp=zone[0];
-   const zText='±'+noiseFloor+' L* noise';
+   const zText=(meterRgbBalanceNoiseFloorMode()==='empirical')
+    ? 'noise floor'
+    : '±'+meterFormatNoiseFloorValue(meterRgbBalanceNoiseFloor())+' L* noise';
    ctx.font='bold 9px sans-serif';
    const zW=ctx.measureText(zText).width;
    // Clamp keeps the whole pill inside the plot rect on both axes.
@@ -15291,7 +15855,7 @@ function drawRGBChart(gs,allSteps,readingMap){
    ctx.textAlign='left';ctx.textBaseline='alphabetic';
    ctx.fillText(zText,zx,zy+1);
    ctx.restore();
-  }
+  });
  }
  const rPts=[],gPts=[],bPts=[];
  // Off-scale tracking: a clamped point must never read as "error == axis
@@ -15438,7 +16002,9 @@ function drawEOTFChart(gs,allSteps,readingMap){
  mSegments.forEach(seg=>{
   if(seg.length>1) drawLine(ctx,chart,seg,'#ffeb3b',1.25);
  });
- drawDots(ctx,chart,meterMeasuredEotfLuminanceDotPoints(measureSteps,readingMap,axisMax,eotfPlotMeasured,'eotf'),'#ffeb3b',2.2);
+ const eotfDotPts=meterMeasuredEotfLuminanceDotPoints(measureSteps,readingMap,axisMax,eotfPlotMeasured,'eotf');
+ drawDots(ctx,chart,eotfDotPts,'#ffeb3b',2.2);
+ meterLivePlotPublish(ctx,chart,{steps:plotSteps,target:tgtPts,measured:eotfDotPts});
  // Annotate the 0% IRE point with the actual measured Lb (cd/m^2) so a
  // lifted black is visible even though the Y axis spans 0 to peak and
  // the plotted 0% point sits on the X axis.
@@ -15552,7 +16118,9 @@ function drawGammaChart(gs,allSteps,readingMap){
  });
  // Marker on every actual read so a lone reading is visible before a
  // neighbour exists to draw a line to.
- drawDots(ctx,chart,meterMeasuredEotfLuminanceDotPoints(measureSteps,readingMap,axisMax,scaleMeasuredLuminance,'luminance'),'#ffeb3b',2.2);
+ const lumDotPts=meterMeasuredEotfLuminanceDotPoints(measureSteps,readingMap,axisMax,scaleMeasuredLuminance,'luminance');
+ drawDots(ctx,chart,lumDotPts,'#ffeb3b',2.2);
+ meterLivePlotPublish(ctx,chart,{steps:plotSteps,target:tgtPts,measured:lumDotPts});
  // Annotate the 0% IRE point with the actual measured Lb (cd/m^2) so a
  // lifted black is visible even though the Y axis spans 0 to peak and
  // the plotted 0% point sits on the X axis.
@@ -15644,6 +16212,7 @@ function drawDeltaEChart(gs,allSteps,readingMap,rawGs){
  if(3/yMax<=1) drawDashedLine(ctx,chart,[[0,3/yMax],[1,3/yMax]],'#ff980080');
  // Draw bars for each x-axis step
  const barW=Math.max(8,Math.min(30,(chart.dw||chart.w)/(n*1.5)));
+ meterLivePlotPublish(ctx,chart,{kind:'bars',steps:xSteps,barW:barW});
  ctx.save();
  ctx.beginPath();ctx.rect(chart.pad.l,chart.pad.t,chart.w,chart.h);ctx.clip();
  xSteps.forEach((step,i)=>{
@@ -17954,6 +18523,7 @@ function drawCIEChart(readings){
  const colorInclLum=!!meterColorIncludeLum();
  const g=meterCie2dGeom(ctx.w,ctx.h);
  const pad=g.pad,w=g.w,h=g.h,xMin=g.xMin,xMax=g.xMax,yMin=g.yMin,yMax=g.yMax;
+ meterLiveCiePublish(ctx,g,null);
  const toX=g.toX,toY=g.toY;
  const grid=meterCie2dGridSpec(xMin,xMax,yMin,yMax);
  const xStep=grid.xStep,yStep=grid.yStep,x0=grid.x0,y0=grid.y0;
@@ -18216,6 +18786,7 @@ function drawCIETargetInset(ctx,readings,geom){
  // Place frame below caption; sit a bit lower under the gamut legend.
  const ly=pad.t+40;
  const iy=ly+labelH+2;
+ meterLiveCieInset(ctx,{x:ix,y:iy,size:insetSize,xMin:xMn,xMax:xMx,yMin:yMn,yMax:yMx});
  // Caption box sized exactly to the measured text.
  ctx.fillStyle=pgThemeColor('--chart-bg','#0d0d15');
  ctx.fillRect(lx,ly,lw,labelH);
@@ -18642,12 +19213,18 @@ function chartHandleHover(e,canvasId){
   // computes deviation 0 and would read "within meter noise" for a patch
   // that emitted no measurable light — the chart omits the point for the
   // same reason (PR-16 review finding).
-  if(meterRgbBalanceNoiseFloor()>0&&!bal.noChroma){
+  // The floor is the point's EFFECTIVE floor: empirical k·σ of its own
+  // repeat-reading scatter once history exists, else the flat operator
+  // number — so the tooltip states what THIS point was judged against.
+  if(meterRgbBalanceNoiseFloorAnnotationLive()&&!bal.noChroma){
+   const pointFloor=meterRgbBalanceEffectiveNoiseFloor(rd);
    const pg=(Number.isFinite(perceptualGain)&&perceptualGain>0)?perceptualGain:1;
-   const parts=[['R',bal.R],['G',bal.G],['B',bal.B]]
-    .map(e=>{const d=Math.abs(e[1]-100)/pg;return (Number.isFinite(e[1])&&d<=meterRgbBalanceNoiseFloor())?e[0]+' '+d.toFixed(2):null;})
-    .filter(Boolean);
-   if(parts.length) html+='<br><span style="opacity:.75">'+parts.join(' · ')+' L* pre-gain — within meter noise</span>';
+   if(pointFloor>0){
+    const parts=[['R',bal.R],['G',bal.G],['B',bal.B]]
+     .map(e=>{const d=Math.abs(e[1]-100)/pg;return (Number.isFinite(e[1])&&d<=pointFloor)?e[0]+' '+d.toFixed(2):null;})
+     .filter(Boolean);
+    if(parts.length) html+='<br><span style="opacity:.75">'+parts.join(' · ')+' L* pre-gain — within meter noise (±'+meterFormatNoiseFloorValue(pointFloor)+' floor'+meterNoiseFloorSourceNote(rd)+')</span>';
+   }
   }
  }
  if(gammaAtClip) html+='<br>Gamma: at panel clip (excluded)';
@@ -18764,6 +19341,7 @@ function meterReportCanvasImageHTML(cv){
  try{ img.src=cv.toDataURL('image/png'); }catch(e){ img.src=''; }
  img.alt='Chart image';
  img.style.cssText='width:100%;display:block;background:#0d0d15;border-radius:8px';
+ if(cv._pgLivePlot){try{img.setAttribute('data-pg-plot',JSON.stringify(cv._pgLivePlot));}catch(e){}}
  return img.outerHTML;
 }
 
@@ -18787,13 +19365,67 @@ function meterCloneReportNodeHTML(el){
  return clone.outerHTML||'';
 }
 
-function meterBuildReportChartCard(title,el,layoutClass){
+function meterBuildReportChartCard(title,el,layoutClass,figure,note,key){
  if(!el) return '';
  const style=getComputedStyle(el);
  if(style.display==='none'||style.visibility==='hidden') return '';
  if(!(el.offsetWidth||el.offsetHeight||el.getClientRects().length)) return '';
  const extra=layoutClass?(' '+layoutClass):'';
- return '<div class="report-chart-card'+extra+'"><div class="report-chart-title">'+title+'</div>'+meterCloneReportNodeHTML(el)+'</div>';
+ return '<div class="report-chart-card'+extra+'"'+(key?' data-chart-key="'+key+'"':'')+'><div class="report-chart-title"><span class="report-chart-name">'+title+'</span>'+(figure?'<span class="report-chart-figure">'+figure+'</span>':'')+'</div>'+(note?'<div class="report-chart-note">'+note+'</div>':'')+meterCloneReportNodeHTML(el)+'</div>';
+}
+
+// A folded chart still has to answer its own question, so each card carries the
+// one number the chart is read for. Everything here is measured from the
+// readings already in hand: no extra passes, no invented thresholds.
+function meterReportChartTitleParts(el,fallback){
+ const raw=el?String(el.textContent||'').trim():'';
+ const text=raw||fallback;
+ const paren=text.match(/^(.*?)\s*\((.+)\)\s*$/);
+ if(paren) return {name:paren[1].trim()||fallback,note:paren[2].trim()};
+ const comma=text.match(/^([^,]+),\s*(.+)$/);
+ if(comma) return {name:comma[1].trim(),note:comma[2].trim()};
+ return {name:text,note:''};
+}
+
+function meterReportChartFigures(){
+ const out={};
+ const valid=(meterReadings||[]).filter(rd=>meterReadingHasLuminance(rd));
+ if(valid.length===0) return out;
+ if(meterActiveSeriesType==='greyscale'||!meterActiveSeriesType){
+  const report=meterGreyscaleReportReadings(valid);
+  const gs=report.visible,white=report.white;
+  const Lw=white?(white.luminance||white.Y||0):0;
+  const Lb=meterChartBlackLevel(report.raw);
+  const greyMode=meterGreyRefMode(),deForm=meterDeltaEForm();
+  const clipOnset=meterGammaClipOnsetIre(gs,Lw,meterGammaClipAwareView());
+  let maxDe=null,maxDev=null,gammaSum=0,gammaCount=0;
+  gs.forEach(rd=>{
+   if(Lw>0){
+    const de=meterColorDeltaE2000(rd,greyMode,deForm,meterGrayWorldWeight());
+    if(Number.isFinite(de)) maxDe=maxDe==null?de:Math.max(maxDe,de);
+   }
+   if(white){
+    const bal=rgbBalance(rd,white,greyMode,Lb);
+    ['R','G','B'].forEach(ch=>{const dev=Math.abs((bal[ch]||0)-100);if(Number.isFinite(dev))maxDev=maxDev==null?dev:Math.max(maxDev,dev);});
+   }
+   if(!meterGammaExcludedAtClip(rd.ire,clipOnset)){
+    const g=effectiveGamma(rd.luminance,white?(white.Y||white.luminance||rd.Y):rd.Y,rd.ire);
+    if(g!=null&&isFinite(g)){gammaSum+=g;gammaCount++;}
+   }
+  });
+  if(maxDev!=null) out['rgb-balance']='max ±'+maxDev.toFixed(1)+'%';
+  if(maxDe!=null) out['delta-e']='max '+maxDe.toFixed(2);
+  if(gammaCount) out.gamma='avg '+(gammaSum/gammaCount).toFixed(2);
+  if(Lw>0){out.eotf='max '+Lw.toFixed(1)+' cd/m²';out.luminance='peak '+Lw.toFixed(1)+' cd/m²';}
+  out['greyscale-table']=gs.length+' patches';
+  return out;
+ }
+ out.cie=valid.length+' readings';
+ // A native panel/profile pass has no target gamut to score against.
+ if(typeof meterIs3dLutProfileChartContext==='function'&&meterIs3dLutProfileChartContext()) return out;
+ const deVals=valid.map(rd=>meterSeriesDeltaEForDisplay(rd,meterColorRefMode(),meterColorDeltaEForm())).filter(v=>isFinite(v));
+ if(deVals.length) out['color-delta-e']='max '+Math.max(...deVals).toFixed(2);
+ return out;
 }
 
 function meterBuildTwoPointReportChartTitle(base,labelId,fallback){
@@ -18900,7 +19532,7 @@ function meterBuildGreyscaleReportTable(){
    const _de=meterColorDeltaE2000(rd,greyMode,deForm,meterGrayWorldWeight());
    if(Number.isFinite(_de)) de=_de.toFixed(2);
   }
-  rows+='<tr>'
+  rows+='<tr'+(rd.ire!=null?' data-ire="'+(Math.round(rd.ire*100)/100)+'"':'')+'>'
     +'<td>'+(rd.name||((rd.ire!=null)?(Math.round(rd.ire*100)/100)+'%':'--'))+'</td>'
    +'<td>'+((rd.Y!=null?rd.Y:(rd.luminance||0)).toFixed(2))+'</td>'
    +'<td>'+(rd.x!=null?rd.x.toFixed(4):'--')+'</td>'
@@ -18913,11 +19545,12 @@ function meterBuildGreyscaleReportTable(){
    +'<td>'+de+'</td>'
    +'</tr>';
  });
- return '<div class="report-table-card"><div class="report-table-title">Greyscale Measurements</div><div class="report-table-wrap"><table class="report-table"><thead><tr><th>Patch</th><th>Y cd/m²</th><th>x</th><th>y</th><th>CCT</th><th>Gamma</th><th>R%</th><th>G%</th><th>B%</th><th>'+deLabel+'</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>';
+ const figure=gs.length+' patches';
+ return '<div class="report-table-card" data-chart-key="greyscale-table"><div class="report-table-title"><span class="report-chart-name">Greyscale Measurements</span><span class="report-chart-figure">'+figure+'</span></div><div class="report-table-wrap"><table class="report-table"><thead><tr><th>Patch</th><th>Y cd/m²</th><th>x</th><th>y</th><th>CCT</th><th>Gamma</th><th>R%</th><th>G%</th><th>B%</th><th>'+deLabel+'</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>';
 }
 
-function meterBuildEmptySeriesReportSection(title){
- let html='<section class="report-section">';
+function meterBuildEmptySeriesReportSection(title,key){
+ let html='<section class="report-section"'+(key?' data-report-key="'+key+'"':'')+'>';
  html+='<div class="report-section-title">'+title+'</div>';
  html+='<div class="report-section-meta">0 readings captured</div>';
  html+='<div class="report-empty">No measurement data has been captured for this series yet.</div>';
@@ -18925,8 +19558,8 @@ function meterBuildEmptySeriesReportSection(title){
  return html;
 }
 
-function meterBuildNoticeReportSection(title,message){
- let html='<section class="report-section">';
+function meterBuildNoticeReportSection(title,message,key){
+ let html='<section class="report-section"'+(key?' data-report-key="'+key+'"':'')+'>';
  html+='<div class="report-section-title">'+title+'</div>';
  html+='<div class="report-section-meta">Full AutoCal report note</div>';
  html+='<div class="report-empty">'+String(message||'No data was saved for this section.')+'</div>';
@@ -18934,22 +19567,32 @@ function meterBuildNoticeReportSection(title,message){
  return html;
 }
 
-function meterBuildCurrentSeriesReportSection(title){
+function meterBuildCurrentSeriesReportSection(title,options){
+ const opts=options||{};
  const valid=(meterReadings||[]).filter(rd=>meterReadingHasLuminance(rd));
  const count=(meterActiveSeriesType==='greyscale'||!meterActiveSeriesType)?meterGreyscaleReportReadings(valid).visible.length:valid.length;
- let html='<section class="report-section">';
+ let html='<section class="report-section"'+(opts.key?' data-report-key="'+opts.key+'"':'')+'>';
  html+='<div class="report-section-title">'+title+'</div>';
  html+='<div class="report-section-meta">'+count+' readings captured</div>';
+ if(opts.notice) html+='<div class="report-empty report-notice">'+opts.notice+'</div>';
  html+=meterBuildReportSummaryCards();
+ // The headline figures cost a pass over readings already in memory. Charts
+ // cost an off-screen redraw and a PNG encode each, so a caller that only
+ // needs the numbers stops here.
+ if(opts.summaryOnly){html+='</section>';return html;}
+ const figures=meterReportChartFigures();
  if(meterActiveSeriesType==='greyscale'||!meterActiveSeriesType){
+  const deTitle=meterReportChartTitleParts(document.getElementById('chartDeltaELabel'),'ΔE');
+  const gammaTitle=meterReportChartTitleParts(document.getElementById('chartGammaValueLabel'),'Gamma');
+  const eotfTitle=meterReportChartTitleParts(document.getElementById('chartEotfLabel'),'EOTF');
   const chartsHtml=
-   meterBuildReportChartCard(meterBuildTwoPointReportChartTitle('Low RGB Balance','meterTwoPointLowLabel','Low'),document.getElementById('meterTwoPointLowCanvas'),'report-span-half')+
-   meterBuildReportChartCard(meterBuildTwoPointReportChartTitle('High RGB Balance','meterTwoPointHighLabel','High'),document.getElementById('meterTwoPointHighCanvas'),'report-span-half')+
-   meterBuildReportChartCard('RGB Balance',document.getElementById('chartRGB'),'report-span-full')+
-   meterBuildReportChartCard(document.getElementById('chartDeltaELabel')?document.getElementById('chartDeltaELabel').textContent:'ΔE',document.getElementById('chartDeltaE'),'report-span-full')+
-   meterBuildReportChartCard(document.getElementById('chartGammaValueLabel')?document.getElementById('chartGammaValueLabel').textContent:'Gamma',document.getElementById('chartGammaValue'),'report-span-full')+
-   meterBuildReportChartCard(document.getElementById('chartEotfLabel')?document.getElementById('chartEotfLabel').textContent:'EOTF',document.getElementById('chartEOTF'),'report-span-half')+
-   meterBuildReportChartCard('Luminance',document.getElementById('chartGamma'),'report-span-half');
+   meterBuildReportChartCard(meterBuildTwoPointReportChartTitle('Low RGB Balance','meterTwoPointLowLabel','Low'),document.getElementById('meterTwoPointLowCanvas'),'report-span-half','','','two-point-low')+
+   meterBuildReportChartCard(meterBuildTwoPointReportChartTitle('High RGB Balance','meterTwoPointHighLabel','High'),document.getElementById('meterTwoPointHighCanvas'),'report-span-half','','','two-point-high')+
+   meterBuildReportChartCard('RGB Balance',document.getElementById('chartRGB'),'report-span-full',figures['rgb-balance'],'','rgb-balance')+
+   meterBuildReportChartCard(deTitle.name,document.getElementById('chartDeltaE'),'report-span-full',figures['delta-e'],deTitle.note,'delta-e')+
+   meterBuildReportChartCard(gammaTitle.name,document.getElementById('chartGammaValue'),'report-span-full',figures.gamma,gammaTitle.note,'gamma')+
+   meterBuildReportChartCard(eotfTitle.name,document.getElementById('chartEOTF'),'report-span-half',figures.eotf,eotfTitle.note,'eotf')+
+   meterBuildReportChartCard('Luminance',document.getElementById('chartGamma'),'report-span-half',figures.luminance,'','luminance');
   if(chartsHtml) html+='<div class="report-grid report-grid-charts">'+chartsHtml+'</div>';
   html+=meterBuildGreyscaleReportTable();
  } else {
@@ -18963,9 +19606,10 @@ function meterBuildCurrentSeriesReportSection(title){
     else if(meterSeriesSteps&&meterSeriesSteps.length) drawCIEChartPreset(meterSeriesSteps);
    }catch(e){}
   }
+  const colorDeTitle=meterReportChartTitleParts(document.getElementById('chartColorDELabel'),'ΔE 2000');
   html+='<div class="report-grid report-grid-charts">';
-  html+=meterBuildReportChartCard('CIE 1931 Chromaticity',document.getElementById('chartCIE'),'report-span-full');
-  html+=meterBuildReportChartCard(document.getElementById('chartColorDELabel')?document.getElementById('chartColorDELabel').textContent:'ΔE 2000 (Color Accuracy)',document.getElementById('chartColorDE'),'report-span-full');
+  html+=meterBuildReportChartCard('CIE 1931 Chromaticity',document.getElementById('chartCIE'),'report-span-full',figures.cie,'','cie');
+  html+=meterBuildReportChartCard(colorDeTitle.name,document.getElementById('chartColorDE'),'report-span-full',figures['color-delta-e'],colorDeTitle.note,'color-delta-e');
   html+='</div>';
   if(_cieWas3d){
    _cie3d._force2d=false;
@@ -19006,7 +19650,10 @@ function meterBuildReportDocument(sectionHtml,documentTitle){
  +'.report-grid-charts .report-chart-card{margin-top:0;} '
  +'.report-span-full{grid-column:1 / -1;} '
  +'.report-span-half{grid-column:span 1;} '
- +'.report-chart-title,.report-table-title{font-size:12px;font-weight:800;color:#50607d;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;} '
+ +'.report-chart-title,.report-table-title{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:12px;font-weight:800;color:#50607d;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px;} '
+ +'.report-chart-figure{font-weight:700;color:#3d4d68;text-transform:none;letter-spacing:0;font-variant-numeric:tabular-nums;white-space:nowrap;} '
+ +'.report-chart-note{font-size:11px;color:#66748c;margin:-4px 0 8px;} '
+ +'.report-notice{margin-bottom:14px;} '
  +'.report-table-wrap{overflow-x:auto;} '
  +'.report-table{width:100%;border-collapse:collapse;font-size:12px;background:#fff;} '
  +'.report-table th,.report-table td{padding:8px 10px;border-bottom:1px solid #e7edf5;text-align:right;} '
@@ -19978,6 +20625,12 @@ meterDisplayTypeEl.addEventListener('change',function(){
  }
  this.dataset.lastStableValue=v;
  meterApplyDisplayTypeSelection(v,{patchSizeDefault:true});
+ // The technology itself changes what measurements mean (calibration path,
+ // pattern defaults) and resets Meter Profile below — invalidate scatter
+ // immediately so a stale floor cannot annotate before the next reading
+ // (review #22 round 5 P2; the record-time context fingerprint is the
+ // backstop for programmatic resets that fire no event).
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  // Display Type owns calibration path (OLED/LCD/WRGB). Selecting a type
  // resets Meter Profile (CCSS) to Auto so the generic built-in for that
  // technology is used; the operator can then pick a custom/display CCSS.
@@ -20890,6 +21543,10 @@ function meterOnCcssProfileChange(ev){
   try{ meterOpenCustomCcssEditor(); }catch(e){}
   return;
  }
+ // The correction profile changes what every reading IS: scatter recorded
+ // under another CCSS describes corrected values of a different curve
+ // (review #22 round 4 P2 — switching to No Correction kept the floor).
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  sel.dataset.lastStableValue=v;
  meterSyncCcssProfileHoverTitle(sel);
  try{
@@ -21574,6 +22231,10 @@ if(meterCcssCreateDisplayTypeEl) meterCcssCreateDisplayTypeEl.addEventListener('
 const meterMeasurementPortEl=document.getElementById('meterMeasurementPort');
 if(meterMeasurementPortEl) meterMeasurementPortEl.addEventListener('change',()=>{
  meterMeasurementPort=meterStoredMeasurementPort();
+ // A different instrument has different repeatability: scatter recorded on
+ // the old meter must not be interpreted as noise of the new one (review
+ // #22 round 4 P2 — switching ports kept the previous floor).
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  // Persist the operator's explicit selection as the durable preference so
  // meterSelectedMeasurementPort's saved/autodetect fallback chain -- used by
  // the status poll, profile-field visibility, and every read path -- agrees
@@ -21841,7 +22502,8 @@ function meterRefreshActiveSeriesCharts(options){
 }
 
 let meterGreyscaleResizeTimer=null;
-window.addEventListener('resize',()=>{
+window.addEventListener('resize',event=>{
+ if(event.pgHeightOnlyTabletResize)return;
  if(meterActiveSeriesType!=='greyscale') return;
  if(meterGreyscaleResizeTimer) clearTimeout(meterGreyscaleResizeTimer);
  const resizeRevision=meterSeriesChartRevision;

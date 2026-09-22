@@ -189,7 +189,7 @@ ok(!grep({ ($_->{settings_matrix}{context}{picture_mode}||'') eq 'hdrCinema' && 
  my $verified=main::lg_picture_set_workflow('127.0.0.1','test-key',1,{brightness=>50,contrast=>100},[],'hdmi1',0,'hdrCinema',0,0,1,0,'hdr10','picture');
  is($verified->{status},'ok','multi-setting native write succeeds with matching numeric-string readbacks');
  is($verified->{verification_state},'verified','skip_readback cannot suppress contract-required verification');
- is_deeply([sort map {keys %$_} @writes],[qw(brightness contrast)],'generic settings are each written through the verified single-key path');
+ is_deeply(\@writes,[{brightness=>50,contrast=>100}],'compatible native settings share one verified write');
  is($verified->{setting_verification}{contrast}{status},'verified','batch retains per-setting evidence');
  my $verify_requested;
  local *main::lg_ddc_1d_white_balance_set=sub {$verify_requested=$_[8];return (1,{status=>'ok',ddc_upload_verified=>1,ddc_upload_verify_contract=>'write-accepted-readback-untrusted',picture_settings=>{}})};

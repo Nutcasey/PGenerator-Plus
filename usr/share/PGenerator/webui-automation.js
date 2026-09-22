@@ -749,7 +749,15 @@ async function pgAutomationSaveRecipe(){
  // the editor's Save locked (P8).
  if(saved){try{await pgAutomationRefresh();}catch(e){pgAutomationNotice(e.message,true);}}
 }
-function pgAutomationItemSummary(item){
+function pgAutomationItemSettingsList(item){
+ const panel=item.panel_light||{};
+ const settings=Object.entries(item.settings||{}).map(([key,value])=>pgAutomationSettingMetadata(key).label+' '+pgAutomationSettingValue(value));
+ if(panel.key&&!Object.prototype.hasOwnProperty.call(item.settings||{},panel.key)&&panel.policy!=='target')settings.push(pgAutomationSettingMetadata(panel.key).label+' '+(panel.fixed_value??80));
+ return settings;
+}
+// part 'targets' is what the job was asked to achieve, 'setup' is what was
+// pinned on the TV to achieve it. Callers outside the job report take both.
+function pgAutomationItemSummary(item,part){
  const signal=item.signal_format||'sdr',cal=item.calibration||{},stages=item.stages||{},panel=item.panel_light||{};
  const enabled=key=>pgAutomationStageEnabled(stages,key);
  const pills=[signal==='dv'?'Dolby Vision':signal.toUpperCase(),pgAutomationModeLabel(item.picture_mode,signal)];
@@ -758,13 +766,24 @@ function pgAutomationItemSummary(item){
  if(enabled('calibration')&&enabled('apply_all'))pills.push('All inputs');
  if(item.panel_protection?.disable!==false)pills.push('TPC/GSR off');
  if(enabled('post_readings'))pills.push('After: '+(item.post_series||PG_AUTOMATION_SERIES).length+' sweeps');
- const settings=Object.entries(item.settings||{}).map(([key,value])=>pgAutomationSettingMetadata(key).label+' '+pgAutomationSettingValue(value));
- if(panel.key&&!Object.prototype.hasOwnProperty.call(item.settings||{},panel.key)&&panel.policy!=='target')settings.push(pgAutomationSettingMetadata(panel.key).label+' '+(panel.fixed_value??80));
+ const settings=pgAutomationItemSettingsList(item);
  const targets=[];
  if(enabled('calibration'))targets.push('1D LUT ΔE '+(cal.target_delta_e??item.target_delta_e??.5)+' ('+pgAutomationLabel(cal.delta_e_formula||item.delta_e_formula||'deitp')+')');
  targets.push(signal==='sdr'?(panel.policy==='target'?'Setup white target '+(panel.target_luminance??item.target_luminance??100)+' nits':'Fixed panel light; setup white measured at run time'):'Measured peak luminance');
  targets.push(pgAutomationLabel(item.target_gamma||cal.target_gamma||(signal==='sdr'?'bt1886':'st2084')));targets.push(pgAutomationLabel(item.target_gamut||cal.target_gamut||(signal==='sdr'?'bt709':'p3d65')));
- return '<div class="auto-pills">'+pills.map(x=>'<span class="auto-pill">'+pgAutomationEscape(x)+'</span>').join('')+'</div><div class="auto-muted">'+targets.map(pgAutomationEscape).join(' · ')+'</div><div class="auto-muted auto-pin-summary"><strong>TV settings</strong>'+(settings.length?'<ul>'+settings.map(value=>'<li>'+pgAutomationEscape(value)+'</li>').join('')+'</ul>':'<p>No explicit pins; default hazard controls applied</p>')+'</div>'+(item.template_notes?'<details class="auto-muted"><summary>Setup notes</summary><p>'+pgAutomationEscape(item.template_notes)+'</p></details>':'');
+ const targetsHtml='<div class="auto-pills">'+pills.map(x=>'<span class="auto-pill">'+pgAutomationEscape(x)+'</span>').join('')+'</div><div class="auto-muted">'+targets.map(pgAutomationEscape).join(' · ')+'</div>';
+ const setupHtml='<div class="auto-muted auto-pin-summary"><strong>TV settings</strong>'+(settings.length?'<ul>'+settings.map(value=>'<li>'+pgAutomationEscape(value)+'</li>').join('')+'</ul>':'<p>No explicit pins; default hazard controls applied</p>')+'</div>'+(item.template_notes?'<details class="auto-muted"><summary>Setup notes</summary><p>'+pgAutomationEscape(item.template_notes)+'</p></details>':'');
+ if(part==='targets')return targetsHtml;
+ if(part==='setup')return setupHtml;
+ return targetsHtml+setupHtml;
+}
+function pgAutomationTargetLine(item){
+ const cal=item.calibration||{},signal=item.signal_format||'sdr';
+ const enabled=key=>pgAutomationStageEnabled(item.stages||{},key);
+ const parts=[];
+ if(enabled('calibration'))parts.push('ΔE '+(cal.target_delta_e??item.target_delta_e??.5));
+ parts.push(pgAutomationLabel(item.target_gamut||cal.target_gamut||(signal==='sdr'?'bt709':'p3d65')));
+ return parts.join(' · ');
 }
 function pgAutomationRenderRecipeList(){
  const list=pgAutomationEl('RecipeList'),select=pgAutomationEl('RecipeSelect'),prior=select.value;
@@ -1067,23 +1086,27 @@ function pgAutomationEstimateModel(run,now){
  if(!eta){model.state='estimating';return model;}
  if((!model.preflight&&Number(eta.active_item)!==Number(run.active_item))||eta.stage!==run.active_stage){model.state='estimating';return model;}
  const age=at-Number(eta.calculated_at),stale=!Number.isFinite(age)||age<0||age>180;
- const range=(value,countdown)=>{
+ const range=(value,countdown,key)=>{
   value=Number(value);
   if(!Number.isFinite(value)||value<=0)return null;
   // Only time the current stage consumes can count down between server
   // recalculations; work not yet started cannot consume the estimate.
-  const elapsed=countdown?age:0;
-  return {low:Math.max(60,value*.75-elapsed),high:Math.max(60,value*1.5-elapsed)};
+  const elapsed=countdown?Math.min(age,Math.max(0,Number(eta.stage_remaining_seconds)||value)):0;
+  const bounds=eta.ranges?.[key],low=Number(bounds?.low),high=Number(bounds?.high);
+  const valid=bounds&&Number.isFinite(low)&&Number.isFinite(high)&&low>=0&&high>=low&&high>0;
+  return {low:Math.max(60,(valid?low:value*.75)-elapsed),high:Math.max(60,(valid?high:value*1.5)-elapsed)};
  };
  if(eta.batch_unknown_stages!=null){
   if(stale){model.state='updating';return model;}
   const countdown=Number(eta.stage_remaining_seconds)>0;
-  model.job=model.preflight?range(eta.stage_remaining_seconds,true):range(eta.job_remaining_seconds,countdown);
+  model.job=model.preflight?range(eta.stage_remaining_seconds,true,'stage'):range(eta.job_remaining_seconds,countdown,'job');
   model.jobPartial=!model.preflight&&eta.job_unknown_stages>0;
-  model.batch=range(eta.batch_known_seconds,countdown);
+  model.batch=range(eta.batch_known_seconds,countdown,'batch');
   model.batchPartial=eta.batch_unknown_stages>0;
-  model.pass=range(eta.pass_remaining_seconds,true);
+  model.pass=range(eta.pass_remaining_seconds,true,'pass');
   if(model.batch&&eta.batch_unknown_stages>0)model.note='Batch estimate covers '+eta.known_stages+' of '+eta.remaining_stages+' remaining stages';
+  else if(eta.adaptive)model.note='Estimates adjusted to this run’s measured progress';
+  else if(eta.seeded_history)model.note='Starting estimates use recorded calibration timings';
   else if(eta.approximate_history)model.note='Estimates use timings from similar jobs';
   model.state='ready';return model;
  }
@@ -1095,13 +1118,13 @@ function pgAutomationEstimateModel(run,now){
  model.state='ready';return model;
 }
 function pgAutomationEstimateRange(range){
- // Rounded up, in 5-minute steps beyond 10 minutes and half hours beyond an
- // hour: estimates carry ±25–50% anyway, and coarse figures stop the display
- // from changing every time the server recalculates.
+ // Round the range outwards. Rounding its lower bound up could exclude a
+ // finish the server correctly predicted (61 minutes became 1.5 hours).
+ // A second of tolerance avoids flipping a rounded boundary during a render.
  if(!range)return '';
- const minutes=value=>{let m=Math.max(1,Math.ceil(value/60));if(m>=10)m=Math.ceil(m/5)*5;return m;};
- const unit=m=>{if(m<60)return m+' min';const h=Math.ceil(m/30)/2;return (Number.isInteger(h)?h:h.toFixed(1))+' h';};
- const low=minutes(range.low),high=Math.max(minutes(range.high),minutes(range.low));
+ const minutes=(value,upper)=>{let m=Math.max(1,(upper?Math.ceil:Math.floor)((value+(upper?0:1))/60));const step=m>=60?30:m>=10?5:1;return Math.max(1,(upper?Math.ceil:Math.floor)(m/step)*step);};
+ const unit=m=>{if(m<60)return m+' min';const h=m/60;return (Number.isInteger(h)?h:h.toFixed(1))+' h';};
+ const low=minutes(range.low,false),high=Math.max(minutes(range.high,true),low);
  if(unit(low)===unit(high))return unit(low);
  if(low<60&&high<60)return low+'–'+high+' min';
  if(low>=60&&high>=60)return unit(low).replace(' h','')+'–'+unit(high);
@@ -1412,6 +1435,7 @@ function pgAutomationRenderLiveRun(run,execution){
  if(terminal){
   live.innerHTML='<h3>'+(run.preflight_only?'Last whole-queue check · ':'Last batch · ')+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Batch')+'</h3><p class="auto-muted">'+pgAutomationEscape(status.replace(/-/g,' '))+' · Nothing is running. Results remain available below and in History.</p>'
    +pgAutomationRunWarningsHtml(run)
+   +pgAutomationBatchSummary(run)
    +items.map((item,i)=>pgAutomationJobButton(item,i,'live',run.id,false)).join('');
   if(pgAutomation.tab==='live')pgAutomationSyncLiveDetail(run);return;
  }
@@ -1421,6 +1445,7 @@ function pgAutomationRenderLiveRun(run,execution){
   +pgAutomationFailureHtml(run)
   +(['starting','running','completing','stopping'].includes(status)&&run.heartbeat_age!=null&&run.heartbeat_age>60?'<p style="color:var(--orange)">No heartbeat for '+Number(run.heartbeat_age)+' s. If the runner has stopped, the next status check marks this run interrupted.</p>':'')
   +'<p class="auto-muted">Saved checkpoint: '+pgAutomationEscape(run.checkpoint||'none')+' · Heartbeat '+pgAutomationEscape(run.heartbeat_age==null?'pending':run.heartbeat_age+'s ago')+'</p>'
+  +pgAutomationBatchSummary(run)
   +items.map((item,i)=>pgAutomationJobButton(item,i,'live',run.id,i===active)).join('');
  if(pgAutomation.tab==='live')pgAutomationSyncLiveDetail(run);
 }
@@ -1483,6 +1508,7 @@ async function pgAutomationPollLive(){
    if(pgAutomation.current?.preflight?.id&&!result.preflight&&!pgAutomation.pendingChecks)pgAutomationEl('Readiness').innerHTML='';
    pgAutomation.pollMisses=0;pgAutomation.pollDelayed=false;
    pgAutomation.statusError='';pgAutomation.receivedAt=Date.now()/1000;pgAutomation.current=result;pgAutomationRenderLiveRun(result.run,result.execution);
+   pgAutomationSyncLiveMark();
   }
   else pgAutomationPollMissed('Cannot refresh run status. Showing the last known state; progress is unconfirmed. Do not start another run.');
  }catch(e){pgAutomationPollMissed('Run status connection failed: '+e.message+'. Showing the last known state.');
@@ -1530,7 +1556,7 @@ async function pgAutomationOpenHistory(index){
   +'<button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationRecoverQueue()">Copy this run to an editable queue</button><p class="auto-muted">Recovers the jobs saved on the Pi, including failed runs. Does not resume or start calibration.</p>'
   +(Array.isArray(run.hazard_restore_unverified)&&run.hazard_restore_unverified.length?'<div style="color:var(--orange);margin-bottom:8px" data-hazard-unverified>TV protections sent but not confirmed (this TV cannot read them back): '+pgAutomationEscape(run.hazard_restore_unverified.map(x=>(x&&x.key)||String(x)).join(', '))+'. Check them in the TV menu.</div>':'')
   +(Array.isArray(run.hazard_restore_failures)&&run.hazard_restore_failures.length?'<div style="color:var(--red);margin-bottom:8px">TV protections were not restored: '+pgAutomationEscape(run.hazard_restore_failures.map(x=>typeof x==='string'?x:(x.key||'')+(x.message?' ('+x.message+')':'')).join(', '))+'. Check the TV\'s energy saving, screen saver and power-off settings.</div>':'')
-  +'<div class="auto-job-layout"><div id="pgAutomationHistoryJobs">'+(run.items||[]).map((item,i)=>pgAutomationJobButton(item,i,'history',run.id,false)).join('')+'</div><aside id="pgAutomationHistoryJobDetail" class="auto-job-detail" aria-label="Selected historical job details"></aside></div>';
+  +'<div class="auto-job-layout"><div id="pgAutomationHistoryJobs">'+pgAutomationBatchSummary(run)+(run.items||[]).map((item,i)=>pgAutomationJobButton(item,i,'history',run.id,false)).join('')+'</div><aside id="pgAutomationHistoryJobDetail" class="auto-job-detail" aria-label="Selected historical job details"></aside></div>';
  // The detail renders below the full history list; bring it into view so
  // the click visibly does something.
  detail.style.scrollMarginTop='calc(var(--pg-header-height, 61px) + 12px)'; // clear the sticky header at any width
@@ -1550,10 +1576,150 @@ async function pgAutomationRecoverQueue(){
  pgAutomationNotice('Jobs recovered from the Pi. Review and Save queue to keep a named copy. Nothing has started.');
 }
 
+// Scanning a six-job batch for the one that went wrong should be a glance.
+function pgAutomationBatchSummary(run){
+ const items=(run&&run.items)||[];
+ if(items.length<2)return '';
+ let complete=0,incomplete=0,pending=0,warned=0;
+ items.forEach(item=>{
+  const status=pgAutomationJobStatus(item,run.status);
+  if(/^complete/.test(status))complete++;
+  else if(['failed','stopped','interrupted'].includes(status))incomplete++;
+  else pending++;
+  if(Array.isArray(item.warnings)&&item.warnings.length)warned++;
+ });
+ const parts=[items.length+' jobs'];
+ if(complete)parts.push(complete+' complete');
+ if(incomplete)parts.push(incomplete+' incomplete');
+ if(pending)parts.push(pending+' not run');
+ if(warned)parts.push(warned+' with warnings');
+ return '<p class="auto-batch-summary">'+pgAutomationEscape(parts.join(' · '))+'</p>';
+}
+// The run record carries an average only where quality checks recorded one.
+// Anything else shown here was measured when that job was last opened.
+function pgAutomationJobFigure(item,runId,index){
+ const quality=item&&(item.quality_result||item.quality),series=quality&&quality.series||{};
+ const grey=series.greyscale||series['greyscale-21'];
+ if(grey&&grey.average!=null&&isFinite(Number(grey.average)))return 'ΔE '+Number(grey.average).toFixed(2);
+ return (pgAutomation.jobFigures||{})[runId+':'+index]||'';
+}
 function pgAutomationJobButton(item,index,view,runId,active){
  const selected=pgAutomation.jobViews[view];
  const status=pgAutomationJobStatus(item,view==='live'?pgAutomation.current?.run?.status:null);
- return '<button type="button" class="auto-job-pick '+(active?'auto-run-current':'')+'" data-job-index="'+index+'" aria-pressed="'+!!(selected?.runId===runId&&selected.index===index)+'" '+(active?'aria-current="step"':'')+' onclick="pgAutomationSelectJob(\''+view+'\',\''+pgAutomationEscape(runId)+'\','+index+')"><strong>'+(index+1)+'. '+pgAutomationEscape(item.name||'Job')+'</strong><small>'+pgAutomationEscape(status)+(active?' · Current job':'')+'</small>'+(item.failure?'<small>'+pgAutomationEscape(pgAutomationIssueText(item.failure))+'</small>':'')+'</button>';
+ const figure=pgAutomationJobFigure(item,runId,index);
+ return '<div class="auto-job-row"><button type="button" class="auto-job-pick '+(active?'auto-run-current':'')+'" data-job-index="'+index+'" aria-pressed="'+!!(selected?.runId===runId&&selected.index===index)+'" '+(active?'aria-current="step"':'')+' onclick="pgAutomationSelectJob(\''+view+'\',\''+pgAutomationEscape(runId)+'\','+index+')"><span class="auto-job-line"><strong>'+(index+1)+'. '+pgAutomationEscape(item.name||'Job')+'</strong>'+(figure?'<span class="auto-job-figure">'+pgAutomationEscape(figure)+'</span>':'')+'</span><small>'+pgAutomationEscape(status)+(active?' · Current job':'')+'</small>'+(item.failure?'<small>'+pgAutomationEscape(pgAutomationIssueText(item.failure))+'</small>':'')+'</button><div class="auto-job-index" data-job-index-for="'+index+'"></div></div>';
+}
+function pgAutomationReducedMotion(){
+ try{return window.matchMedia('(prefers-reduced-motion:reduce)').matches;}catch(e){return false;}
+}
+// Sections a job was configured to produce but never did. Shown greyed so a
+// job that was not asked to do 3D reads differently from one that tried.
+function pgAutomationPlannedSections(item,state){
+ const stages=item&&item.stages||{},signal=item&&item.signal_format||'sdr';
+ const enabled=key=>pgAutomationStageEnabled(stages,key);
+ const planned=[];
+ const sweeps=(keys,phase,label)=>(keys||['greyscale-21','colors-30','saturations-24']).forEach(key=>planned.push({key:'m:'+phase+':'+key,name:label+' · '+pgAutomationSeriesLabel(key)}));
+ if(enabled('pre_readings')&&state.showBefore)sweeps(item.pre_series,'pre','Before');
+ if(enabled('calibration')){
+  planned.push({key:'m:calibration:grey',name:'1D LUT'});
+  planned.push(signal==='dv'?{key:'m:calibration:dv-profile',name:'Dolby Vision profile'}:{key:'m:calibration:3d',name:'3D LUT'});
+ }
+ if(enabled('post_readings')&&state.showAfter)sweeps(item.post_series,'post','After');
+ return planned;
+}
+function pgAutomationIndexRow(view,key,name,figure,options){
+ const opts=options||{};
+ return '<li class="auto-index-row'+(opts.absent?' auto-index-absent':'')+(opts.chart?' auto-index-chart':'')+'" data-index-key="'+pgAutomationEscape(key)+'">'
+  +(opts.absent
+   ?'<span class="auto-index-name">'+pgAutomationEscape(name)+'</span><span class="auto-index-figure">Not recorded</span>'
+   :'<button type="button" class="auto-index-link" onclick="pgAutomationJumpToSection(\''+view+'\',\''+pgAutomationEscape(opts.section||key)+'\''+(opts.chart?',\''+pgAutomationEscape(opts.chart)+'\'':'')+')">'
+    +'<span class="auto-index-name">'+pgAutomationEscape(name)+'</span>'
+    +(opts.flag?'<span class="auto-section-flag" aria-label="'+pgAutomationEscape(opts.flag)+'" title="'+pgAutomationEscape(opts.flag)+'">!</span>':'')
+    +'<span class="auto-index-figure">'+pgAutomationEscape(figure||'')+'</span></button>')
+  +'</li>';
+}
+// Built from the rendered sections, so the index can never drift from them.
+function pgAutomationRenderJobIndex(view,state){
+ if(view==='calibration')return;
+ const list=pgAutomationEl(view==='live'?'Live':'HistoryJobs');
+ const target=pgAutomationJobTarget(view);
+ if(!list||!target)return;
+ // Only the selected job carries an index; a previous job's entries would
+ // otherwise sit under its own row pointing at results no longer on screen.
+ const slots=[...list.querySelectorAll('[data-job-index-for]')];
+ slots.forEach(el=>{if(Number(el.dataset.jobIndexFor)!==state.index&&el.firstChild)el.innerHTML='';});
+ const slot=slots.find(el=>Number(el.dataset.jobIndexFor)===state.index);
+ if(!slot)return;
+ const rows=[],present=new Set();
+ target.querySelectorAll('details.auto-section').forEach(section=>{
+  const key=section.dataset.sectionKey||'';
+  present.add(key);
+  const name=String(section.querySelector('.auto-section-name')?.textContent||key);
+  const badge=state.sectionBadges&&state.sectionBadges[key]?state.sectionBadges[key]:String(section.querySelector('.auto-section-figure')?.textContent||'');
+  const flag=section.querySelector('.auto-section-flag')?.getAttribute('title')||'';
+  rows.push(pgAutomationIndexRow(view,key,name,badge,{flag}));
+  if(!section.open)return;
+  section.querySelectorAll('details.auto-chart').forEach(chart=>{
+   const chartKey=chart.dataset.chartKey||'';
+   if(!chartKey)return;
+   rows.push(pgAutomationIndexRow(view,key+'/'+chartKey,String(chart.querySelector('.report-chart-name')?.textContent||chartKey),
+    String(chart.querySelector('.report-chart-figure')?.textContent||''),{section:key,chart:chartKey}));
+  });
+ });
+ pgAutomationPlannedSections(state.data?.item||{},state).forEach(planned=>{
+  if(!present.has(planned.key))rows.push(pgAutomationIndexRow(view,planned.key,planned.name,'',{absent:true}));
+ });
+ const html=rows.length?'<ul class="auto-index" aria-label="Sections in this job">'+rows.join('')+'</ul>':'';
+ if(state.indexHtml===html&&!!slot.firstChild===!!html)return;
+ state.indexHtml=html;slot.innerHTML=html;
+ pgAutomationWatchSectionScroll(view,target,slot);
+}
+function pgAutomationJumpToSection(view,key,chartKey){
+ const target=pgAutomationJobTarget(view);if(!target)return;
+ const section=[...target.querySelectorAll('details.auto-section')].find(el=>el.dataset.sectionKey===key);
+ if(!section)return;
+ if(!section.open)section.open=true;
+ let focus=section;
+ if(chartKey){
+  const chart=[...section.querySelectorAll('details.auto-chart')].find(el=>el.dataset.chartKey===chartKey);
+  if(chart){if(!chart.open)chart.open=true;focus=chart;}
+ }
+ focus.style.scrollMarginTop='calc(var(--pg-header-height, 61px) + 12px)';
+ focus.scrollIntoView({behavior:pgAutomationReducedMotion()?'auto':'smooth',block:'start'});
+ focus.querySelector('summary')?.focus({preventScroll:true});
+}
+// Mark the section being read, so the index says where you are.
+function pgAutomationWatchSectionScroll(view,target,slot){
+ const spies=pgAutomation.sectionSpies=pgAutomation.sectionSpies||{};
+ if(spies[view])spies[view].disconnect();
+ if(typeof IntersectionObserver!=='function')return;
+ const seen=new Map();
+ const observer=new IntersectionObserver(records=>{
+  records.forEach(record=>seen.set(record.target,record));
+  let best=null;
+  seen.forEach(record=>{
+   if(!record.isIntersecting)return;
+   if(!best||record.boundingClientRect.top<best.boundingClientRect.top)best=record;
+  });
+  const key=best?best.target.dataset.sectionKey:'';
+  slot.querySelectorAll('.auto-index-row').forEach(row=>{
+   const active=!!key&&row.dataset.indexKey===key;
+   row.classList.toggle('auto-index-current',active);
+   const link=row.querySelector('.auto-index-link');
+   if(link){if(active)link.setAttribute('aria-current','true');else link.removeAttribute('aria-current');}
+  });
+ },{rootMargin:'-10% 0px -70% 0px',threshold:0});
+ target.querySelectorAll('details.auto-section').forEach(section=>observer.observe(section));
+ spies[view]=observer;
+}
+// Say "incomplete" only where the record shows a job that stopped short; a
+// queued or running job has simply not got there yet.
+function pgAutomationJobIncomplete(item,runStatus){
+ const status=pgAutomationJobStatus(item,runStatus);
+ if(/^complete/.test(status||''))return '';
+ if(item&&item.failure)return pgAutomationIssueText(item.failure);
+ if(['failed','stopped','interrupted'].includes(status))return 'Job '+status;
+ return '';
 }
 function pgAutomationJobStatus(item,runStatus){return item.status==='running'&&['paused','interrupted','stopped','failed'].includes(runStatus)?runStatus:item.status||'queued';}
 function pgAutomationJobFailureHtml(item){
@@ -1643,9 +1809,10 @@ function pgAutomationShowJob(view,runId,index,force=false){
  const target=pgAutomationJobTarget(view);if(!target)return;
  let state=pgAutomation.jobViews[view];
  if(!state||state.runId!==runId||state.index!==index){
-  state={runId,index,showBefore:true,showAfter:true,lastFetch:0};pgAutomation.jobViews[view]=state;
-  target.innerHTML='<div class="auto-toolbar" data-job-nav></div><div data-job-meta>Loading job details…</div><div data-job-error role="status"></div><div data-job-settings></div><div data-job-toggles></div><div data-job-measurement role="status"></div><div data-job-graphs></div>';
+  state={runId,index,showBefore:true,showAfter:true,lastFetch:0,entries:[],sectionBadges:{},verdictStats:[],totalReadings:0};pgAutomation.jobViews[view]=state;
+  target.innerHTML='<div class="auto-toolbar" data-job-nav></div><div data-job-meta>Loading job details…</div><div data-job-verdict></div><div data-job-toggles></div><div data-job-error role="status"></div><div data-job-measurement role="status"></div><div class="auto-sections" data-job-sections><div data-job-settings></div><div data-job-graphs></div></div>';
  }
+ pgAutomationWatchFolds(target,view);
  const list=view==='calibration'?null:pgAutomationEl(view==='live'?'Live':'HistoryJobs');
  list?.querySelectorAll('[data-job-index]').forEach(button=>button.setAttribute('aria-pressed',String(Number(button.dataset.jobIndex)===index)));
  const saved=view!=='live'||pgAutomationTerminal(pgAutomation.current?.run);
@@ -1654,7 +1821,16 @@ function pgAutomationShowJob(view,runId,index,force=false){
  // snapshots and checks), so two open tabs at the old 2.5 s / 10 s cadence
  // kept the daemon at two thirds of a core. The chart refreshes every 5 s,
  // the saved-job card every 30 s; the 2 s status poll still drives the rest.
- if(!state.loading&&(force||Date.now()-state.lastFetch>(view==='calibration'?5000:30000)))pgAutomationFetchJob(view,state);
+ if(state.data)pgAutomationRenderJobIndex(view,state);
+ // A terminal job's results are frozen on the Pi. Re-fetching and re-rendering
+ // them on a timer cost the appliance a chart pass every 30 s for nothing.
+ // A running stage refreshes its plots at the observer's 5 s. The marker
+ // itself rides the light 2 s run poll, so it never waits on the 472 KB job
+ // fetch that the 18 Sep work deliberately slowed down.
+ const cadence=(view==='calibration'||pgAutomationRunIsLive())?5000:30000;
+ const run=pgAutomation.current?.run;
+ if(run?.id===state.runId&&!pgAutomationTerminal(run)&&Number(run.active_item)===state.index)state.settled=false;
+ if(!state.loading&&(force||!(state.settled&&state.data))&&(force||Date.now()-state.lastFetch>cadence))pgAutomationFetchJob(view,state);
 }
 async function pgAutomationFetchJob(view,state){
  state.loading=true;state.lastFetch=Date.now();
@@ -1676,21 +1852,32 @@ async function pgAutomationFetchJob(view,state){
    measurement.textContent=retry?'Retrying invalid measurement · '+(snap.message||retry.reason)+'. Graphs retain the last measurements.':snap?[snap.message,timestamps.length?'Last valid measurement '+new Date(Math.max(...timestamps)*1000).toLocaleTimeString():null].filter(Boolean).join(' · '):'';
   }
   target.querySelector('[data-job-error]').textContent='';
-  const meta=target.querySelector('[data-job-meta]'),configExpanded=meta.querySelector('details')?.open;
+  const meta=target.querySelector('[data-job-meta]');
   // "Results saved" is when the runner last recorded a checkpoint for this
  // job; the fetch time only says when the browser asked.
  // Only completed measurement stages count, After Readings first: skipped,
  // interrupted and setup-only records carry a timestamp but measured nothing.
  const doneAt=names=>Math.max(0,...(item.checkpoints||[]).filter(c=>c&&c.status==='done'&&(!names||names.includes(c.name))).map(c=>Number(c.completed_at)||0));
  const saved=doneAt(['post-readings-done'])||doneAt(['pre-readings-done','greyscale-done','volume-done']);
- meta.innerHTML=(view==='calibration'?'':'<h3>'+pgAutomationEscape(item.name||'Job '+(state.index+1))+'</h3><p class="auto-muted">'+pgAutomationEscape(pgAutomationJobStatus(item,data.run_status))+(saved?' · Results saved '+new Date(saved*1000).toLocaleTimeString():' · Results updated '+new Date(data.fetched_at*1000).toLocaleTimeString())+'</p>')+pgAutomationJobFailureHtml(item)+'<details><summary>Configured settings and targets</summary>'+pgAutomationItemSummary(item)+'</details>';
-  if(configExpanded)meta.querySelector('details').open=true;
-  const settings=target.querySelector('[data-job-settings]'),expanded=settings.querySelector('details')?.open;
+ meta.innerHTML=(view==='calibration'?'':'<h3>'+pgAutomationEscape(item.name||'Job '+(state.index+1))+'</h3><p class="auto-muted">'+pgAutomationEscape(pgAutomationJobStatus(item,data.run_status))+(saved?' · Results saved '+new Date(saved*1000).toLocaleTimeString():' · Results updated '+new Date(data.fetched_at*1000).toLocaleTimeString())+'</p>')+pgAutomationJobFailureHtml(item);
+  state.settled=['complete','complete-with-warnings','failed','stopped'].includes(data.run_status||'')&&!['running','queued','paused'].includes(item.status||'');
   const manualChecks=[...new Set([...(item.manual_checks||[]),...(data.readiness_issues||[]).map(issue=>issue.message).filter(Boolean)])];
-  settings.innerHTML=pgAutomationApplyAllNote(item)+pgAutomationSettingsEvidence(data.checks||[],{...item,manual_checks:manualChecks});
-  if(expanded&&settings.querySelector('details'))settings.querySelector('details').open=true;
+  const checkTotals=pgAutomationCheckTotals(data.checks||[]);
+  state.checkTotals=checkTotals;state.incomplete=pgAutomationJobIncomplete(item,data.run_status);
+  const settingsCount=pgAutomationItemSettingsList(item).length;
+  const settings=target.querySelector('[data-job-settings]');
+  settings.innerHTML=
+   pgAutomationSection('overview','Overview',pgAutomationTargetLine(item),pgAutomationItemSummary(item,'targets'),{defaultOpen:false})
+   +pgAutomationSection('setup','Setup',settingsCount?settingsCount+(settingsCount===1?' setting':' settings'):'No pins',pgAutomationApplyAllNote(item)+pgAutomationItemSummary(item,'setup'),{defaultOpen:false})
+   +pgAutomationSection('checks','Checks',checkTotals.total?checkTotals.total+' checks':'None recorded',pgAutomationSettingsEvidence(data.checks||[],{...item,manual_checks:manualChecks},{heading:false}),
+    {defaultOpen:!!checkTotals.flagged,flag:checkTotals.flagged?checkTotals.flagged+' setting'+(checkTotals.flagged===1?'':'s')+' not verified':''});
   const before=(data.snapshots||[]).some(s=>s.phase==='pre'&&s.snapshot?.readings?.length)||(data.live?.phase==='pre'&&data.live.snapshot?.readings?.length);
-  target.querySelector('[data-job-toggles]').innerHTML=(before?'<label><input type="checkbox" '+(state.showBefore?'checked':'')+' onchange="pgAutomationGraphToggle(\''+view+'\',\'showBefore\',this.checked)"> Before</label> ':'')+'<label><input type="checkbox" '+(state.showAfter?'checked':'')+' onchange="pgAutomationGraphToggle(\''+view+'\',\'showAfter\',this.checked)"> '+(/^complete/.test(item.status||'')?'Final':'Latest / after')+'</label>';
+  target.querySelector('[data-job-toggles]').innerHTML='<div class="auto-job-controls">'
+   +(before?'<label><input type="checkbox" '+(state.showBefore?'checked':'')+' onchange="pgAutomationGraphToggle(\''+view+'\',\'showBefore\',this.checked)"> Before</label>':'')
+   +'<label><input type="checkbox" '+(state.showAfter?'checked':'')+' onchange="pgAutomationGraphToggle(\''+view+'\',\'showAfter\',this.checked)"> '+(/^complete/.test(item.status||'')?'Final':'Latest / after')+'</label>'
+   +'<span class="auto-controls-gap" aria-hidden="true"></span>'
+   +'<button class="btn btn-sm btn-secondary" type="button" title="Open every section. Charts keep their own state." onclick="pgAutomationExpandAll(\''+view+'\',true)">Expand all</button>'
+   +'<button class="btn btn-sm btn-secondary" type="button" title="Close every section and chart." onclick="pgAutomationExpandAll(\''+view+'\',false)">Collapse all</button></div>';
   await pgAutomationRenderJobGraphs(view,state);
  }catch(e){if(pgAutomation.jobViews[view]===state)pgAutomationJobTarget(view).querySelector('[data-job-error]').textContent=state.data?'Unable to refresh job details: '+e.message+'. Any displayed results are the last received, not confirmed current.':'Unable to load job details: '+e.message+'. No measurements have been loaded for this job. The next status check will retry.';}
  finally{state.loading=false;}
@@ -1721,7 +1908,13 @@ function pgAutomationCheckStage(check){
  if(boundary)return ({6:'After 1D calibration',7:'After profile / LUT upload, before calibration exit',8:'After calibration exit'})[boundary[1]]+({confirm:' · fresh confirmation',repair:' · targeted repair',stable:' · stability check'}[boundary[2]]||'');
  return ({c1:'TV setup',c4:'After reset and reapply',c5:'White luminance setup','c5-panel-iteration':'Adjusting panel light',c8:'After calibration closes','c8-recovery':'Reapplying settings after drift',c9:'After apply to all inputs',c10:'Before after-readings'})[key]||pgAutomationStageLabel(key)||'Stage not recorded';
 }
-function pgAutomationSettingsEvidence(checks,item){
+function pgAutomationCheckTotals(checks){
+ const latest=new Map();(checks||[]).forEach(c=>latest.set((c.category||'picture')+':'+c.key,c));
+ const managed=c=>c.result==='lut-managed'||c.result==='expected-calibration-state';
+ return {total:(checks||[]).length,flagged:[...latest.values()].filter(c=>!c.verified&&!managed(c)).length};
+}
+function pgAutomationSettingsEvidence(checks,item,options){
+ const opts=options||{};
  const value=v=>v==null?'Not returned':typeof v==='object'?JSON.stringify(v):String(v),esc=pgAutomationEscape;
  const label=c=>c.result==='expected-calibration-state'?'Expected calibration state':c.result==='lut-managed'?'LUT-managed':c.result==='readback-warning'?'Warning — LG gamut readback':c.verified?'Verified':c.result==='apply-failed'?'Failed to apply':c.result==='unverifiable'||c.observed==null?'Could not verify':'Readback mismatch';
  const stage=c=>[pgAutomationCheckStage(c),c.timestamp?pgAutomationFormatTime(typeof c.timestamp==='number'?c.timestamp*1000:c.timestamp):c.at?pgAutomationFormatTime(c.at):''].filter(Boolean).join(' · ');
@@ -1730,10 +1923,269 @@ function pgAutomationSettingsEvidence(checks,item){
  const managed=[...latest.values()].filter(isManaged);
  const problems=[...latest.values()].filter(c=>!c.verified&&!isManaged(c));
  const manual=(item.manual_checks||[]).map(c=>'<p class="auto-muted">Manual check: '+esc(typeof c==='string'?c:c.message||c.key||'Check in the TV menu')+'</p>').join('');
- return '<h4>TV settings verification</h4><p class="auto-muted">Saved readbacks at the stages shown—not a fresh read of the TV.</p>'+manual+
+ return (opts.heading===false?'':'<h4>TV settings verification</h4>')+'<p class="auto-muted">Saved readbacks at the stages shown—not a fresh read of the TV.</p>'+manual+
   managed.map(c=>'<p class="auto-muted"><strong>'+esc(c.key)+' · '+label(c)+'</strong><br>Requested: '+esc(value(c.expected))+' · TV reported: '+esc(value(c.observed))+'<br>'+esc(pgAutomationSettingReason(c))+'<br><small>'+esc(stage(c))+'</small></p>').join('')+
   (checks.length?(problems.length?problems.map(c=>'<div class="auto-setting-problem"><strong>'+esc(c.key)+' · '+label(c)+'</strong><div>Requested: '+esc(value(c.expected))+' · TV reported: '+esc(value(c.observed))+'</div><div>'+esc(pgAutomationSettingReason(c))+'</div><small>'+esc(stage(c))+'</small></div>').join(''):managed.length?'<p>Other recorded settings matched at their latest check.</p>':'<p>All recorded settings matched at their latest check.</p>'):'<p class="auto-muted">No settings verification has been recorded for this job.</p>')+
   (checks.length?'<details><summary>All setting checks ('+checks.length+')</summary><div class="auto-settings-table"><table><thead><tr><th>Setting</th><th>Requested</th><th>TV reported</th><th>Result / reason</th><th>Checked at</th></tr></thead><tbody>'+checks.map(c=>'<tr><td>'+esc(c.key)+'</td><td>'+esc(value(c.expected))+'</td><td>'+esc(value(c.observed))+'</td><td>'+label(c)+' — '+esc(pgAutomationSettingReason(c))+'</td><td>'+esc(stage(c))+'</td></tr>').join('')+'</tbody></table></div></details>':'');
+}
+// Section folding. A fold is a reading preference, not job data: it is keyed by
+// section name so it carries across jobs and reloads, and it lives only in this
+// browser. Sections default open for measurements (the numbers answer "how did
+// this go") and closed for the setup record.
+const PG_AUTOMATION_SECTIONS_KEY='pgen.ui.automationSections';
+function pgAutomationFolds(){
+ if(!pgAutomation.folds){
+  let stored=null;
+  try{stored=JSON.parse(localStorage.getItem(PG_AUTOMATION_SECTIONS_KEY)||'{}');}catch(e){stored=null;}
+  pgAutomation.folds=stored&&typeof stored==='object'&&!Array.isArray(stored)?stored:{};
+ }
+ return pgAutomation.folds;
+}
+function pgAutomationSetFold(key,open){
+ if(!key)return;
+ const folds=pgAutomationFolds();folds[key]=!!open;
+ try{localStorage.setItem(PG_AUTOMATION_SECTIONS_KEY,JSON.stringify(folds));}catch(e){}
+}
+function pgAutomationFoldOpen(key,fallback){
+ const folds=pgAutomationFolds();
+ return Object.prototype.hasOwnProperty.call(folds,key)?!!folds[key]:!!fallback;
+}
+// The run's worker status is the only live thing on this screen: the panel
+// watches a job it is not driving.
+function pgAutomationLiveWorker(){
+ const run=pgAutomation.current&&pgAutomation.current.run;
+ if(!run||pgAutomationTerminal(run))return null;
+ const worker=run.worker_status;
+ return worker&&worker.current_name?worker:null;
+}
+function pgAutomationRunIsLive(){return !!pgAutomationLiveWorker();}
+// The job's live snapshot carries the patch under the meter as numbers
+// (current_ire and friends); the run's worker status only carries a display
+// string with the stage name glued on. Prefer the numbers.
+function pgAutomationLiveState(){
+ const run=pgAutomation.current?.run;
+ if(!run||pgAutomationTerminal(run)||run.active_item==null)return null;
+ return Object.values(pgAutomation.jobViews||{}).filter(state=>state&&state.runId===run.id
+  &&state.index===Number(run.active_item)&&state.data?.live&&state.data.active_stage===run.active_stage
+  &&(!run.stage_started_at||Number(state.data.stage_started_at)===Number(run.stage_started_at)))
+  .sort((a,b)=>b.lastFetch-a.lastFetch)[0]||null;
+}
+function pgAutomationLiveSnapshot(worker){
+ const snap=pgAutomationLiveState()?.data?.live?.snapshot;
+ // A job snapshot can lag the status poll. Its numbers are authoritative only
+ // while both replies name the same patch of this run and stage.
+ return snap&&snap.current_name&&(!worker||String(snap.current_name)===String(worker.current_name))?snap:null;
+}
+// A running stage answers "how much longer" first. On tablet widths the quality
+// figure is dropped by CSS -- the chart carrying it is a few pixels below.
+function pgAutomationLiveFigureHtml(count,average){
+ const worker=pgAutomationLiveWorker();
+ const total=Number(worker&&worker.total_steps)||0;
+ const done=Number(worker&&worker.current_step)||0;
+ const progress=total?done+' / '+total:(count?count+' readings':'Measuring');
+ return pgAutomationEscape(progress)
+  +(average?'<span class="auto-section-figure-trail"> · ΔE '+pgAutomationEscape(average)+'</span>':'');
+}
+function pgAutomationPaintLiveFigures(){
+ const active=pgAutomationLiveState();
+ Object.entries(pgAutomation.jobViews||{}).forEach(([view,state])=>{
+  pgAutomationJobTarget(view)?.querySelectorAll('details.auto-section-running').forEach(section=>{
+   const current=!!active&&state.runId===active.runId&&state.index===active.index
+    &&state.data?.active_stage===active.data.active_stage&&state.data?.stage_started_at===active.data.stage_started_at;
+   section.toggleAttribute('data-pg-live',current);
+   const el=section.querySelector('.auto-section-figure');if(!el||!current)return;
+   const live=state.sectionLive?.[section.dataset.sectionKey]||{};
+   el.innerHTML=pgAutomationLiveFigureHtml(Number(live.count||0),live.average||'');
+  });
+ });
+}
+// Set the live mark from the poll that delivered it, then let the shared chart
+// layer place it on every chart that published geometry.
+function pgAutomationSyncLiveMark(){
+ if(typeof meterLiveMarkSet!=='function')return;
+ const worker=pgAutomationLiveWorker();
+ pgAutomationPaintLiveFigures();
+ const state=pgAutomationLiveState();
+ const entry=state?.entries?.find(entry=>entry.isLive);
+ const series=entry&&state.sectionSeries?.[entry.key];
+ if(!worker||!series){meterLiveMarkSet(null);return;}
+ const run=pgAutomation.current&&pgAutomation.current.run;
+ const held=['paused','interrupted','stopping'].includes((run&&run.status)||'');
+ meterLiveMarkSet(meterLiveResolveStatusMark(pgAutomationLiveSnapshot(worker)||worker,series.steps,held?'held':null,series.readings));
+ // A re-render replaces the chart images even when the patch has not moved,
+ // so the overlays are re-attached here rather than only when the mark changes.
+ if(typeof meterLiveRefreshSurfaces==='function')meterLiveRefreshSurfaces();
+ pgAutomationMarkLiveTableRow();
+}
+// The greyscale table lists measured patches only, so its live row is the most
+// recent real reading: one patch behind the charts' ghost while the meter is
+// still integrating. Manual scrolling pauses following until explicitly resumed.
+function pgAutomationMarkLiveTableRow(){
+ document.querySelectorAll('tr.auto-live-row').forEach(tr=>tr.classList.remove('auto-live-row'));
+ const mark=(typeof meterLiveMark==='function')?meterLiveMark():null;
+ if(!mark)return;
+ // Both the observer and Automation can show this stage at once. Each
+ // view owns its highlight and scroll choice independently.
+ document.querySelectorAll('[data-pg-live]').forEach(section=>{
+  const rows=[...section.querySelectorAll('tr[data-ire]')];
+  if(!rows.length)return;
+  let row=null;
+  rows.forEach(tr=>{
+   const ire=Number(tr.dataset.ire);
+   if(isFinite(ire)&&(mark.ire==null||ire<=Number(mark.ire)))row=tr;
+  });
+  row=row||rows[rows.length-1];
+  row.classList.add('auto-live-row');
+  pgAutomationFollowTableRow(section,row);
+ });
+}
+function pgAutomationFollowTableRow(section,row){
+ const scroller=pgAutomationScrollerFor(row);
+ if(!scroller)return;
+ const owner=Object.entries(pgAutomation.jobViews||{}).find(([view])=>pgAutomationJobTarget(view)?.contains(section));
+ // Keep preferences with the job because width/DPR changes rebuild sections.
+ const states=owner?(owner[1].tableFollow||(owner[1].tableFollow={})):section;
+ const key=owner?(section.dataset.sectionKey||'readings'):'_pgTableFollow';
+ const follow=states[key]||(states[key]={enabled:true,top:scroller.scrollTop});
+ if(follow.scroller!==scroller){
+  follow.scroller=scroller;
+  scroller.scrollTop=follow.top;
+  const button=document.createElement('button');
+  button.type='button';button.className='btn btn-sm';
+  button.textContent='Follow latest reading';button.hidden=follow.enabled;
+  scroller.before(button);
+  const pause=()=>{follow.enabled=false;button.hidden=false;};
+  button.addEventListener('click',()=>{follow.enabled=true;button.hidden=true;pgAutomationMarkLiveTableRow();});
+  scroller.addEventListener('wheel',pause,{passive:true});
+  scroller.addEventListener('touchmove',pause,{passive:true});
+  scroller.addEventListener('keydown',event=>{
+   if(['ArrowUp','ArrowDown','PageUp','PageDown','Home','End',' '].includes(event.key))pause();
+  });
+  scroller.addEventListener('scroll',()=>{
+   if(Math.abs(scroller.scrollTop-follow.top)>1)pause();
+   follow.top=scroller.scrollTop;
+  },{passive:true});
+ }
+ if(!follow.enabled)return;
+ const top=row.offsetTop-scroller.clientHeight/2+row.offsetHeight/2;
+ scroller.scrollTop=Math.max(0,Math.min(top,scroller.scrollHeight-scroller.clientHeight));
+ follow.top=scroller.scrollTop;
+}
+function pgAutomationScrollerFor(el){
+ let node=el&&el.parentElement;
+ while(node&&node!==document.body){
+  const style=getComputedStyle(node);
+  if(/(auto|scroll)/.test(style.overflowY)&&node.scrollHeight>node.clientHeight+4)return node;
+  node=node.parentElement;
+ }
+ return null;
+}
+function pgAutomationSection(key,name,figure,body,options){
+ const opts=options||{};
+ const open=opts.forceOpen||pgAutomationFoldOpen(key,opts.defaultOpen);
+ return '<details class="auto-section'+(opts.live?' auto-section-running':'')+'" data-section-key="'+pgAutomationEscape(key)+'"'+(opts.live?' data-pg-live':'')+(open?' open':'')+'>'
+  +'<summary class="auto-section-head">'+(opts.live?'<span class="auto-section-dot" aria-hidden="true"></span>':'')
+  +'<span class="auto-section-name">'+pgAutomationEscape(name)+'</span>'
+  +(opts.flag?'<span class="auto-section-flag" title="'+pgAutomationEscape(opts.flag)+'" aria-label="'+pgAutomationEscape(opts.flag)+'">!</span>':'')
+  +'<span class="auto-section-rule" aria-hidden="true"></span>'
+  +'<span class="auto-section-figure">'+(opts.figureHtml||pgAutomationEscape(figure||''))+'</span></summary>'
+  +'<div class="auto-section-body">'+body+'</div></details>';
+}
+// Chart cards arrive as flat divs from the shared report builder, which the
+// downloadable report needs to stay flat. Fold them here, in the panel only.
+function pgAutomationFoldCharts(root){
+ if(!root)return;
+ let untitled=0;
+ root.querySelectorAll('.report-chart-card,.report-table-card').forEach(card=>{
+  if(card.closest('.auto-chart'))return;
+  const titleEl=card.querySelector('.report-chart-title,.report-table-title');
+  const details=document.createElement('details');
+  details.className='auto-chart '+card.className;
+  const slug=titleEl?String(titleEl.textContent||'').trim().toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''):'';
+  const key=card.dataset.chartKey||slug||('measured-values'+(untitled++?'-'+untitled:''));
+  if(key)details.dataset.chartKey=key;
+  const summary=document.createElement('summary');
+  summary.className='auto-chart-head';
+  if(titleEl){while(titleEl.firstChild)summary.append(titleEl.firstChild);titleEl.remove();}
+  else summary.textContent='Measured values';
+  if(!summary.querySelector('.report-chart-name')){
+   const name=document.createElement('span');name.className='report-chart-name';
+   while(summary.firstChild)name.append(summary.firstChild);
+   summary.append(name);
+  }
+  const body=document.createElement('div');
+  body.className='auto-chart-body';
+  while(card.firstChild)body.append(card.firstChild);
+  details.append(summary,body);
+  if(key&&pgAutomationFoldOpen('chart:'+key,false))details.open=true;
+  card.replaceWith(details);
+ });
+}
+function pgAutomationReportSectionParts(el){
+ const title=el.querySelector('.report-section-title'),meta=el.querySelector('.report-section-meta');
+ const count=meta?(String(meta.textContent||'').match(/(\d+)/)||[])[1]||'':'';
+ const stats=[...el.querySelectorAll('.report-stat')].map(stat=>({
+  label:String(stat.querySelector('.report-stat-label')?.textContent||'').trim(),
+  value:String(stat.querySelector('.report-stat-value')?.textContent||'').trim()
+ }));
+ if(title)title.remove();
+ if(meta)meta.remove();
+ return {count,stats,html:el.innerHTML};
+}
+function pgAutomationStatValue(stats,match){
+ const found=(stats||[]).find(stat=>match.test(stat.label));
+ const value=found?found.value:'';
+ return value&&value!=='--'&&value!=='NA'?value:'';
+}
+// Greyscale describes the display; a colour-volume pass measures its brightest
+// patch, which is not the panel's peak. Keep them apart.
+function pgAutomationVerdictHtml(state){
+ const stats=state.verdictStats||[];
+ const cells=[];
+ const push=(value,label)=>{if(value)cells.push({value,label});};
+ const de=(stats||[]).find(stat=>/^Average (ΔE|Delta)/i.test(stat.label));
+ if(de&&de.value&&de.value!=='--')cells.push({value:de.value,label:de.label.replace(/^Average /,'Average ')});
+ push(pgAutomationStatValue(stats,/^Peak Luminance$/),'Peak luminance');
+ push(pgAutomationStatValue(stats,/^Black Level$/),'Black level');
+ push(pgAutomationStatValue(stats,/^Contrast Ratio$/),'Contrast');
+ push(pgAutomationStatValue(stats,/^Average CCT$/),'Average CCT');
+ if(state.totalReadings)cells.push({value:String(state.totalReadings),label:'Readings'});
+ const checks=state.checkTotals;
+ if(checks&&checks.total)cells.push({value:String(checks.total),label:checks.flagged?checks.flagged+' unverified':'Checks verified',flag:!!checks.flagged});
+ if(state.incomplete)cells.push({value:'Incomplete',label:state.incomplete,flag:true});
+ if(!cells.length)return '';
+ return '<div class="auto-verdict">'+cells.map(cell=>'<div class="auto-verdict-cell'+(cell.flag?' auto-verdict-flag':'')+'"><span class="auto-verdict-value">'+pgAutomationEscape(cell.value)+'</span><span class="auto-verdict-label">'+pgAutomationEscape(cell.label)+'</span></div>').join('')+'</div>';
+}
+function pgAutomationQueueIndex(view,state){
+ pgAutomation.indexTimers=pgAutomation.indexTimers||{};
+ clearTimeout(pgAutomation.indexTimers[view]);
+ pgAutomation.indexTimers[view]=setTimeout(()=>{
+  if(pgAutomation.jobViews[view]===state)pgAutomationRenderJobIndex(view,state);
+ },40);
+}
+function pgAutomationExpandAll(view,open){
+ const target=pgAutomationJobTarget(view);if(!target)return;
+ target.querySelectorAll('details.auto-section').forEach(el=>{
+  if(el.open!==open)el.open=open;
+ });
+ if(!open)target.querySelectorAll('details.auto-chart').forEach(el=>{if(el.open)el.open=false;});
+}
+// <details> toggle does not bubble, so listen in the capture phase.
+function pgAutomationWatchFolds(target,view){
+ if(!target)return;
+ target.dataset.jobView=view;
+ if(target.dataset.foldWatch==='1')return;
+ target.dataset.foldWatch='1';
+ target.addEventListener('toggle',event=>{
+  const el=event.target;
+  if(!el||!el.matches||!el.matches('details.auto-section,details.auto-chart'))return;
+  const key=el.dataset.sectionKey?el.dataset.sectionKey:el.dataset.chartKey?'chart:'+el.dataset.chartKey:'';
+  if(el.dataset.foldTransient!=='1')pgAutomationSetFold(key,el.open);
+  const view=target.dataset.jobView;
+  if(el.open&&el.classList.contains('auto-section'))pgAutomationRenderSectionCharts(view,el);
+  const state=pgAutomation.jobViews[view];
+  if(state)pgAutomationQueueIndex(view,state);
+ },true);
 }
 function pgAutomationGraphToggle(view,key,value){const state=pgAutomation.jobViews[view];if(!state)return;state[key]=value;state.graphSignature=null;pgAutomationRenderJobGraphs(view,state);}
 function pgAutomationGraphGroup(key){return /^grey/.test(key)?'greyscale':/^colors/.test(key)?'colors':/^saturations/.test(key)?'saturations':key;}
@@ -1815,38 +2267,167 @@ async function pgAutomationRenderJobGraphs(view,state){
   if(!s.snapshot?.readings?.length||(s.phase==='pre'?!state.showBefore:!state.showAfter))return;
   const snap=s.snapshot;
   const label=s.phase==='pre'?(s.isLive?'Before (measuring)':'Before'):s.phase==='post'?(s.isLive?'After (measuring)':'After'):s.isLive?'Live calibration':'Saved calibration';
-  entries.push({title:label+' · '+(s.key==='grey'?'1D LUT':s.key==='3d'?'3D LUT':s.key==='dv-profile'?'Dolby Vision profile':pgAutomationSeriesLabel(s.key)),snapshot:snap});
+  const kind=s.key==='grey'?'1D LUT':s.key==='3d'?'3D LUT':s.key==='dv-profile'?'Dolby Vision profile':pgAutomationSeriesLabel(s.key);
+  // A calibration-phase section is named for its stage alone: "Saved
+  // calibration" is true of every one of them and crowds the index.
+  entries.push({key:'m:'+s.phase+':'+s.key,name:s.phase==='calibration'?kind:label+' · '+kind,phase:s.phase,
+   greyscale:pgAutomationGraphGroup(s.key)==='greyscale',isLive:!!s.isLive,title:label+' · '+kind,snapshot:snap});
  });
  // Render at least as wide as the destination, including the source card's
  // padding. The shared canvas renderer handles display pixel density/zoom.
- const renderWidth=Math.max(1100,Math.ceil(target.offsetWidth)+80);
- const signature=JSON.stringify([entries,renderWidth,window.devicePixelRatio||1,typeof pgDesktopZoom==='number'?pgDesktopZoom:1]);if(signature===state.graphSignature)return;
- if(!entries.length){target.innerHTML='<p class="auto-muted">'+(observer?'No measurements for the current stage yet. '+pgAutomationEscape(pgAutomationStageLabel(data.active_stage||'Between stages'))+'. Previous-stage graphs are not shown as live.':!state.showBefore&&!state.showAfter?'Select a comparison to show graphs.':'No measured graph data is available for this selection yet.')+'</p>';state.graphSignature=signature;return;}
+ // Measure the panel, not the section body: a folded section has no width.
+ const host=pgAutomationJobTarget(view);
+ const renderWidth=Math.max(1100,Math.ceil(target.offsetWidth||(host?host.offsetWidth:0)||0)+80);
+ state.renderWidth=renderWidth;
+ const scale=[renderWidth,window.devicePixelRatio||1,typeof pgDesktopZoom==='number'?pgDesktopZoom:1];
+ const signature=JSON.stringify([entries,...scale]);
+ if(signature===state.graphSignature){pgAutomationPaintVerdict(view,state);return;}
+ // Only the running stage's measurements can move mid-run, and rebuilding the
+ // skeleton for them throws away every finished section's chart image. When
+ // nothing structural changed, refresh that one stage in place instead.
+ const structure=JSON.stringify([entries.map(e=>[e.key,e.name,e.phase,e.greyscale,e.isLive]),...scale]);
+ const reuse=state.graphStructure===structure&&(state.entries||[]).length&&target.querySelector('details.auto-section');
+ const changed=reuse?entries.filter(entry=>JSON.stringify(entry)!==JSON.stringify(state.entries.find(old=>old.key===entry.key))):entries;
+ if(!entries.length){
+  target.innerHTML='<p class="auto-muted">'+(observer?'No measurements for the current stage yet. '+pgAutomationEscape(pgAutomationStageLabel(data.active_stage||'Between stages'))+'. Previous-stage graphs are not shown as live.':!state.showBefore&&!state.showAfter?'Select a comparison to show graphs.':'No measured graph data is available for this selection yet.')+'</p>';
+  state.entries=entries;state.graphStructure=structure;state.graphSignature=signature;
+  state.sectionStats={};state.sectionBadges={};state.sectionLive={};state.verdictStats=[];state.totalReadings=0;
+  pgAutomationPaintVerdict(view,state);pgAutomationRenderJobIndex(view,state);
+  return;
+ }
  if(typeof meterFullAutoCalBuildSnapshotReportSections!=='function'){target.textContent='The calibration chart renderer is unavailable. Reload the page to load it.';return;}
  pgAutomation.reportBusy=true;
- const previousWidth=document.body.style.getPropertyValue('--automation-report-width');
- document.body.style.setProperty('--automation-report-width',renderWidth+'px');
- document.body.classList.add('pg-automation-report-render');
  try{
-  const html=await meterFullAutoCalBuildSnapshotReportSections(entries);
+  // Headline numbers for every stage, no canvas work. Charts are drawn later,
+  // one section at a time, and only for sections somebody opened.
+  const series={};
+  const html=await meterFullAutoCalBuildSnapshotReportSections(changed,{summaryOnly:true,onSeries:(entry,value)=>{series[entry.key]=value;}});
   if(pgAutomation.jobViews[view]===state&&state.data===data){
-   target.innerHTML=html;state.graphSignature=signature;
-   target.querySelectorAll('.report-section-title').forEach(title=>{title.setAttribute('role','heading');title.setAttribute('aria-level','4');});
-   target.querySelectorAll('.report-table-wrap').forEach(table=>{const detail=document.createElement('details'),summary=document.createElement('summary');summary.textContent='Measured values';table.before(detail);detail.append(summary,table);});
+   const template=document.createElement('template');template.innerHTML=html;
+   const rendered=[...template.content.querySelectorAll('.report-section')];
+   state.entries=entries;state.graphStructure=structure;
+   if(!reuse){state.sectionStats={};state.sectionBadges={};state.sectionLive={};state.sectionSeries={};}
+   Object.assign(state.sectionSeries,series);
+   const built=rendered.map(section=>{
+    const key=section.dataset.reportKey||'';
+    const entry=entries.find(candidate=>candidate.key===key)||{};
+    const parts=pgAutomationReportSectionParts(section);
+    const count=Number(parts.count||0);
+    state.sectionStats[key]={count,stats:parts.stats};
+    const average=pgAutomationStatValue(parts.stats,/^Average (ΔE|Delta)/i);
+    state.sectionBadges[key]=average?'ΔE '+average:(count?count+' readings':'');
+    if(entry.isLive)state.sectionLive[key]={count,average:average||''};
+    if(reuse){
+     const existing=[...target.querySelectorAll('details.auto-section')].find(el=>el.dataset.sectionKey===key);
+     if(existing){
+      // A folded section keeps its charts, but must redraw when reopened.
+      delete existing.dataset.chartsReady;
+      const summary=existing.querySelector('.report-summary'),fresh=section.querySelector('.report-summary');
+      if(summary&&fresh)summary.replaceWith(fresh);
+      const figure=existing.querySelector('.auto-section-figure');
+      if(figure)figure.innerHTML=entry.isLive?pgAutomationLiveFigureHtml(count,average):pgAutomationEscape(count?count+' readings':'No readings');
+     }
+    }
+    return pgAutomationSection(key,entry.name||key,count?count+' readings':'No readings',parts.html,
+     {defaultOpen:true,live:!!entry.isLive,figureHtml:entry.isLive?pgAutomationLiveFigureHtml(count,average):''});
+   });
+   // A renderer response with no sections in it is shown whole; measurements
+   // are never dropped because this panel could not take them apart.
+   if(!reuse)target.innerHTML=rendered.length?built.join(''):html;
+   const phaseRank={post:3,calibration:2,pre:1};
+   let total=0,verdict=null;
+   entries.forEach(entry=>{
+    const parts=state.sectionStats[entry.key];if(!parts)return;
+    total+=parts.count;
+    if(entry.greyscale&&parts.count&&(!verdict||(phaseRank[entry.phase]||0)>verdict.rank))verdict={rank:phaseRank[entry.phase]||0,stats:parts.stats};
+   });
+   state.graphSignature=signature;state.totalReadings=total;state.verdictStats=verdict?verdict.stats:[];
+   const measured=pgAutomationStatValue(state.verdictStats,/^Average (ΔE|Delta)/i);
+   pgAutomation.jobFigures=pgAutomation.jobFigures||{};
+   if(measured)pgAutomation.jobFigures[state.runId+':'+state.index]='ΔE '+measured;
+   else delete pgAutomation.jobFigures[state.runId+':'+state.index];
+   pgAutomationPaintVerdict(view,state);pgAutomationRenderJobIndex(view,state);pgAutomationSyncLiveMark();
   }
- }catch(e){if(pgAutomation.jobViews[view]===state)target.textContent='Unable to draw measurements: '+e.message;}
+ }catch(e){if(pgAutomation.jobViews[view]===state)target.textContent='Unable to summarise measurements: '+e.message;}
  finally{
+  pgAutomation.reportBusy=false;
+  pgAutomationDrainReports();
+  if(pgAutomation.jobViews[view]===state)target.querySelectorAll('details.auto-section[open]').forEach(section=>pgAutomationRenderSectionCharts(view,section));
+ }
+}
+function pgAutomationPaintVerdict(view,state){
+ const strip=pgAutomationJobTarget(view)?.querySelector('[data-job-verdict]');
+ if(strip)strip.innerHTML=pgAutomationVerdictHtml(state);
+}
+function pgAutomationDrainReports(){
+ const graphs=pgAutomation.pendingJobGraphs||{};pgAutomation.pendingJobGraphs={};
+ Object.entries(graphs).forEach(([nextView,nextState])=>{if(pgAutomation.jobViews[nextView]===nextState)pgAutomationRenderJobGraphs(nextView,nextState);});
+ const sections=pgAutomation.pendingSections||[];pgAutomation.pendingSections=[];
+ sections.forEach(pending=>{
+  const host=pgAutomationJobTarget(pending.view);
+  const section=host?[...host.querySelectorAll('details.auto-section')].find(el=>el.dataset.sectionKey===pending.key):null;
+  if(section&&section.open)pgAutomationRenderSectionCharts(pending.view,section);
+ });
+}
+// Draw one stage's charts. Each call drives the real calibration canvases
+// off-screen through the shared report mutex, so it must stay one at a time.
+async function pgAutomationRenderSectionCharts(view,sectionEl){
+ const state=pgAutomation.jobViews[view];
+ if(!state||!sectionEl||!sectionEl.isConnected)return;
+ if(sectionEl.dataset.chartsReady==='1'||sectionEl.dataset.chartsBusy==='1')return;
+ const key=sectionEl.dataset.sectionKey||'';
+ const entry=(state.entries||[]).find(candidate=>candidate.key===key);
+ if(!entry||typeof meterFullAutoCalBuildSnapshotReportSections!=='function')return;
+ if(pgAutomation.reportBusy){
+  pgAutomation.pendingSections=pgAutomation.pendingSections||[];
+  if(!pgAutomation.pendingSections.some(pending=>pending.view===view&&pending.key===key))pgAutomation.pendingSections.push({view,key});
+  return;
+ }
+ const body=sectionEl.querySelector('.auto-section-body');
+ if(!body)return;
+ const data=state.data;
+ const previousWidth=document.body.style.getPropertyValue('--automation-report-width');
+ try{
+  sectionEl.dataset.chartsBusy='1';
+  pgAutomation.reportBusy=true;
+  document.body.style.setProperty('--automation-report-width',(state.renderWidth||1100)+'px');
+  document.body.classList.add('pg-automation-report-render');
+  let series=null;
+  const html=await meterFullAutoCalBuildSnapshotReportSections([entry],{onSeries:(_entry,value)=>{series=value;}});
+  if(pgAutomation.jobViews[view]===state&&state.data===data&&sectionEl.isConnected){
+   const template=document.createElement('template');template.innerHTML=html;
+   const rendered=template.content.querySelector('.report-section');
+   const parts=rendered?pgAutomationReportSectionParts(rendered):null;
+   body.innerHTML=parts?parts.html:html;
+   if(rendered)pgAutomationFoldCharts(body);
+   if(entry.isLive){
+    // The shared renderer has already restored the manual series. Use only
+    // the snapshot captured while this chart's saved context was installed.
+    state.sectionLive=state.sectionLive||{};
+    state.sectionLive[key]={count:Number(parts&&parts.count)||0,
+     average:(parts?pgAutomationStatValue(parts.stats,/^Average (ΔE|Delta)/i):'')||''};
+    if(series){state.sectionSeries=state.sectionSeries||{};state.sectionSeries[key]=series;}
+   }
+   sectionEl.dataset.chartsReady='1';
+   if(entry.isLive)pgAutomationSyncLiveMark();
+   pgAutomationQueueIndex(view,state);
+  }
+ }catch(e){
+  if(sectionEl.isConnected)body.insertAdjacentHTML('beforeend','<p class="auto-muted" role="status">Unable to draw these measurements: '+pgAutomationEscape(e.message)+'</p>');
+ }
+ finally{
+  delete sectionEl.dataset.chartsBusy;
   document.body.classList.remove('pg-automation-report-render');pgAutomation.reportBusy=false;
   if(previousWidth)document.body.style.setProperty('--automation-report-width',previousWidth);
   else document.body.style.removeProperty('--automation-report-width');
-  const pending=pgAutomation.pendingJobGraphs||{};pgAutomation.pendingJobGraphs={};
-  Object.entries(pending).forEach(([nextView,nextState])=>{if(pgAutomation.jobViews[nextView]===nextState)pgAutomationRenderJobGraphs(nextView,nextState);});
+  pgAutomationDrainReports();
  }
 }
 
 // Rebuild snapshots after a window/screen change, even if measurements have
 // not changed. Reuse saved job data; resizing must never make device requests.
-if(typeof window!=='undefined')window.addEventListener('resize',()=>{
+if(typeof window!=='undefined')window.addEventListener('resize',event=>{
+ if(event.pgHeightOnlyTabletResize)return;
  clearTimeout(pgAutomation.graphResizeTimer);
  pgAutomation.graphResizeTimer=setTimeout(()=>{
   Object.entries(pgAutomation.jobViews||{}).forEach(([view,state])=>{

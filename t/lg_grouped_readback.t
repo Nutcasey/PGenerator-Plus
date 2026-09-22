@@ -58,8 +58,11 @@ my $reply_all=sub {
 {
  @requests=(); @diag=();
  local *main::lg_request=$reply_all;
- my $read=main::lg_picture_get_workflow('127.0.0.1','test-key',1,[@keys],'hdrCinema','hdmi1',0,'hdr10',0,'picture');
+ my $read=main::lg_picture_get_workflow('127.0.0.1','test-key',1,[@keys],'hdrCinema','hdmi1',0,'hdr10',1,'picture');
  is($read->{status},'ok','grouped read succeeds');
+ my @saved=grep {$_->{label} eq 'settings:observations' && $_->{data}{saved}} @diag;
+ is(scalar(@saved),1,'grouped read evidence is saved in one transaction');
+ cmp_ok($saved[0]{data}{records},'>=',scalar(@keys),'the transaction contains every returned key');
  ok(!grep({ $_->{label} =~ /^picture_get:grouped-/ } @diag),'a fully grouped readback records no fallback event');
  my @grouped=grep { $_->{label} eq 'get_picture_settings' } @requests;
  is(scalar(@grouped),1,'exactly one grouped picture read');
