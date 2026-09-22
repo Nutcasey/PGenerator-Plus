@@ -24,6 +24,7 @@ const c={console,window:{},config:{},document:{getElementById:id=>elements[id]||
  meterReadings:[],meterWhiteReading:null,meterPreviewSignalCodePolicies:new Map(),
  meterGreyTvControlsActive:()=>false,meterUseLgGreyscale21:()=>false,
  getVal:id=>elements[id]?.value||'',
+  meterLivePlotPublish:()=>{},meterLiveCiePublish:()=>{},meterLiveCieInset:()=>{},
  getChartCtx:()=>ctx,meterGreyRefMode:()=> 'absolute',meterSeparateLumEnabled:()=>false,
  meterDeltaEForm:()=> 'deitp',meterDeltaEFormLabel:()=> 'ΔE ITP',meterGrayWorldWeight:()=>1,
  meterGreyRefModeLabel:()=> 'Absolute Y w/o gamma',meterGreyscaleChartWhiteReference:()=>({Y:100,luminance:100}),

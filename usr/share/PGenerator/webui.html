@@ -17,6 +17,27 @@
   }
  }catch(e){}
 })();
+/* Phone steadiness. This must run before any other script registers.
+   - The dashboard stays hidden until the first layout pass has restored the
+     saved card order and collapse state; pgLayoutInit reveals it (4 s fallback).
+   - Touch inputs use at least 16px in CSS to avoid focus zoom without limiting
+     the operator's pinch zoom.
+   - Toolbar and keyboard height changes are labelled for the width-based
+     layout and chart handlers to skip. Other resize listeners still run;
+     header offsets, CSS viewport units and ResizeObservers handle height.
+     Synthetic chart resizes and orientation width changes remain untouched. */
+(function(){
+ var root=document.documentElement;
+ root.setAttribute('data-pg-booting','1');
+ setTimeout(function(){root.removeAttribute('data-pg-booting');},4000);
+ if(!window.matchMedia||!window.matchMedia('(pointer:coarse)').matches) return;
+ var width=window.innerWidth;
+ window.addEventListener('resize',function(e){
+  var now=window.innerWidth;
+  if(e.isTrusted&&now===width&&document.body&&document.body.classList.contains('layout-tablet')) e.pgHeightOnlyTabletResize=true;
+  width=now;
+ });
+})();
 </script>
 <style>
 __PG_CSS_THEME__

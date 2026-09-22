@@ -28,10 +28,16 @@
  #automationCard .auto-progress-status>span:empty{display:none}
  #automationCard .auto-live{display:inline-flex;align-items:center;gap:7px}
  #automationCard .auto-live::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--text2);flex:none}
- #automationCard .auto-live[data-state=live]::before{background:var(--green);animation:pgAutomationBreathe 4s ease-in-out infinite}
+ #automationCard .auto-live[data-state=live]::before{background:var(--green);animation:pgAutomationPing 2.4s ease-out infinite}
  #automationCard .auto-live[data-state=delayed]::before{background:var(--orange)}
  #automationCard .auto-live[data-state=lost]::before{background:var(--red)}
  @keyframes pgAutomationBreathe{0%,100%{opacity:1}50%{opacity:.35}}
+ /* The ring is the dot's own colour thinned to nothing. Where color-mix is
+    unavailable the shadow is invalid and the dot simply stays lit. */
+ @keyframes pgAutomationPing{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--green) 60%,transparent)}100%{box-shadow:0 0 0 8px color-mix(in srgb,var(--green) 0%,transparent)}}
+ @supports not (color:color-mix(in srgb,red,blue)){
+  #automationCard .auto-live[data-state=live]::before,:is(#automationCard,#pgAutomationCalibrationCard) .auto-section-dot{animation:pgAutomationBreathe 2.4s ease-in-out infinite}
+ }
  @media (prefers-reduced-motion:reduce){#automationCard .auto-live::before{animation:none}}
  @media (max-width:700px){
   #automationCard .auto-readouts{grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -390,6 +396,90 @@
  #automationCard .auto-settings-table th{font-weight:600;color:var(--text2);background:var(--surface-inset)}
  #automationCard th,#automationCard td{vertical-align:top}
  #automationCard .auto-setting-problem{border-left:3px solid var(--orange);padding-left:10px;margin:10px 0}
+ /* Job report: a section is a named rule across the panel with its own figure
+    on the right, so a folded report still reads as a set of answers. */
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section,
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-chart{margin:0}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-head,
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-chart-head{display:flex;align-items:center;gap:10px;list-style:none;cursor:pointer}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-head::-webkit-details-marker,
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-chart-head::-webkit-details-marker{display:none}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-head::before,
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-chart-head::before{content:"";flex:none;width:6px;height:6px;margin-right:2px;border-right:1.5px solid var(--text2);border-bottom:1.5px solid var(--text2);transform:rotate(-45deg);transition:transform .18s ease}
+ :is(#automationCard,#pgAutomationCalibrationCard) details[open]>.auto-section-head::before,
+ :is(#automationCard,#pgAutomationCalibrationCard) details[open]>.auto-chart-head::before{transform:rotate(45deg)}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-head{padding:13px 0;font-weight:400}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section+.auto-section{border-top:1px solid var(--divider,var(--border))}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-name{font-size:.92rem;font-weight:600;color:var(--text);white-space:nowrap}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-rule{flex:1;min-width:12px;height:1px;background:var(--divider,var(--border))}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-figure{flex:none;font-size:.78rem;color:var(--text2);font-variant-numeric:tabular-nums;white-space:nowrap}
+ /* A stage that is running says so in its own header, so a folded section never
+    has to be opened to find out the meter is working inside it. The dot shares
+    the run banner's 2.4s cycle: one heartbeat for the whole panel. */
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--green);animation:pgAutomationPing 2.4s ease-out infinite}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-running .auto-section-figure{color:var(--text)}
+ :is(#automationCard,#pgAutomationCalibrationCard) .pg-live-overlay{border-radius:8px}
+ :is(#automationCard,#pgAutomationCalibrationCard) tr.auto-live-row>td{background:var(--surface-inset,rgba(255,255,255,.05))}
+ :is(#automationCard,#pgAutomationCalibrationCard) tr.auto-live-row>td:first-child{box-shadow:inset 2px 0 0 var(--green)}
+ /* Narrow widths keep the progress count and drop the quality figure: during a
+    run the question is how much longer, and the chart below carries the rest. */
+ @media(max-width:900px){:is(#automationCard,#pgAutomationCalibrationCard) .auto-section-figure-trail{display:none}}
+ @media(prefers-reduced-motion:reduce){:is(#automationCard,#pgAutomationCalibrationCard) .auto-section-dot{animation:none}}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-flag{flex:none;display:grid;place-items:center;width:15px;height:15px;border-radius:50%;background:var(--orange);color:var(--surface-card,var(--bg));font-size:.62rem;font-weight:700;line-height:1}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-body{padding:0 0 18px}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-body>h4:first-child{margin-top:0}
+ /* Charts sit a level in and stay quieter than the sections that hold them. */
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-chart{margin-left:16px;border-left:1px solid var(--divider,var(--border));padding-left:14px}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-chart-head{padding:9px 0;font-weight:400}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-chart-head .report-chart-name{flex:1;min-width:0;font-size:.8rem;font-weight:600;color:var(--text)}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-chart-head .report-chart-figure{flex:none;font-size:.76rem;color:var(--text2);font-variant-numeric:tabular-nums}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-chart-body{padding:2px 0 14px}
+ :is(#automationCard,#pgAutomationCalibrationCard) .report-chart-note{margin:0 0 8px;font-size:.73rem;color:var(--text2)}
+ :is(#automationCard,#pgAutomationCalibrationCard) .report-notice{margin:0 0 14px}
+ :is(#automationCard,#pgAutomationCalibrationCard) [data-job-graphs]>.auto-section{min-width:0}
+ /* What the job measured, before anything is opened. Numbers and flags only. */
+ :is(#automationCard,#pgAutomationCalibrationCard) [data-job-verdict]:empty{display:none}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-verdict{display:flex;flex-wrap:wrap;gap:12px 0;margin:14px 0 4px;padding:14px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-verdict-cell{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1 1 auto;padding:0 16px;border-left:1px solid var(--divider,var(--border))}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-verdict-cell:first-child{border-left:0;padding-left:0}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-verdict-value{font-size:1.1rem;font-weight:500;line-height:1.15;letter-spacing:-.01em;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--text)}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-verdict-label{font-size:.72rem;line-height:1.35;color:var(--text2)}
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-verdict-flag .auto-verdict-value,
+ :is(#automationCard,#pgAutomationCalibrationCard) .auto-verdict-flag .auto-verdict-label{color:var(--orange)}
+ #automationCard .auto-job-controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px}
+ #automationCard .auto-job-controls label{display:flex;align-items:center;gap:6px}
+ #automationCard .auto-controls-gap{flex:1;min-width:0}
+ /* The job list doubles as the index: one navigation, not two side by side. */
+ #automationCard .auto-job-row{border-bottom:1px solid var(--border)}
+ #automationCard .auto-job-row .auto-job-pick{border-bottom:0}
+ #automationCard .auto-job-line{display:flex;align-items:baseline;gap:10px}
+ #automationCard .auto-job-line>strong{flex:1;min-width:0}
+ #automationCard .auto-job-figure{flex:none;color:var(--text2);font-size:.78rem;font-variant-numeric:tabular-nums}
+ #automationCard .auto-job-index:empty{display:none}
+ #automationCard .auto-index{list-style:none;margin:0 0 10px;padding:0 0 0 10px}
+ #automationCard .auto-index-row{margin:0}
+ #automationCard .auto-index-link{display:flex;align-items:baseline;gap:8px;width:100%;padding:5px 10px 5px 12px;color:var(--text2);background:transparent;border:0;border-left:2px solid transparent;text-align:left;font:inherit;font-size:.78rem;cursor:pointer}
+ #automationCard .auto-index-link:hover{color:var(--text);background:var(--hover-bg)}
+ #automationCard .auto-index-current .auto-index-link{color:var(--text);border-left-color:var(--accent)}
+ #automationCard .auto-index-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ #automationCard .auto-index-figure{flex:none;font-variant-numeric:tabular-nums;font-size:.74rem;color:var(--text2)}
+ #automationCard .auto-index-chart .auto-index-link{padding-left:26px;font-size:.75rem}
+ #automationCard .auto-index-absent{display:flex;align-items:baseline;gap:8px;padding:5px 10px 5px 14px;color:var(--text-disabled,var(--text2));opacity:.6;font-size:.78rem}
+ #automationCard .auto-index-absent .auto-index-name{flex:1;min-width:0}
+ #automationCard .auto-batch-summary{margin:0 0 10px;padding-bottom:10px;border-bottom:1px solid var(--border);color:var(--text2);font-size:.78rem;font-variant-numeric:tabular-nums}
+ /* Stacked layout: the index reads as a jump bar above the results. */
+ @media(max-width:900px){
+  #automationCard .auto-index{display:flex;flex-wrap:wrap;gap:4px;padding:6px 0 0}
+  #automationCard .auto-index-link{width:auto;padding:5px 10px;border:1px solid var(--border);border-radius:999px}
+  #automationCard .auto-index-current .auto-index-link{border-color:var(--accent)}
+  #automationCard .auto-index-chart{display:none}
+  #automationCard .auto-index-absent{padding:5px 10px;border:1px dashed var(--border);border-radius:999px}
+  #automationCard .auto-index-name{white-space:normal}
+ }
+ @media(prefers-reduced-motion:reduce){
+  :is(#automationCard,#pgAutomationCalibrationCard) .auto-section-head::before,
+  :is(#automationCard,#pgAutomationCalibrationCard) .auto-chart-head::before{transition:none}
+ }
  @media(max-width:900px){#automationCard .auto-job-layout{grid-template-columns:minmax(0,1fr)}}
 </style>
 <section class="card span2" id="pgAutomationCalibrationCard" data-widget="automation-calibration" data-desktop-workspace="calibration" data-desktop-order="9" style="display:none">
@@ -442,7 +532,7 @@
  #pgAutomationCalibrationCard .report-section-title{font-size:.9rem;font-weight:600}
  #pgAutomationCalibrationCard .report-section-meta{font-size:.73rem;color:var(--text2);margin:4px 0 0}
  #pgAutomationCalibrationCard .report-chart-title{font-size:.8rem;font-weight:600;margin:12px 0 8px}
- #pgAutomationCalibrationCard [data-job-settings],#pgAutomationCalibrationCard [data-job-toggles],#pgAutomationCalibrationCard [data-job-nav]{display:none}
+ #pgAutomationCalibrationCard [data-job-settings],#pgAutomationCalibrationCard [data-job-toggles],#pgAutomationCalibrationCard [data-job-nav],#pgAutomationCalibrationCard [data-job-verdict]{display:none}
  #pgAutomationCalibrationCard [data-job-error]{color:var(--orange)}
  @media(max-width:700px){#pgAutomationCalibrationCard .auto-observer-overview{align-items:flex-start;flex-direction:column;gap:14px;padding:14px}#pgAutomationCalibrationCard .auto-observer-actions{justify-content:flex-start;max-width:none}#pgAutomationCalibrationCard .report-summary{grid-template-columns:repeat(2,minmax(0,1fr))}#pgAutomationCalibrationCard .auto-observer-title{font-size:1rem}}
  @media(prefers-reduced-motion:reduce){:is(#automationCard,#pgAutomationCalibrationCard) .btn{transition:none;transform:none}}

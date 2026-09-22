@@ -3011,11 +3011,28 @@ function pgPanelBelongsToActiveWorkspace(panel){
  return available&&((workspace===pgDesktopWorkspace)||!!globalPanel);
 }
 function pgSyncDesktopPanels(){
+ // Tablet order is the DOM order the operator drags into place. Writing the
+ // desktop order here too reshuffled the phone layout on every automation
+ // poll, and each viewport resize cleared it again.
+ if(!document.body.classList.contains('layout-desktop')){
+  pgPlaceAutomationObserverForTablet();
+  return;
+ }
  document.querySelectorAll('.dashboard > .card[data-desktop-workspace]').forEach(panel=>{
   panel.setAttribute('data-desktop-active',pgPanelBelongsToActiveWorkspace(panel)?'true':'false');
   const order=Number(panel.getAttribute('data-desktop-order')||0);
   if(Number.isFinite(order)) panel.style.order=String(order);
  });
+}
+// While a batch owns calibration, Tablet puts its read-only observer ahead of
+// the draggable cards (Display Settings stays pinned first by CSS). Desktop
+// shows the same card in the Calibration workspace instead.
+function pgPlaceAutomationObserverForTablet(){
+ const dash=document.querySelector('.dashboard');
+ const card=document.getElementById('pgAutomationCalibrationCard');
+ if(!dash||!card||card.parentNode!==dash||card.style.display==='none') return;
+ const first=dash.querySelector(':scope > .card');
+ if(first&&first!==card) dash.insertBefore(card,first);
 }
 function pgSyncMeterDesktopWorkspaceAvailability(){
  const desktop=document.body.classList.contains('layout-desktop');
@@ -3256,6 +3273,8 @@ function pgLayoutInit(){
  pgUpdateHeaderOffset();
  pgApplyLayout({resetWorkspace:true});
  meterSyncConfigurationCollapse();
+ // Reveal the dashboard after this task's order and collapse passes finish.
+ requestAnimationFrame(()=>document.documentElement.removeAttribute('data-pg-booting'));
  const header=document.querySelector('.header');
  if(header&&window.ResizeObserver){
   try{ new ResizeObserver(pgUpdateHeaderOffset).observe(header); }catch(e){}
@@ -3269,7 +3288,7 @@ function pgLayoutInit(){
    pgLayoutPanelObserver.observe(dashboard,{subtree:true,attributes:true,attributeFilter:['style']});
   }catch(e){}
  }
- window.addEventListener('resize',()=>{
+ window.addEventListener('resize',event=>{
   const width=Math.round(window.innerWidth||0);
   const height=Math.round(window.innerHeight||0);
   // Chart code deliberately dispatches synthetic resize events after a
@@ -3280,6 +3299,7 @@ function pgLayoutInit(){
   pgLayoutViewportWidth=width;
   pgLayoutViewportHeight=height;
   pgUpdateHeaderOffset();
+  if(event.pgHeightOnlyTabletResize)return;
   if(pgLayoutResizeTimer) clearTimeout(pgLayoutResizeTimer);
   pgLayoutResizeTimer=setTimeout(()=>pgApplyLayout(),80);
  });
@@ -13943,6 +13963,8 @@ function meterRecoverSeries(s){
  const recoveredChartKey=meterActiveSeriesKey;
  const recoveredReadings=Array.isArray(meterReadings)?[...meterReadings]:[];
  const drawRecoveredCharts=()=>{
+  // Report summaries need the recovered colour maths, not canvas paints.
+  if(s._skip_chart_draw) return;
   if(meterActiveSeriesKey!==recoveredChartKey||meterSeriesChartRevision!==recoveredChartRevision) return;
   if(recoveredReadings.length>0){
    const sorted=(type==='colors'||type==='saturations')?[...recoveredReadings]:[...recoveredReadings].sort((a,b)=>(a.ire||0)-(b.ire||0));
@@ -14743,7 +14765,8 @@ function meterCacheSeriesState(status,options){
 }
 
 function meterRestoreSeriesFromCache(key){
- const cached=meterResolveSeriesSnapshotFromCache(key,arguments[1]||{});
+ const options=arguments[1]||{};
+ const cached=meterResolveSeriesSnapshotFromCache(key,options);
  if(!cached||!cached.steps||cached.steps.length===0) return false;
  const sourceSnap=meterSeriesCache&&meterSeriesCache[key];
  if(sourceSnap&&sourceSnap.source_format==='hcfr-chc'&&sourceSnap.source_session_id) meterActiveHcfrSessionId=sourceSnap.source_session_id;
@@ -14782,7 +14805,8 @@ function meterRestoreSeriesFromCache(key){
   readings:restoredReadings,
   white_reading:restoredWhite,
   black_reading:restoredBlack,
-  _defer_cache_persist:true
+  _defer_cache_persist:true,
+  _skip_chart_draw:!!options.skipChartDraw
  });
  meterSharedSeriesId=null;
  return true;
