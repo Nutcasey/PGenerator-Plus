@@ -179,4 +179,95 @@ is(PGAutomation::decode_json($main::_idle_card_status)->{state},'held','cancelle
 $owner=''; $render_hook=undef; $now+=5;
 main::webui_idle_card_tick();
 is(PGAutomation::decode_json($main::_idle_card_status)->{state},'showing','cancelled refresh retries promptly after ownership clears');
+
+# Failed conversions and exceptions must reclaim both the candidate and
+# older interrupted attempts without retiring the installed image/preview.
+reset_idle(); request($auto);
+my $active_command=read_pattern();
+my $active_state=$main::_idle_card{shown};
+my ($active_image)=$active_command=~/^IMAGE=(.+)$/m;
+my $preview="$main::var_dir/running/idle_card_preview.png";
+open(my $preview_fh,'>',$preview) or die $!;
+print $preview_fh 'preview'; close $preview_fh;
+my @retained=sort ($active_image,$preview);
+my $render=\&main::webui_idle_card_render;
+for my $failure ('convert-error','invalid-png','render-exception','sequence-exception','post-render-exception') {
+ my $orphan="$main::var_dir/running/idle_card_orphan.png";
+ open(my $fh,'>',$orphan) or die $!; print $fh 'orphan'; close $fh;
+ my $sequence=\&PGIdleCard::sequence_pattern;
+ local *main::webui_idle_card_render=sub {
+  my $result=$render->(@_);
+  die "injected render failure\n" if $failure eq 'render-exception';
+  if($failure eq 'invalid-png') {
+   open(my $bad,'>',$_[3]) or die $!; print $bad 'partial PNG'; close $bad;
+  }
+  return $failure eq 'convert-error' ? 'injected conversion failure' : $result;
+ };
+ local *PGIdleCard::sequence_pattern=sub {
+  die "injected sequence failure\n" if $failure eq 'sequence-exception';
+  return $sequence->(@_);
+ };
+ local *main::video_program_stop=sub {die "injected post-render failure\n" if $failure eq 'post-render-exception'};
+ my $reply=eval { request({name=>'screensaver'}) };
+ my $error=$@;
+ ok($failure=~/exception/ ? $error=~/injected/ : ($reply->{status}||'') eq 'error',"$failure is reported");
+ is_deeply([sort glob("$main::var_dir/running/idle_card_*.png")],\@retained,"$failure leaves only the active image and preview");
+ is(read_pattern(),$active_command,"$failure preserves the installed command");
+ is($main::_idle_card{shown},$active_state,"$failure preserves published metadata");
+}
+{
+ local *File::Temp::new=sub {die "injected temporary file creation failure\n"};
+ my $reply=eval {request({name=>'screensaver'})};
+ is($@,'','temporary file creation failure does not escape the request handler');
+ is($reply->{status},'error','temporary file creation failure returns a JSON error');
+ like($reply->{message},qr/image could not be created/,'creation error identifies the failed operation');
+ is(read_pattern(),$active_command,'creation failure preserves the installed command');
+ is_deeply([sort glob("$main::var_dir/running/idle_card_*.png")],\@retained,'creation failure preserves the active image and preview');
+}
+{
+ local *main::create_return_file=sub {die "injected notification failure\n"};
+ eval { request({name=>'screensaver'}) };
+ like($@,qr/injected notification failure/,'exercise exception after command installation');
+ my ($image)=read_pattern()=~/^IMAGE=(.+)$/m;
+ ok(-s $image,'an exception after installation keeps the committed image');
+ ok(!-e $active_image,'successful replacement retires the previous image');
+}
+
+# Reader and renderer workers are created before either publishes an update.
+# The reader must see live nested metadata through the shared JSON snapshot,
+# even though its private timer hash contains an unrelated inherited copy.
+reset_idle();
+is(main::webui_route_device_lane('POST','/api/pattern'),'renderer','Show now and Hide use the timer lane');
+ok(!main::webui_route_is_concurrent_safe('POST','/api/pattern'),'pattern posts cannot bypass renderer serialisation');
+my $read_queue=Thread::Queue->new();
+my $write_queue=Thread::Queue->new();
+my $read_replies=Thread::Queue->new();
+my $write_replies=Thread::Queue->new();
+my $reader=threads->create(sub {
+ $main::_idle_card{shown}={card=>{headline=>'reader-local stale copy'}};
+ while($read_queue->dequeue() eq 'read') {
+  $read_replies->enqueue(main::webui_idle_card_status_json());
+ }
+});
+my $writer=threads->create(sub {
+ while((my $action=$write_queue->dequeue()) ne 'quit') {
+  if($action eq 'automatic') { $now+=11; main::webui_idle_card_tick(); }
+  elsif($action eq 'patch') { write_pattern("DRAW=RECTANGLE\nRGB=0,0,0\n"); }
+  else { request({name=>$action,only_if_idle=>JSON::PP::true}); }
+  $now+=2; main::webui_idle_card_tick();
+  $write_replies->enqueue('done');
+ }
+});
+for my $case (['automatic','showing'],['stop','waiting'],['screensaver','showing'],['patch','busy']) {
+ $write_queue->enqueue($case->[0]); $write_replies->dequeue();
+ $read_queue->enqueue('read');
+ my $status=PGAutomation::decode_json($read_replies->dequeue());
+ is($status->{state},$case->[1],"reader sees $case->[0] state from renderer thread");
+ if($case->[1] eq 'showing') {
+  is(scalar @{$status->{card}{positions}},120,'reader receives the complete hop positions');
+  isnt($status->{card}{headline},'reader-local stale copy','reader ignores its private timer hash');
+ } else { ok(!exists($status->{card}),'reader sees obsolete card metadata removed'); }
+}
+$write_queue->enqueue('quit'); $read_queue->enqueue('quit');
+$writer->join(); $reader->join();
 done_testing();

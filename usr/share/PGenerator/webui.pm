@@ -28,6 +28,7 @@ use PGSignalCode qw(
 use PGLGCapabilities qw(lg_recipe lg_setting_contracts lg_setting_values_agree lg_normalize_setting_value lg_operation_contract lg_best_settings_plan lg_settings_selection_plan lg_calibration_mode_contract lg_picture_mode_read_forbidden);
 use Fcntl qw(O_NONBLOCK O_WRONLY LOCK_EX LOCK_UN);
 use File::Path qw(make_path);
+use File::Temp ();
 use JSON::PP ();
 use PGAutomation ();
 use PGCalibrationLog ();
@@ -12430,6 +12431,8 @@ sub webui_pattern_file_signature (@) {
 # lane runs the check between requests, so the card is serialised with every
 # other /api/pattern write and a patch always wins the race.
 our $_idle_card_status :shared = "";
+# Renderer-lane state only: the timer and /api/pattern run on that one worker.
+# Other lanes read the shared JSON snapshot, never this nested mutable hash.
 our %_idle_card=();
 our $IDLE_CARD_REFRESH_S=60;
 our $IDLE_CARD_BLOCKED_RECHECK_S=5;
@@ -12610,20 +12613,52 @@ sub webui_idle_card_note (@) {
  &log("WebUI: idle card $message");
 }
 
+# Reclaim interrupted attempts even when the next render fails. Keep every
+# image the installed command references; unreadable commands defer cleanup.
+sub webui_idle_card_cleanup (@) {
+ my %keep=map { my $file=$_; $file=~s{//+}{/}g; ($file=>1) } @_;
+ open(my $fh,"<",$command_file) or return;
+ return if(!-f $fh);
+ while(my $line=<$fh>) {
+  if($line=~/^IMAGE=(.+?)\s*$/) {
+   (my $file=$1)=~s{//+}{/}g;
+   $keep{$file}=1;
+  }
+ }
+ return if(!close($fh));
+ opendir(my $dir,"$var_dir/running") or return;
+ my @names=readdir($dir);
+ closedir($dir);
+ foreach my $name (@names) {
+  next if($name!~/^idle_card_.+\.png$/ || $name eq "idle_card_preview.png");
+  (my $file="$var_dir/running/$name")=~s{//+}{/}g;
+  next if($keep{$file});
+  unlink($file) or &log("WebUI: could not remove unused idle card image $name: $!");
+ }
+}
+
 # Builds the frame sequence for PATTERN_NAME=screensaver. Called from
 # webui_pattern on the renderer lane, for the idle timer and for Show now.
 sub webui_idle_card_pattern (@) {
  my ($w,$h,$signal_mode,$black_rgb)=@_;
  my $started=&webui_idle_card_now();
+ &webui_idle_card_cleanup();
  my $model=&webui_idle_card_model();
  my $levels=PGIdleCard::text_levels($signal_mode,$pgenerator_conf{"dv_transport"});
  my $scale=$h/1080;
  $scale=0.5 if($scale < 0.5);
  $scale=2.5 if($scale > 2.5);
- my $stamp=sprintf("%d_%d",time(),int(rand(1000000)));
  # A new path per render: the renderer keeps a loaded texture until the
- # IMAGE path changes, so rewriting one file would leave the old card up.
- my $file="$var_dir/running/idle_card_$stamp.png";
+ # IMAGE path changes. Keep the temporary-file owner until installation so
+ # returns and exceptions both discard an unused image immediately.
+ my $image=eval { File::Temp->new(TEMPLATE=>"idle_card_XXXXXXXX",SUFFIX=>".png",DIR=>"$var_dir/running",UNLINK=>1) };
+ if(!$image) {
+  my $error=$@||"unknown error";
+  $error=~s/\s+$//;
+  &log("WebUI: idle card image creation failed: $error");
+  return ("","The idle card image could not be created.");
+ }
+ my $file=$image->filename();
  $file=~s{//+}{/}g;
  my $error=&webui_idle_card_render($model,$levels,$scale,$file);
  my ($card_w,$card_h)=$error eq "" ? PGIdleCard::png_dimensions($file) : ();
@@ -12634,7 +12669,6 @@ sub webui_idle_card_pattern (@) {
  }
  $error="The card image could not be read back." if($error eq "" && !($card_w && $card_h));
  if($error ne "") {
-  unlink($file);
   return ("",$error);
  }
  my $positions=PGIdleCard::hop_positions($w,$h,$card_w,$card_h,$PGIdleCard::HOP_COUNT);
@@ -12649,7 +12683,7 @@ sub webui_idle_card_pattern (@) {
    positions=>[map { [$_->[0]+0,$_->[1]+0] } @$positions],shown_at=>time(),headline=>$model->{headline},mismatches=>$model->{mismatches}+0},
  };
  &log("WebUI: idle card rendered (mode=$signal_mode card=${card_w}x$card_h screen=${w}x$h text=$levels->{value}/$levels->{label} mismatches=$model->{mismatches} render_ms=$elapsed_ms)");
- return ($pat,"",$shown,$file);
+ return ($pat,"",$shown,$file,$image);
 }
 
 # One pass of the idle timer, run by the renderer lane whenever it has been
@@ -13498,7 +13532,7 @@ sub webui_pattern (@) {
 	 local $webui_pattern_image_source_range=($pattern_color_format == 0) ? $source_range : "FULL";
 	 my $w=$w_s || 1920; my $h=$h_s || 1080;
  my $pat=""; my $img=&webui_pattern_diag_image_file($name); my $pat_bits=&webui_pattern_effective_bits("",$signal_mode);
- my ($idle_card_shown,$idle_card_file);
+ my ($idle_card_shown,$idle_card_file,$idle_card_image);
  # Simulated-meter capture: raw patch codes (pre bit-scaling) recorded for
  # spotread_sim at the end of this sub. Named solids/complex patterns are
  # resolved just before the record call.
@@ -13682,7 +13716,7 @@ elsif($pat eq "" && $name eq "uploaded_diag_video") {
  # it: a pattern written meanwhile by another lane or a TCP client wins.
  elsif($pat eq "" && $name eq "screensaver") {
   my ($card_pat,$card_error);
-  ($card_pat,$card_error,$idle_card_shown,$idle_card_file)=&webui_idle_card_pattern($w,$h,$signal_mode,$black_rgb);
+  ($card_pat,$card_error,$idle_card_shown,$idle_card_file,$idle_card_image)=&webui_idle_card_pattern($w,$h,$signal_mode,$black_rgb);
   return '{"status":"error","message":"'.&_webui_json_escape($card_error).'"}' if($card_pat eq "");
   $pat=$card_pat;
   $pat_bits=&webui_pattern_effective_bits("IMAGE",$signal_mode);
@@ -13701,7 +13735,6 @@ elsif($pat eq "" && $name eq "uploaded_diag_video") {
    Time::HiRes::sleep(0.5);
   }
   if(!&pattern_generator_is_running()) {
-   unlink($idle_card_file) if(defined($idle_card_file));
    &log("WebUI: renderer unavailable for pattern $name");
    return '{"status":"error","message":"Pattern renderer is not running"}';
   }
@@ -13711,14 +13744,12 @@ elsif($pat eq "" && $name eq "uploaded_diag_video") {
  if($idle_policy_request || $unowned_only) {
   my $blocked=&webui_pattern_request_guard($body,"");
   if($blocked ne "") {
-   unlink($idle_card_file) if(defined($idle_card_file));
    return $blocked;
   }
   if($idle_only) {
    my ($allowed,$current)=&webui_pattern_idle_refresh_allowed();
    if(!$allowed || &webui_pattern_file_signature() ne $idle_signature
       || ($name eq "screensaver" && (&webui_idle_card_video_playing() || &webui_idle_card_stabilization_wanted()))) {
-    unlink($idle_card_file) if(defined($idle_card_file));
     $current=~s/[^a-zA-Z0-9_ -]//g;
     return '{"status":"ok","pattern":"'.$current.'","unchanged":true}';
    }
@@ -13757,18 +13788,15 @@ elsif($pat eq "" && $name eq "uploaded_diag_video") {
  if(!$written) {
   my $error="$!";
   unlink($tmp);
-  unlink($idle_card_file) if(defined($idle_card_file));
   &log("WebUI: failed to install pattern $name: $error");
   return '{"status":"error","message":"Could not install the pattern command"}';
  }
+ $idle_card_image->unlink_on_destroy(0) if($idle_card_image);
  if(ref($idle_card_shown) eq "HASH") {
   $_idle_card{shown}=$idle_card_shown;
   # Retire old images only after the new command has been installed. A
   # cancelled render must leave the displayed card and its metadata intact.
-  foreach my $old (glob("$var_dir/running/idle_card_*.png")) {
-   (my $normalised=$old)=~s{//+}{/}g;
-   unlink($old) if($normalised ne $idle_card_file && $normalised!~/idle_card_preview\.png$/);
-  }
+  &webui_idle_card_cleanup($idle_card_file);
  }
  &create_return_file();
  # Record what is now on screen for the simulated meter. Patch/stabilization
