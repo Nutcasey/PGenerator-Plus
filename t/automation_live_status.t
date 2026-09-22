@@ -245,6 +245,23 @@ is($catalogue->{capability_profile_id},'fixture','the caller\'s copy is not chan
  }
  $clock=2025;main::_update_live(sub {});
  is($status->()->{time_estimate}{calculated_at},2025,'live ETA recovers on the next successful calculation');
+ {
+  # A daemon transition can retain the last running estimate in the manifest.
+  # Advisory failures must not bring its old countdown into a finished run.
+  local *PGAutomationETA::update=sub {die "simulated ETA failure\n"};
+  for my $state (qw(paused stopping complete complete-with-warnings failed stopped interrupted)) {
+   main::webui_automation_with_manifest($run_id,sub {$_[0]{status}=$state;$_[0]{time_estimate}=$durable;return $_[0];});
+   my $saved=PGAutomation::read_raw($run_file);
+   main::_update_live(sub {});
+   is($status->()->{status},$state,"$state transition is published despite ETA failure");
+   ok(!exists($status->()->{time_estimate}),"$state clears the countdown even when ETA fails");
+   main::_update_live(sub {});
+   ok(!exists($status->()->{time_estimate}),"$state stays cleared on a repeated ETA failure");
+   is(PGAutomation::read_raw($run_file),$saved,"$state ETA failures preserve the manifest and timing evidence");
+  }
+ }
+ $clock=2045;main::_update_run(sub {$_[0]{status}='running';});
+ is($status->()->{time_estimate}{calculated_at},2045,'resuming after terminal ETA failures calculates a fresh estimate');
  main::_update_run(sub {$_[0]{status}='paused';});
  ok(!exists($status->()->{time_estimate}),'successful clearing on pause does not resurrect a saved estimate');
 }

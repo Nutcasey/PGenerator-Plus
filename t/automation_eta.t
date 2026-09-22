@@ -84,7 +84,7 @@ is($r->{time_estimate}{scope},'unknown','completed sub-pass never shows a false 
 $r->{active_stage}='volume-done';
 PGAutomationETA::update($r,1320,[]);
 is($r->{time_estimate}{scope},'unknown','previous stage pace does not leak into volume solve/upload');
-for my $status (qw(paused stopped complete failed interrupted stopping)) {
+for my $status (qw(paused stopped complete complete-with-warnings failed interrupted stopping)) {
  $r=run();PGAutomationETA::update($r,1300,[]);$r->{status}=$status;
  PGAutomationETA::update($r,1310,[]);
  ok(!exists($r->{time_estimate}),"$status clears live ETA");

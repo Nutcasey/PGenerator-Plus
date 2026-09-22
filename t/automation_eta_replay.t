@@ -76,11 +76,14 @@ cmp_ok($tail,'>',1500,'HDR finishing estimate includes the measured long shadow-
 ok(!defined($volume->{time_estimate}{pass_remaining_seconds}),'frozen profile counters do not fabricate an active measurement pass');
 PGAutomationETA::update($volume,1600,[]);
 is($volume->{time_estimate}{stage_remaining_seconds},$tail-300,'finishing estimate counts down from its own phase start');
-for my $status (qw(complete failed stopped interrupted)) {
+for my $status (qw(complete complete-with-warnings completed done failed error stopped interrupted)) {
  $volume->{worker_status}{status}=$status;
  PGAutomationETA::update($volume,10000,[]);
  ok(!defined($volume->{time_estimate}{stage_remaining_seconds}),"$status worker cannot grow a tail or fallback estimate");
 }
+$volume->{worker_status}{status}='running';
+PGAutomationETA::update($volume,10000,[]);
+ok($volume->{time_estimate}{stage_remaining_seconds}>0,'restarted worker resumes its tail estimate');
 my $cold={id=>'local',status=>'running',stage_started_at=>1000,active_item=>0,active_stage=>'greyscale-done',items=>[PGAutomation::clone($job)]};
 my $local=[{profile=>PGAutomationETA::profile($job),stage=>'greyscale-done',seconds=>600,completed_at=>1}];
 {

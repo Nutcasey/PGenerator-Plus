@@ -56,6 +56,23 @@ const root=path.resolve(__dirname,'../../usr/share/PGenerator')+'/';
    await pgAutomationRenderSectionCharts('live',section);
    return {failed,ready:section.dataset.chartsReady};
   }),{failed:{busy:'',reportBusy:false,ready:'',message:true},ready:'1'},'renderer exceptions release both busy flags and allow retry');
+  assert.deepEqual(await page.evaluate(async()=>{
+   const section=document.querySelector('details.auto-section-running'),style=document.body.style;
+   const original=style.setProperty;let injected=false;
+   style.setProperty('--automation-report-width','975px');
+   delete section.dataset.chartsReady;
+   style.setProperty=function(...args){
+    if(!injected&&args[0]==='--automation-report-width'){injected=true;throw new Error('simulated setup failure');}
+    return original.apply(this,args);
+   };
+   try{await pgAutomationRenderSectionCharts('live',section);}finally{style.setProperty=original;}
+   const failed={busy:section.dataset.chartsBusy||'',reportBusy:pgAutomation.reportBusy,
+    width:style.getPropertyValue('--automation-report-width'),rendering:document.body.classList.contains('pg-automation-report-render'),
+    message:section.textContent.includes('simulated setup failure')};
+   await pgAutomationRenderSectionCharts('live',section);
+   style.removeProperty('--automation-report-width');
+   return {failed,ready:section.dataset.chartsReady};
+  }),{failed:{busy:'',reportBusy:false,width:'975px',rendering:false,message:true},ready:'1'},'setup exceptions release both busy flags, restore layout and allow retry');
   await page.evaluate(()=>{window.sectionBefore=document.querySelector('details.auto-section-running');});
   await page.evaluate(async()=>{data.live.snapshot.readings.push({name:'10%',ire:10,Y:3});await pgAutomationFetchJob('live',pgAutomation.jobViews.live);});
   await page.waitForFunction(()=>!pgAutomation.reportBusy);
@@ -99,6 +116,6 @@ const root=path.resolve(__dirname,'../../usr/share/PGenerator')+'/';
   assert.equal(await page.evaluate(()=>liveMark),null,'another job cannot borrow matching patch names from the previous job');
   assert.equal(await page.$('details[data-pg-live]'),null,'previous job charts stop receiving live overlays');
   assert.deepEqual(errors,[]);
-  console.log('PASS missing-body/renderer recovery, report headlines, folded charts, restored marker context and resumed jobs');
+  console.log('PASS missing-body/setup/renderer recovery, report headlines, folded charts, restored marker context and resumed jobs');
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

@@ -268,7 +268,7 @@ sub update {
  my $index=$preflight ? 0 : $run->{active_item};
  my $stage=$run->{active_stage}||'';
  my $worker=$run->{worker_status}||{};
- my $worker_finished=($worker->{status}||'') =~ /^(?:complete|completed|done|failed|error|stopped|interrupted)$/;
+ my $worker_finished=($worker->{status}||'') =~ /^(?:complete(?:-with-warnings)?|completed|done|failed|error|stopped|interrupted)$/;
  my $clock=$run->{worker_timing}||{};
  my $items=$run->{items}||[];
  # Recalculate immediately after queue edits, stage/pass changes or a resume.

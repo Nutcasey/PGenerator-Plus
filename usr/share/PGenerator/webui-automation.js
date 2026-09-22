@@ -2386,12 +2386,12 @@ async function pgAutomationRenderSectionCharts(view,sectionEl){
  const body=sectionEl.querySelector('.auto-section-body');
  if(!body)return;
  const data=state.data;
- sectionEl.dataset.chartsBusy='1';
- pgAutomation.reportBusy=true;
  const previousWidth=document.body.style.getPropertyValue('--automation-report-width');
- document.body.style.setProperty('--automation-report-width',(state.renderWidth||1100)+'px');
- document.body.classList.add('pg-automation-report-render');
  try{
+  sectionEl.dataset.chartsBusy='1';
+  pgAutomation.reportBusy=true;
+  document.body.style.setProperty('--automation-report-width',(state.renderWidth||1100)+'px');
+  document.body.classList.add('pg-automation-report-render');
   let series=null;
   const html=await meterFullAutoCalBuildSnapshotReportSections([entry],{onSeries:(_entry,value)=>{series=value;}});
   if(pgAutomation.jobViews[view]===state&&state.data===data&&sectionEl.isConnected){

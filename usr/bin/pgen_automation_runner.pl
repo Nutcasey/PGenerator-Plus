@@ -271,7 +271,9 @@ sub _publish_status {
         } else {
             delete $LIVE{time_estimate};
             delete $status{time_estimate};
-            # A failed advisory calculation must not mask durable evidence.
+            # Running estimates may fall back to durable evidence. Paused,
+            # stopping and terminal runs must not regain a live countdown,
+            # even when the advisory calculation fails before clearing it.
             $status{time_estimate}=$STATUS_BASE->{time_estimate}
                 if !$ok && ($status{status}||'') eq 'running' && defined($STATUS_BASE->{time_estimate});
         }
