@@ -26,6 +26,10 @@ const drift = item => {
 // Values come back from the vm realm, where Array.prototype is not this
 // realm's, so a strict deep compare fails on identical contents. Marshal first.
 const fields = item => clone((drift(item) || []).map(d => d.field).sort());
+// Build recipes inside the vm realm so the reference the resolver reads back
+// belongs to the same realm as the job under test.
+const setRecipes = recipes => evaluate('pgAutomation.recipes = ' + JSON.stringify(recipes));
+const recipeFrom = (mode, extra) => Object.assign(build(mode), extra);
 
 // --- a pristine job is not drifted ---
 for (const mode of ['sdr-filmmaker','sdr-cinema','hdr-filmmaker','dv-filmmaker']) {
@@ -62,10 +66,46 @@ for (const mode of ['sdr-filmmaker','sdr-cinema','hdr-filmmaker','dv-filmmaker']
 {
  const job = build('sdr-filmmaker');
  job.settings.backlight = 42;
- assert.deepEqual(fields(job), ['settings.backlight'], 'a changed panel light setting is reported');
+ // The three panel-light aliases collapse to one logical control, so a
+ // brightness change is reported under settings.panel_light, not the alias.
+ assert.deepEqual(fields(job), ['settings.panel_light'], 'a changed panel light setting is reported');
  const gone = build('sdr-filmmaker');
  delete gone.settings.contrast;
  assert.deepEqual(fields(gone), ['settings.contrast'], 'a dropped TV control is reported too');
+}
+
+// --- a rebound panel-light alias at the same level is not drift ---
+// Which of backlight/oledLight/oledPixelBrightness a TV exposes is a
+// compatibility binding, not an edit. Comparing the aliases separately would
+// report settings.backlight: 95 -> unset and settings.oledLight: unset -> 95
+// for a routine rebind -- exactly the noise the badge must not produce.
+{
+ const job = build('sdr-filmmaker');
+ const level = job.settings.backlight;
+ delete job.settings.backlight;
+ job.settings.oledLight = level;
+ assert.equal(drift(job), null, 'rebinding the panel-light control to an equivalent alias at the same level is not drift');
+ job.settings.oledLight = level + 10;
+ assert.deepEqual(fields(job), ['settings.panel_light'], 'but a real brightness change under any alias still is');
+}
+
+// --- a change inside a structured TV setting is drift ---
+// Some settings carry a map, not a scalar (a legacy blackLevel value is one).
+// String(obj) is "[object Object]" for every object, so a scalar compare would
+// call two different maps equal and hide the change. Only the recipe branch can
+// hit this (its reference is a stored value that may itself be a map).
+{
+ const recipe = recipeFrom('sdr-filmmaker', {id:'r1', name:'Maps'});
+ recipe.settings.blackLevel = {mode:'auto'};
+ setRecipes([recipe]);
+ const untouched = clone(recipe);
+ untouched.source_recipe = 'r1';
+ assert.equal(drift(untouched), null, 'an identical structured setting is not reported');
+ const changed = clone(recipe);
+ changed.source_recipe = 'r1';
+ changed.settings.blackLevel = {mode:'low'};
+ assert.deepEqual(fields(changed), ['settings.blackLevel'],
+  'a change inside a structured setting value is reported, not hidden by String() coercion');
 }
 
 // --- a measured value written back by the runner is NOT drift ---
@@ -143,11 +183,7 @@ for (const mode of ['sdr-filmmaker','sdr-cinema','hdr-filmmaker','dv-filmmaker']
 // the reference branch above cannot badge it -- including the job behind the
 // original incident. Stamping source_recipe at add time gives the badge a
 // reference to compare against: the recipe as it stands now.
-//
-// Build recipes inside the vm realm so the reference the resolver reads back
-// belongs to the same realm as the job under test.
-const setRecipes = recipes => evaluate('pgAutomation.recipes = ' + JSON.stringify(recipes));
-const recipeFrom = (mode, extra) => Object.assign(build(mode), extra);
+// (setRecipes and recipeFrom are defined with the other helpers at the top.)
 
 // A job added from a recipe and left untouched matches it: no badge.
 {
@@ -166,7 +202,7 @@ const recipeFrom = (mode, extra) => Object.assign(build(mode), extra);
  job.source_recipe = 'r1';
  job.calibration.dark_detail = false;
  job.settings.backlight = 42;
- assert.deepEqual(fields(job), ['calibration.dark_detail','settings.backlight'],
+ assert.deepEqual(fields(job), ['calibration.dark_detail','settings.panel_light'],
   'a job edited after being added from a recipe reports exactly the edited fields');
 }
 

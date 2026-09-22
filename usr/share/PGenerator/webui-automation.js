@@ -47,6 +47,17 @@ function pgAutomationDriftSame(a,b){
  if(a===undefined&&b===undefined)return true;
  if(typeof a==='boolean'||typeof b==='boolean')return (a?1:0)===(b?1:0);
  if(a==null||b==null)return a==null&&b==null;
+ // Some TV settings carry a structured value (a legacy blackLevel map is one),
+ // not a scalar. String(obj) is "[object Object]" for every object, so a scalar
+ // compare would silently call two different maps equal. Recurse over the
+ // contents, keeping the loose scalar coercion at the leaves.
+ if(typeof a==='object'||typeof b==='object'){
+  if(typeof a!=='object'||typeof b!=='object')return false;
+  for(const key of new Set([...Object.keys(a),...Object.keys(b)])){
+   if(!pgAutomationDriftSame(a[key],b[key]))return false;
+  }
+  return true;
+ }
  return String(a)===String(b);
 }
 // What a job is measured against, plus how to name that source, or null when
@@ -94,11 +105,28 @@ function pgAutomationDriftAgainst(item,reference){
  }
  // The TV settings block is open-ended, so compare the union of both sides
  // rather than a fixed list: a control the job added or dropped is drift too.
- for(const key of new Set([...Object.keys(reference.settings||{}),...Object.keys(item.settings||{})])){
-  const was=(reference.settings||{})[key],now=(item.settings||{})[key];
+ // The panel-light aliases are handled below, not here.
+ const refSettings=reference.settings||{},itemSettings=item.settings||{};
+ for(const key of new Set([...Object.keys(refSettings),...Object.keys(itemSettings)])){
+  if(PG_AUTOMATION_PANEL_ALIASES.includes(key))continue;
+  const was=refSettings[key],now=itemSettings[key];
   if(!pgAutomationDriftSame(was,now))drift.push({field:'settings.'+key,was,now});
  }
+ // Which of backlight/oledLight/oledPixelBrightness a TV exposes is a
+ // compatibility binding, not an edit: pgAutomationRecipeFromForm rewrites the
+ // job to the current alias on every save. Comparing the aliases separately
+ // would report the old one unset and the new one set for a routine rebind, so
+ // compare the level once under one name -- a real brightness change still is.
+ const wasLevel=pgAutomationPanelLevel(refSettings),nowLevel=pgAutomationPanelLevel(itemSettings);
+ if(!pgAutomationDriftSame(wasLevel,nowLevel))drift.push({field:'settings.panel_light',was:wasLevel,now:nowLevel});
  return drift.length?drift:null;
+}
+// The three panel-light control aliases. Only one is set on a job at a time
+// (the editor deletes the rest), so the first present is the panel-light level.
+const PG_AUTOMATION_PANEL_ALIASES=['backlight','oledLight','oledPixelBrightness'];
+function pgAutomationPanelLevel(settings){
+ for(const key of PG_AUTOMATION_PANEL_ALIASES){if(settings&&settings[key]!=null)return settings[key];}
+ return undefined;
 }
 // The differences between a queued job and the reference it was built from --
 // a saved recipe or a template -- or null when there are none and for a job
@@ -110,7 +138,10 @@ function pgAutomationTemplateDrift(item){
  return resolved?pgAutomationDriftAgainst(item,resolved.reference):null;
 }
 function pgAutomationDriftText(drift){
- return drift.map(d=>d.field+': '+(d.was===undefined?'unset':d.was)+' → '+(d.now===undefined?'unset':d.now)).join('\n');
+ // Format each side through pgAutomationSettingValue so a structured value
+ // reads as its JSON, not "[object Object]"; undefined stays "unset".
+ const show=value=>value===undefined?'unset':pgAutomationSettingValue(value);
+ return drift.map(d=>d.field+': '+show(d.was)+' → '+show(d.now)).join('\n');
 }
 // A job named after its recipe or template but carrying different values is
 // invisible otherwise: the row shows only the name. Name the count on the row
