@@ -119,7 +119,9 @@ for (const mode of ['sdr-filmmaker','sdr-cinema','hdr-filmmaker','dv-filmmaker']
  job.calibration.dark_detail = false;
  context.__item = job;
  const badge = evaluate('pgAutomationDriftBadge(__item)');
- assert.match(badge, /Modified from reference · 1 field</, 'one field is singular');
+ // "Differs from" is one stem shared by the template and recipe badges: it is
+ // accurate whether the job was edited or the reference moved underneath it.
+ assert.match(badge, /Differs from reference · 1 field</, 'one field is singular');
  assert.match(badge, /title="[^"]*dark_detail/, 'the differing field is named on hover');
  job.calibration.solve_cube_size = 17;
  context.__item = job;
@@ -134,6 +136,91 @@ for (const mode of ['sdr-filmmaker','sdr-cinema','hdr-filmmaker','dv-filmmaker']
  context.__item = job;
  const badge = evaluate('pgAutomationDriftBadge(__item)');
  assert.ok(!/onmouseover="alert/.test(badge), 'a hostile template_mode is escaped, not rendered');
+}
+
+// --- provenance: jobs added from a saved recipe ---
+// A job built by "Add job" or added from a recipe carries no template_id, so
+// the reference branch above cannot badge it -- including the job behind the
+// original incident. Stamping source_recipe at add time gives the badge a
+// reference to compare against: the recipe as it stands now.
+//
+// Build recipes inside the vm realm so the reference the resolver reads back
+// belongs to the same realm as the job under test.
+const setRecipes = recipes => evaluate('pgAutomation.recipes = ' + JSON.stringify(recipes));
+const recipeFrom = (mode, extra) => Object.assign(build(mode), extra);
+
+// A job added from a recipe and left untouched matches it: no badge.
+{
+ const recipe = recipeFrom('sdr-filmmaker', {id:'r1', name:'My SDR'});
+ setRecipes([recipe]);
+ const job = clone(recipe);
+ job.source_recipe = 'r1';
+ assert.equal(drift(job), null, 'a job added from a recipe and untouched reports no drift');
+}
+
+// An edited recipe job reports exactly the fields that were changed.
+{
+ const recipe = recipeFrom('sdr-filmmaker', {id:'r1', name:'My SDR'});
+ setRecipes([recipe]);
+ const job = clone(recipe);
+ job.source_recipe = 'r1';
+ job.calibration.dark_detail = false;
+ job.settings.backlight = 42;
+ assert.deepEqual(fields(job), ['calibration.dark_detail','settings.backlight'],
+  'a job edited after being added from a recipe reports exactly the edited fields');
+}
+
+// A recipe deleted after the job was queued leaves the job with no reference.
+{
+ const recipe = recipeFrom('sdr-filmmaker', {id:'r1', name:'My SDR'});
+ setRecipes([recipe]);
+ const job = clone(recipe);
+ job.source_recipe = 'gone';
+ job.calibration.dark_detail = false;
+ assert.equal(drift(job), null, 'a job whose recipe was deleted reports nothing rather than a badge with no reference');
+}
+
+// source_recipe is proximate provenance and wins over template_id. The recipe
+// here was itself widened to a 17-node solve; a job added from it and left
+// untouched matches the recipe, so it reports nothing -- even though it still
+// differs from the bare reference the recipe descends from. Were the template
+// consulted instead, that 17 vs 33 would be reported.
+{
+ const recipe = recipeFrom('sdr-filmmaker', {id:'r1', name:'Wide solve'});
+ recipe.calibration.solve_cube_size = 17;
+ setRecipes([recipe]);
+ const job = clone(recipe);
+ job.source_recipe = 'r1';
+ assert.equal(drift(job), null, 'source_recipe wins over template_id: compared against the recipe, not the reference it descends from');
+}
+
+// Saving a queue item as a new recipe must not carry its source_recipe: a
+// recipe is a source, not a derivative, and a saved recipe claiming to descend
+// from another recipe would badge every job added from it.
+{
+ context.__item = {id:'x', name:'From queue', source_recipe:'r1', settings:{}};
+ const saved = clone(evaluate('pgAutomationRecipeForSave(__item, false)'));
+ assert.ok(!('source_recipe' in saved), 'a queue item saved as a new recipe drops its source_recipe');
+ assert.ok(!('id' in saved), 'and drops the id so the server assigns a fresh one');
+ const edited = clone(evaluate('pgAutomationRecipeForSave(__item, true)'));
+ assert.ok(!('source_recipe' in edited), 'editing an existing recipe drops source_recipe too');
+ assert.equal(edited.id, 'x', 'but keeps the id it is updating');
+}
+
+// The recipe name flows into the badge title, so a hostile name must be
+// escaped. Unlike the template_mode case above -- where a hostile mode never
+// resolves and the badge is empty -- a recipe is found by id, so the badge
+// renders and this genuinely exercises the escaping.
+{
+ const recipe = recipeFrom('sdr-filmmaker', {id:'r1', name:'Nasty" onmouseover="alert(1)'});
+ setRecipes([recipe]);
+ const job = clone(recipe);
+ job.source_recipe = 'r1';
+ job.calibration.dark_detail = false;
+ context.__item = job;
+ const badge = evaluate('pgAutomationDriftBadge(__item)');
+ assert.match(badge, /Differs from recipe · 1 field</, 'a drifted recipe job renders a recipe badge');
+ assert.ok(!/onmouseover="alert/.test(badge), 'a hostile recipe name is escaped, not rendered');
 }
 
 console.log('ok');

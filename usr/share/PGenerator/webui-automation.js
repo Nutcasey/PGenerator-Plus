@@ -49,20 +49,44 @@ function pgAutomationDriftSame(a,b){
  if(a==null||b==null)return a==null&&b==null;
  return String(a)===String(b);
 }
-// The differences between a queued job and the reference template it was built
-// from, or null when there are none and for a job with no template to compare
-// against. Returns every differing field so the operator can judge intent --
-// naming them is the point; guessing which were deliberate is not.
-function pgAutomationTemplateDrift(item){
- if(!item||!item.template_mode||!/^reference-settings-v/.test(item.template_id||''))return null;
- let reference;
- try{
-  reference=pgAutomationReferenceItems([item.template_mode],{
-   panel_key:item.panel_light&&item.panel_light.key,
-   ccss_override:item.ccss_override,refresh_rate:item.refresh_rate,
-  })[0];
- }catch(error){return null;}
- if(!reference)return null;
+// What a job is measured against, plus how to name that source, or null when
+// there is nothing to compare it to. Two kinds of provenance resolve here:
+//
+//  - source_recipe: the job was added from a saved recipe (see
+//    pgAutomationQueueAdd). This is the proximate provenance and wins over any
+//    template the recipe itself descends from -- the operator is asking "does
+//    this still match the recipe I chose?", not the reference behind it. The
+//    recipe is compared as it stands now; one deleted after the job was queued
+//    has no reference, so the job is left unbadged. The recipe is snapshotted
+//    so it is normalized the same way the queued job already was (an untouched
+//    job then matches its recipe exactly, even for a legacy recipe that the
+//    snapshot upgrades in place).
+//  - template_id: the job was built straight from a reference template, which
+//    is rebuilt fresh and compared. Nothing about the template is stored.
+function pgAutomationDriftReference(item){
+ if(!item)return null;
+ if(item.source_recipe){
+  const recipe=(pgAutomation.recipes||[]).find(entry=>entry&&entry.id===item.source_recipe);
+  if(!recipe)return null;
+  return {reference:pgAutomationSnapshot(recipe),noun:'recipe',source:'the “'+(recipe.name||'saved')+'” recipe'};
+ }
+ if(item.template_mode&&/^reference-settings-v/.test(item.template_id||'')){
+  let reference;
+  try{
+   reference=pgAutomationReferenceItems([item.template_mode],{
+    panel_key:item.panel_light&&item.panel_light.key,
+    ccss_override:item.ccss_override,refresh_rate:item.refresh_rate,
+   })[0];
+  }catch(error){return null;}
+  if(!reference)return null;
+  return {reference,noun:'reference',source:'the '+item.template_mode+' reference settings'};
+ }
+ return null;
+}
+// The fields in which a job differs from a resolved reference, or null when
+// they are identical. Shared by the template and recipe branches; the field
+// list and loose compares below are the whole design of what counts as drift.
+function pgAutomationDriftAgainst(item,reference){
  const drift=[];
  for(const path of PG_AUTOMATION_DRIFT_FIELDS){
   const was=pgAutomationDriftAt(reference,path),now=pgAutomationDriftAt(item,path);
@@ -76,18 +100,31 @@ function pgAutomationTemplateDrift(item){
  }
  return drift.length?drift:null;
 }
+// The differences between a queued job and the reference it was built from --
+// a saved recipe or a template -- or null when there are none and for a job
+// with no provenance to compare against. Returns every differing field so the
+// operator can judge intent -- naming them is the point; guessing which were
+// deliberate is not.
+function pgAutomationTemplateDrift(item){
+ const resolved=pgAutomationDriftReference(item);
+ return resolved?pgAutomationDriftAgainst(item,resolved.reference):null;
+}
 function pgAutomationDriftText(drift){
  return drift.map(d=>d.field+': '+(d.was===undefined?'unset':d.was)+' → '+(d.now===undefined?'unset':d.now)).join('\n');
 }
-// A job named after its template but carrying different values is invisible
-// otherwise: the row shows only the name. Name the count on the row and the
-// fields on hover, so a job that is not what it says it is can be spotted
-// before it calibrates rather than afterwards in the run record.
+// A job named after its recipe or template but carrying different values is
+// invisible otherwise: the row shows only the name. Name the count on the row
+// and the fields on hover, so a job that is not what it says it is can be
+// spotted before it calibrates rather than afterwards in the run record. The
+// row reads "Differs from recipe/reference": one stem that is accurate whether
+// the job was edited or the reference it points at moved underneath it.
 function pgAutomationDriftBadge(item){
- const drift=pgAutomationTemplateDrift(item);
+ const resolved=pgAutomationDriftReference(item);
+ if(!resolved)return '';
+ const drift=pgAutomationDriftAgainst(item,resolved.reference);
  if(!drift)return '';
- return '<span class="auto-pill auto-drift" title="Differs from the '+pgAutomationEscape(item.template_mode||'reference')
-  +' reference settings:\n'+pgAutomationEscape(pgAutomationDriftText(drift))+'">Modified from reference · '
+ return '<span class="auto-pill auto-drift" title="Differs from '+pgAutomationEscape(resolved.source)
+  +':\n'+pgAutomationEscape(pgAutomationDriftText(drift))+'">Differs from '+pgAutomationEscape(resolved.noun)+' · '
   +drift.length+' field'+(drift.length===1?'':'s')+'</span>';
 }
 const PG_AUTOMATION_REFERENCE_MODES=[
@@ -806,6 +843,17 @@ function pgAutomationNewRecipe(target){
  pgAutomation.supportedValues=pgAutomationClone(defaults.settings);pgAutomationRenderSettingsEditor();
  pgAutomationDisplayTypeChanged();
 }
+// The object to POST as a recipe. A recipe is a source, never a derivative, so
+// it must not carry source_recipe: a queue item added from recipe A and then
+// saved as recipe B would otherwise claim to descend from A, and every job
+// added from B would badge against A. Dropping the id lets the server assign a
+// fresh one; keepId is set only when editing an existing recipe in place.
+function pgAutomationRecipeForSave(item,keepId){
+ const recipe=pgAutomationClone(item);
+ if(!keepId)delete recipe.id;
+ delete recipe.source_recipe;
+ return recipe;
+}
 async function pgAutomationSaveRecipe(){
  const button=pgAutomationEl('EditorSave');if(button.disabled||pgAutomation.editorSaving)return;button.disabled=true;
  // A compatibility reply can land while a recipe POST is in flight; this flag
@@ -815,7 +863,7 @@ async function pgAutomationSaveRecipe(){
  try{
   const item=pgAutomationRecipeFromForm();
   if(pgAutomation.editorTarget==='recipe'||pgAutomationChecked('SaveAsRecipe')){
-   const recipe=pgAutomationClone(item);if(pgAutomation.editorTarget!=='recipe')delete recipe.id;
+   const recipe=pgAutomationRecipeForSave(item,pgAutomation.editorTarget==='recipe');
    await pgAutomationRequest('recipes',{recipe});
   }
   if(pgAutomation.editorTarget!=='recipe'){
@@ -862,7 +910,15 @@ async function pgAutomationDeleteRecipe(index){
 function pgAutomationQueueAdd(){
  const value=pgAutomationValue('RecipeSelect','');if(value===''){pgAutomationNotice('Choose a saved recipe or use Add item.',true);return;}
  const recipe=pgAutomation.recipes[Number(value)];if(!recipe)return;
- pgAutomation.queue.items.push(pgAutomationSnapshot(recipe));pgAutomationSaveDraft();pgAutomationRenderQueue();
+ // Record where the job came from so the drift badge can compare it against the
+ // recipe later. source_recipe survives editing (pgAutomationSnapshot keeps
+ // unknown keys, and pgAutomationRecipeFromForm assigns over the snapshot), and
+ // is stripped again if the job is ever saved back as its own recipe. The id is
+ // what pgAutomationDeleteRecipe uses, so it is stable; a recipe without one
+ // cannot be looked up, so there is nothing to stamp.
+ const item=pgAutomationSnapshot(recipe);
+ if(recipe.id!=null)item.source_recipe=recipe.id;
+ pgAutomation.queue.items.push(item);pgAutomationSaveDraft();pgAutomationRenderQueue();
 }
 function pgAutomationQueueLocked(index){
  if(!pgAutomation.editingRunId)return false;
