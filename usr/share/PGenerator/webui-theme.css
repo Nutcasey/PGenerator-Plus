@@ -1,4 +1,9 @@
 *{margin:0;padding:0;box-sizing:border-box}
+/* Phones: no font inflation on rotation, and no double-tap zoom when a
+   stepper or card header is tapped twice. Pinch zoom still works. */
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%;touch-action:manipulation}
+/* Set by the head script until the first layout pass has placed the cards. */
+[data-pg-booting] .dashboard,[data-pg-booting] .site-footer{visibility:hidden}
 :root,[data-theme="dark"]{color-scheme:dark;--bg:#0a0a0f;--card:#14141f;--panel:#14141f;--border:#2a2a3a;--accent:#5b7fff;--accent2:#7c5bff;
 --text:#e0e0e8;--text2:#888898;--green:#4caf50;--red:#f44;--orange:#ff9800;--dv:#b388ff;
 --surface-page:#0a0a0f;--surface-header:#101019;--surface-sidebar:#0d0d15;--surface-card:#14141f;--surface-drawer:#101019;--surface-modal:#14141f;--surface-popover:#181824;--surface-inset:#0d0d15;--surface-field:#080a11;
@@ -131,7 +136,9 @@ body.modal-open{position:fixed;left:0;right:0;width:100%;overflow:hidden;overscr
   display:block;width:100%!important;max-width:100%!important;flex:none!important
  }
  body.layout-tablet #colorTopLayout.cie-3d-layout #chartCIE{
-  width:100%!important;height:clamp(280px,70dvh,480px)!important;max-width:100%!important
+  width:100%!important;height:clamp(280px,70vh,480px)!important;max-width:100%!important;
+  /* svh ignores the sliding toolbar, so the plot keeps its height mid-scroll. */
+  height:clamp(280px,70svh,480px)!important
  }
  body.layout-tablet #colorTopLayout.cie-3d-layout #meterRGBColorWrap,
  body.layout-tablet #colorTopLayout.cie-3d-layout #meterXYYColorWrap,
@@ -254,7 +261,7 @@ body.meter-autocal-active .meter-autocal-mask{display:flex}
 @media(max-width:720px){.meter-workflow-progress-wrap{grid-template-columns:minmax(0,1fr) auto}.meter-workflow-progress{grid-column:1 / -1;grid-row:2}}
 .offline-mask-title{font-size:1rem;font-weight:700;margin-bottom:6px}
 .offline-mask-text{font-size:.85rem;line-height:1.45;color:var(--text2)}
-.status-bar{display:flex;align-items:center;justify-content:flex-end;gap:10px;min-width:0;font-size:.8rem;color:var(--text2)}
+.status-bar{display:flex;align-items:center;justify-content:flex-end;gap:10px;min-width:0;font-size:.8rem;color:var(--text2);font-variant-numeric:tabular-nums}
 .status-bar span{display:flex;align-items:center;gap:4px}
 .status-bar > span{min-width:0;flex:0 0 auto}
 .status-bar .status-stack{display:none;flex:0 1 auto;width:max-content;max-width:min(360px,42vw);flex-direction:column;align-items:stretch;justify-content:center;gap:1px;line-height:1.1;margin-top:-2px}
@@ -269,7 +276,7 @@ transition:background .3s;cursor:default;position:relative}
 grid-template-columns:1fr 1fr;gap:12px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;min-width:0}
 .card h2{font-size:.95rem;margin-bottom:10px;color:var(--accent);
-display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}
 .card h2 .icon{font-size:1rem}
 .card h2::after{content:'\25BE';margin-left:auto;font-size:.8rem;color:var(--text2);transition:transform .2s}
 .card.collapsed h2{margin-bottom:0}
@@ -514,6 +521,8 @@ font-weight:600;transition:all .2s;display:flex;align-items:center;gap:4px;white
 .btn-success:hover{opacity:.9}
 .btn-coffee{background:#ffdd00;color:#111;border:1px solid rgba(0,0,0,.18)}
 .btn-coffee:hover{background:#ffd200;color:#111;transform:translateY(-1px)}
+/* Touch screens keep :hover after a tap; a lifted button would stay lifted. */
+@media(hover:none){.btn-primary:hover,.btn-coffee:hover{transform:none}}
 .btn-custom-series{border:1px dashed var(--accent)}
 .chart-expand-btn{position:absolute;right:6px;bottom:6px;width:24px;height:24px;padding:0;display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1;background:rgba(20,24,34,.82);border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer;z-index:4}
 .chart-expand-btn:hover{color:var(--text);border-color:var(--accent)}

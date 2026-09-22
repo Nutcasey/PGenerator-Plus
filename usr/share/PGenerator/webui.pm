@@ -13955,6 +13955,11 @@ sub webui_automation_public_run (@) {
     && ($eta->{calculated_at}||0)>=($run->{resumed_at}||0)) {
   # Never expose internal profile identities or arbitrary saved payload fields.
   $public->{time_estimate}={map {$_=>$eta->{$_}} qw(scope remaining_seconds calculated_at active_item stage job_remaining_seconds job_unknown_stages batch_known_seconds batch_unknown_stages known_stages remaining_stages approximate_history stage_remaining_seconds pass_remaining_seconds)};
+  for my $key (qw(seeded_history adaptive)) {$public->{time_estimate}{$key}=$eta->{$key} if exists($eta->{$key});}
+  if(ref($eta->{ranges}) eq 'HASH') {
+   $public->{time_estimate}{ranges}={map {my $key=$_; ref($eta->{ranges}{$key}) eq 'HASH'
+    ? ($key=>{map {$_=>$eta->{ranges}{$key}{$_}} qw(low high)}) : ()} qw(job batch stage pass)};
+  }
  }
  my $op=$run->{operation_progress};
  $public->{operation_progress}={map {$_=>$op->{$_}} qw(stage completed total unit message)}
