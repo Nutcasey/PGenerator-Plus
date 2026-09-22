@@ -119,6 +119,17 @@ function pgAutomationDriftAgainst(item,reference){
  // compare the level once under one name -- a real brightness change still is.
  const wasLevel=pgAutomationPanelLevel(refSettings),nowLevel=pgAutomationPanelLevel(itemSettings);
  if(!pgAutomationDriftSame(wasLevel,nowLevel))drift.push({field:'settings.panel_light',was:wasLevel,now:nowLevel});
+ // Under target policy the requested setup-white luminance drives the whole
+ // adjustment loop, so an edit to it is a real change. target_luminance is
+ // excluded everywhere else because a fixed-policy job reports its measured
+ // native white there (a finished SDR job carries 31.99 against a template's
+ // 100), and the runner never repurposes the field that way under target
+ // policy -- so compare the requested target only when both sides still ask
+ // for one, leaving the fixed-policy exclusion untouched.
+ if((item.panel_light&&item.panel_light.policy)==='target'&&(reference.panel_light&&reference.panel_light.policy)==='target'){
+  const was=pgAutomationDriftAt(reference,'panel_light.target_luminance'),now=pgAutomationDriftAt(item,'panel_light.target_luminance');
+  if(!pgAutomationDriftSame(was,now))drift.push({field:'panel_light.target_luminance',was,now});
+ }
  return drift.length?drift:null;
 }
 // The three panel-light control aliases. Only one is set on a job at a time

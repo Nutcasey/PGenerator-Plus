@@ -230,6 +230,38 @@ for (const mode of ['sdr-filmmaker','sdr-cinema','hdr-filmmaker','dv-filmmaker']
  assert.equal(drift(job), null, 'source_recipe wins over template_id: compared against the recipe, not the reference it descends from');
 }
 
+// A target-policy job's requested setup-white luminance drives the whole
+// adjustment loop, so editing it is a real change. target_luminance is
+// otherwise excluded because a fixed-policy job reports its measured native
+// white there; that repurposing happens only under fixed policy, so the
+// requested target is compared only when both sides are still asking for one.
+{
+ const recipe = recipeFrom('sdr-filmmaker', {id:'r1', name:'Target 100'});
+ recipe.panel_light.policy = 'target';
+ recipe.panel_light.target_luminance = 100;
+ setRecipes([recipe]);
+ const same = clone(recipe); same.source_recipe = 'r1';
+ assert.equal(drift(same), null, 'an untouched target-policy job reports nothing');
+ const raised = clone(recipe); raised.source_recipe = 'r1';
+ raised.panel_light.target_luminance = 200;
+ raised.target_luminance = 200;
+ assert.deepEqual(fields(raised), ['panel_light.target_luminance'],
+  'raising the requested setup-white target is reported');
+}
+
+// A fixed-policy job that reports a measured native white in target_luminance
+// (a finished SDR job carries the measured value, e.g. 31.99 against 100, and
+// "Copy this run to an editable queue" puts it back) must still not be badged.
+{
+ const recipe = recipeFrom('sdr-filmmaker', {id:'r1', name:'Fixed'}); // policy 'fixed'
+ setRecipes([recipe]);
+ const measured = clone(recipe); measured.source_recipe = 'r1';
+ measured.target_luminance = 31.99;
+ measured.calibration.target_luminance = 31.99;
+ measured.panel_light.target_luminance = 31.99;
+ assert.equal(drift(measured), null, 'a fixed-policy job that reports a measured luminance is not badged');
+}
+
 // Saving a queue item as a new recipe must not carry its source_recipe: a
 // recipe is a source, not a derivative, and a saved recipe claiming to descend
 // from another recipe would badge every job added from it.
