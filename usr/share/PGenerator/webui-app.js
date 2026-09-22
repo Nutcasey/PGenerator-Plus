@@ -14372,6 +14372,22 @@ let meterNoiseAnalysisContext=null;
 //  - ccss:    the Meter Profile select value ('' = Auto: the technology's
 //             built-in curve — combined with tech above this IS the
 //             effective correction configuration).
+//  - tw/tbw:  the RESOLVED target-white anchor (review #22 round 6 P1):
+//             Target White {useMeasured,value} plus the resolved peak that
+//             rgbBalanceLstar actually divides through, via the SAME
+//             meterGreyTargetPeak() the balance math uses. Keying the manual
+//             fields alone would miss the re-measured-reference path.
+//  - tbk:     the RESOLVED black floor, via the same meterChartBlackLevel()
+//             the balance math consumes (manual value, measured 0%, or
+//             baseline/stamped fallback).
+// The reference tokens are read at RECORD time (not only from the target
+// handlers): the Measure buttons commit through meterSetTargetLevels(), a
+// series white/black re-read changes the measured reference with no event,
+// and both routes re-anchor every grey target — samples before and after
+// such a change are different quantities even when the patch XYZ is
+// identical (bench: Target White 100->200 between identical reads fabricated
+// a 7.7 L* floor and flagged every channel 'within noise'). Record-time
+// sync catches every vector, including the ones that fire no handler.
 // Every read past the first two is individually guarded: a transient
 // accessor failure must not throw out of record — it yields the literal
 // 'err' token, and an err<->value flip wipes the store, which is the
@@ -14383,7 +14399,34 @@ function meterNoiseAnalysisContextString(){
  try{ const wp=meterTargetWhitePoint(); parts.push('wp:'+(wp?wp.x+','+wp.y:'err')); }catch(e){ parts.push('wp:err'); }
  try{ parts.push('tech:'+String((document.getElementById('meterDisplayType')||{}).value||'')); }catch(e){ parts.push('tech:err'); }
  try{ parts.push('ccss:'+String((document.getElementById('meterCcssProfile')||{}).value||'')); }catch(e){ parts.push('ccss:err'); }
+ // Round 6 P1: target/reference LEVELS (not just the xy white point). The
+ // tokens go through the same accessors rgbBalanceLstar's Lw/Lb come from,
+ // so the fingerprint cannot drift from the quantity it guards.
+ try{
+  const tw=meterTargetWhiteLevel();
+  parts.push('tw:'+(tw.useMeasured?'m':String(tw.value))
+   +'|p:'+meterNoiseTargetPeakY());
+ }catch(e){ parts.push('tw:err'); }
+ try{
+  const tb=meterTargetBlackLevel();
+  parts.push('tbk:'+(tb.useMeasured?'m':String(tb.value))
+   +'|b:'+meterNoiseResolvedBlackY());
+ }catch(e){ parts.push('tbk:err'); }
  return parts.join('|');
+}
+// Resolved white-reference Y for the fingerprint: the measured white the
+// balance path feeds into meterGreyTargetPeak, exactly as meterLiveRgbData
+// resolves it (meterEffectiveGreyscaleWhiteReference -> luminance).
+function meterNoiseTargetPeakY(){
+ const ref=meterEffectiveGreyscaleWhiteReference(Array.isArray(meterReadings)?meterReadings:[]);
+ const refY=(ref&&typeof meterReadingLuminanceNits==='function')
+  ?meterReadingLuminanceNits(ref):((ref&&Number(ref.Y)>0)?Number(ref.Y):0);
+ return String(meterGreyTargetPeak(refY>0?refY:meterColorReferenceNits()));
+}
+// Resolved black-floor Y for the fingerprint: the same accessor chain
+// meterLiveRgbData passes as rgbBalance's blackLevel argument.
+function meterNoiseResolvedBlackY(){
+ return String(meterChartBlackLevel(Array.isArray(meterReadings)?meterReadings:[]));
 }
 // Check + (on change) wipe. Called at record time AND from both analysis
 // view-change handlers, so stale cross-view floors cannot annotate even in
@@ -15945,6 +15988,13 @@ function meterSetTargetLevels(){
  };
  try{ localStorage.setItem(METER_TARGET_LEVELS_KEY,JSON.stringify(state)); }catch(e){}
  try{ meterWarnTargetWhiteAboveHdrMax(); }catch(e){}
+ // Target White/Black re-anchor every grey balance target, so scatter
+ // recorded under the previous levels is a different quantity (review #22
+ // round 6 P1). Sync here so stale floors cannot annotate in the window
+ // between the edit and the next reading; the record-time fingerprint also
+ // carries tw/tbk/peak/black tokens for the event-free paths (measured
+ // reference re-reads land with no handler).
+ meterSyncNoiseAnalysisContext();
  // Let the checkbox/input state paint before recalculating charts. Rapid
  // toggles coalesce into one refresh instead of stacking expensive canvases.
  try{ meterScheduleTargetCurveRefresh(); }catch(e){}

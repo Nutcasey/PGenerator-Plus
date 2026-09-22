@@ -187,10 +187,13 @@ published payload trees without checking AGENTS.md ignore rules)
   selectable meterRgbBalanceNoiseFloor input incl. its html options, the
   Flat/Empirical noise-floor mode (per-step k·σ from repeat-reading scatter,
   pre-gain samples, fallback to the flat value), the noise-analysis-context
-  fingerprint (formula|grey-ref|gamma|gamut|whitept|tech|ccss — every input
-  that changes the recorded deviation quantity wipes the scatter store; the
-  sandbox's meterLiveRgbData has a __realCalc branch that runs the REAL
-  balance math — stubbed balance math is what hid the round-4/5 fabrications),
+ fingerprint (formula|grey-ref|gamma|gamut|whitept|tech|ccss|tw|tbk — every
+ input that changes the recorded deviation quantity wipes the scatter store,
+ incl. the RESOLVED target-white peak and black floor read through the same
+ accessors the balance math uses, so re-measured references with no control
+ event are caught at record time; the
+ sandbox's meterLiveRgbData has a __realCalc branch that runs the REAL
+ balance math — stubbed balance math is what hid the round-4/5 fabrications),
   the
   Perceptual-only availability gating, the live-bar noise flags, and the
   within-noise dim + hover-title in the HTML live-RGB columns

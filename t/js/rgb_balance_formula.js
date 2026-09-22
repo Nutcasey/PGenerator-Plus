@@ -49,6 +49,8 @@ const FN_NAMES = [
   'meterNoiseHistoryStore',
   'meterSyncNoiseAnalysisContext',
   'meterNoiseAnalysisContextString',
+  'meterNoiseTargetPeakY',
+  'meterNoiseResolvedBlackY',
   'meterStepNoiseKey',
   'meterRecordReadingNoise',
   'meterReplaceReadings',
@@ -228,7 +230,7 @@ function meterLiveRgbData(rd) {
   // balance math instead of returning __liveBal, so the gamma-target
   // fabrication is exercised through rgbBalanceLstar rather than a stub
   // (the stub was exactly the blind spot that hid the round-4/5 bug).
-  if (globalThis.__realCalc) return rgbBalance(rd, globalThis.__whiteRef, meterGreyRefMode(), 0);
+  if (globalThis.__realCalc) return rgbBalance(rd, globalThis.__whiteRef, meterGreyRefMode(), globalThis.__blackY || 0);
   return globalThis.__liveBal || null;
 }
 // Analysis-context tracking (review #22 round 4 P1): the module-level context
@@ -249,14 +251,32 @@ function meterGrayWorldWeight() { return null; }
 function meterReadingXYZ(rd) { return rd ? { X: rd.X, Y: rd.Y, Z: rd.Z } : null; }
 function meterResolveGreyRefMode(m) { return m || 'relative'; }
 function meterTargetWhitePoint() { return globalThis.__wpOverride || { x: 0.3127, y: 0.3290, X: 0.9505, Y: 1.0, Z: 1.0890 }; } // D65-ish, matches app default
-function meterGreyTargetPeak(whiteY) { return whiteY; }
+// Round 6 P1 fingerprint collaborators: target LEVELS and the resolved
+// reference/floor, all stub-driven so a test edit is the only wipe source.
+function meterTargetWhiteLevel() { return globalThis.__targetWhite || { useMeasured: true, value: null }; }
+function meterTargetBlackLevel() { return globalThis.__targetBlack || { useMeasured: true, value: null }; }
+function meterEffectiveGreyscaleWhiteReference() { return globalThis.__whiteRef || null; }
+function meterReadingLuminanceNits(rd) { return rd ? (Number(rd.luminance != null ? rd.luminance : rd.Y) || 0) : 0; }
+function meterColorReferenceNits() { return globalThis.__refNits || 100; }
+function meterChartBlackLevel() { return globalThis.__blackY || 0; }
+function meterGreyTargetPeak(whiteY) {
+  // Mirror the real meterGreyTargetPeak: a manual Target White replaces the
+  // measured white as the target-curve top (round 6 P1 repro needs this —
+  // the fabrication comes from the Lw shift, not the xy change).
+  const tw = globalThis.__targetWhite;
+  if (tw && !tw.useMeasured && tw.value != null && Number(tw.value) > 0) return Number(tw.value);
+  return whiteY;
+}
 function meterBlackReadingY() { return 0; }
 // Fingerprint members resolved from live controls (round 5): gamma dropdown
 // selection and the analysis gamut key, both stub-driven.
 function meterGreyTargetGammaSelection() { return globalThis.__gammaSel || 'bt1886'; }
 function meterAnalysisGamutKey() { return __gamutKey; }
 function meterGreyTargetLuminance(ire, Lw, Lb, code) {
-  return Lw * Math.pow(Math.max(0, Math.min(1, ire / 100)), globalThis.__targetGammaExp || 2.2); // default gamma 2.2; round-5 tests flip __targetGammaExp to prove the real balance math tracks the gamma target; relative mode rescales target to measured Y, eotf tests assert against this same stub
+  // Lb honored as an offset over [Lb, Lw] (real BT.1886 mapping): identical
+  // to the old Lw-only form whenever Lb=0, which every pre-round-6 test uses.
+  const b = Number.isFinite(Lb) ? Lb : 0;
+  return b + (Lw - b) * Math.pow(Math.max(0, Math.min(1, ire / 100)), globalThis.__targetGammaExp || 2.2); // default gamma 2.2; round-5 tests flip __targetGammaExp to prove the real balance math tracks the gamma target; relative mode rescales target to measured Y, eotf tests assert against this same stub
 }
 function meterReadingIsPeakHeadroom(rd) { return false; }
 function meterAnalysisGamut() { return { xyzToRgb: BT709_XYZ2RGB }; }
@@ -1641,6 +1661,80 @@ test('gamut_and_whitepoint_edits_wipe_scatter', () => {
   globalThis.__noiseFloor = null; globalThis.__liveBal = null;
 });
 
+test('target_levels_and_reference_wipe_scatter_real_calc', () => {
+  // Review #22 round 6 P1: the round-5 fingerprint carried the white-point
+  // xy but not the white/black LEVELS or the measured reference. Target
+  // White/Black and a re-measured white re-anchor rgbBalanceLstar's Lw/Lb,
+  // so identical patch XYZ under two levels produces a deviation delta that
+  // is analysis change, not meter scatter (reviewer bench: Target White
+  // 100->200 between identical reads fabricated a 7.7 L* floor; Target
+  // Black 0->0.1 fabricated 8.48 L*; re-measured white 100->110 fabricated
+  // 0.79 L* — each wrongly flagged all channels 'within noise'). Runs the
+  // REAL balance math through the __realCalc branch, like round 5.
+  globalThis.__noiseMode = { value: 'empirical' };
+  globalThis.__noiseFloor = { value: '0.3' };
+  globalThis.__sel = { value: 'perceptual' };
+  globalThis.__greyRef = 'eotf';
+  globalThis.__whiteRef = { X: 0.9505 * 100, Y: 100, Z: 1.0890 * 100 };
+  globalThis.__realCalc = true;
+  globalThis.__targetWhite = { useMeasured: true, value: null };
+  globalThis.__targetBlack = { useMeasured: true, value: null };
+  globalThis.__blackY = 0;
+  S.meterReplaceReadings([]); // wipe store, seed refs
+  // Vector 1 — manual Target White 100 -> 200 between IDENTICAL reads.
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 40, ire: 10 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 1, 'levels-2.2 sample stored');
+  globalThis.__targetWhite = { useMeasured: false, value: 100 };
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 41, ire: 10 }, { name: '10%' });
+  globalThis.__targetWhite = { useMeasured: false, value: 200 };
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 42, ire: 10 }, { name: '10%' });
+  const hw = S.meterNoiseHistoryStore().get('10%');
+  assert(hw && hw.vals.length === 1, 'manual Target White edit wiped the previous-level samples');
+  assert(S.meterEmpiricalNoiseFloorFor({ name: '10%' }) === null,
+    'cross-level pair must NOT produce an empirical floor');
+  assertClose(S.meterRgbBalanceEffectiveNoiseFloor({ name: '10%' }), 0.3, 1e-9,
+    'effective floor after a Target White edit is the typed value');
+  // Vector 2 — Target Black 0 -> 0.1 (BT.1886 bottom anchor moves).
+  S.meterReplaceReadings([]);
+  globalThis.__targetWhite = { useMeasured: true, value: null };
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 50, ire: 10 }, { name: '10%' });
+  globalThis.__targetBlack = { useMeasured: false, value: 0.1 };
+  globalThis.__blackY = 0.1; // keep the resolved-floor stub consistent
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 51, ire: 10 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 1,
+    'manual Target Black edit wiped the previous-floor samples');
+  // Vector 3 — measured reference moves with NO control edit: re-reading
+  // white at 110 between identical reads is an event-free re-anchor (the
+  // reviewer's 'adding only the manual target fields would leave that path
+  // open' case). Only the resolved-peak token can catch it.
+  S.meterReplaceReadings([]);
+  globalThis.__targetBlack = { useMeasured: true, value: null };
+  globalThis.__blackY = 0;
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 60, ire: 10 }, { name: '10%' });
+  globalThis.__whiteRef = { X: 0.9505 * 110, Y: 110, Z: 1.0890 * 110 };
+  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 61, ire: 10 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 1,
+    're-measured white reference (no control event) wiped the old-reference samples');
+  // Same-context accumulation still works: two distinct reads, levels and
+  // reference untouched, build a real scatter.
+  S.meterRecordReadingNoise({ X: 0.602, Y: 0.601, Z: 0.682, timestamp: 62, ire: 10 }, { name: '10%' });
+  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 2,
+    'same-levels repeat accumulates through the real balance calc');
+  // Structural pin: meterSetTargetLevels (the Measure-button + manual-edit
+  // commit point) syncs the context so floors die at the gesture, not only
+  // at the next record.
+  const setSrc = extractFunction(srcText, 'meterSetTargetLevels');
+  assert(setSrc.includes('meterSyncNoiseAnalysisContext()'),
+    'meterSetTargetLevels syncs (wipes on change) the noise analysis context');
+  // Cleanup: leave store empty and level stubs unset.
+  S.meterReplaceReadings([]);
+  globalThis.__realCalc = false; globalThis.__whiteRef = null;
+  globalThis.__targetWhite = null; globalThis.__targetBlack = null;
+  globalThis.__blackY = null;
+  globalThis.__sel = null; globalThis.__greyRef = null;
+  globalThis.__noiseMode = null; globalThis.__noiseFloor = null;
+});
+
 test('panel_technology_and_profile_wipe_scatter', () => {
   // Review #22 round 5 P2: changing Display Type resets Meter Profile
   // (CCSS) programmatically — no change event fires — so the CCSS handler's
@@ -1690,7 +1784,11 @@ test('noise_fingerprint_members_and_tech_handler', () => {
   // Type handler invalidates scatter directly (its CCSS reset fires no
   // event, so the record-time fingerprint alone would defer the wipe).
   const ctxSrc = extractFunction(srcText, 'meterNoiseAnalysisContextString');
-  for (const tok of ['meterGreyTargetGammaSelection', 'meterAnalysisGamutKey', 'meterTargetWhitePoint', 'meterDisplayType', 'meterCcssProfile']) {
+  for (const tok of ['meterGreyTargetGammaSelection', 'meterAnalysisGamutKey', 'meterTargetWhitePoint', 'meterDisplayType', 'meterCcssProfile',
+    // Round 6 P1: resolved target/reference levels (reviewer: manual fields
+    // alone leave the re-measured-reference path open — the peak/black
+    // tokens go through the balance math's own accessors).
+    'meterTargetWhiteLevel', 'meterTargetBlackLevel', 'meterNoiseTargetPeakY', 'meterNoiseResolvedBlackY']) {
     assert(ctxSrc.includes(tok), 'fingerprint includes ' + tok);
   }
   // Fingerprint values actually change with the controls (behavior, through
