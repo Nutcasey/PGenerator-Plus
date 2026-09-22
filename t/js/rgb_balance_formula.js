@@ -1456,7 +1456,8 @@ test('empirical_floor_from_repeat_scatter', () => {
   assert(S.meterLgTrimKeyAffectsPatch('eyeComfortMode') === true, 'eye comfort invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('black_frame_insertion') === true, 'BFI invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('colorDepth') === false, 'colorDepth keeps history');
-  assert(S.meterLgTrimKeyAffectsPatch('colorGamut') === false, 'gamut selection keeps history');
+  assert(S.meterLgTrimKeyAffectsPatch('colorGamut') === true, 'gamut selection invalidates (panel white point can move with gamut)');
+  assert(S.meterLgTrimKeyAffectsPatch('Gamut') === true, 'bare gamut key invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('sharpness') === false, 'sharpness keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('hdmiRange') === false, 'hdmiRange keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('calibration_mode') === false, 'cal mode keeps history');

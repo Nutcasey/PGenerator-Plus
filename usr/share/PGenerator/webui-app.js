@@ -14558,7 +14558,8 @@ function meterLgTrimKeyAffectsPatch(key){
  // scatter on the same physical reasoning: panel luminance changes what
  // every patch reads). The same reasoning extends to every control that
  // alters the PANEL OUTPUT itself (review #22 round 4): gamma regrades the
- // luminance curve, energy saving and local dimming rescale it, HDR tone
+ // luminance curve, gamut selection can move the panel's greyscale white
+ // point, energy saving and local dimming rescale it, HDR tone
  // mapping redistributes it, eye comfort shifts the white point, and BFI
  // changes the temporal profile an integrating colorimeter sees.
  // hdmiRange/calibration-mode style plumbing keys simply do not match the
@@ -14566,7 +14567,7 @@ function meterLgTrimKeyAffectsPatch(key){
  // dead code); the harness pins hdmiRange === false. Over-wiping costs only
  // re-reads (fail-safe); under-wiping folds a real signal change into σ.
  const k=String(key||'').toLowerCase().replace(/[\s_-]+/g,'');
- return /whitebalance|brightness|contrast|colourtemp|colortemp|backlight|blacklevel|oledlight|gamma|energysaving|localdimming|tonemapping|eyecomfort|blackframeinsertion/.test(k);
+ return /whitebalance|brightness|contrast|colourtemp|colortemp|backlight|blacklevel|oledlight|gamma|gamut|energysaving|localdimming|tonemapping|eyecomfort|blackframeinsertion/.test(k);
 }
 // Drop a step's scatter samples: the trim just changed what the patch
 // measures, so the old scatter describes a setting that no longer exists
