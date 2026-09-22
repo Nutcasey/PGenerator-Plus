@@ -95,6 +95,8 @@ is($launches,1,'the resumed runner is launched');
 my $claim=PGAutomation::read_json_file($execution_path);
 is($claim->{run_id},'inc','the freed claim is re-acquired by the resuming run');
 is($claim->{token},'tok-inc','with its own token');
+ok(PGAutomation::read_json_file(PGAutomation::run_dir('inc').'/run.json')->{items}[0]{resume_recalibrate},
+ 'a reacquired claim marks the job to recalibrate rather than trust its old checkpoints');
 
 # (b) A genuinely different active run owns the TV: still blocked, and its
 #     claim is left untouched.
@@ -123,32 +125,37 @@ is(PGAutomation::read_json_file($execution_path)->{run_id},'other','the rival cl
   'the losing run is left interrupted, still recoverable');
 }
 
-# (b3) If the run.json revert after a lost claim itself fails to write, the run
-#      must not be silently stranded at status=starting. The caller is told the
-#      state is uncertain and to Stop, not handed the clean rival message.
+# (b3) Claim-before-starting: if the run.json "starting" write fails after the
+#      claim is taken, the claim must be released and the run left interrupted --
+#      never a claim owned with no manifest, never wedged at starting.
 {
- local *main::webui_automation_reconnect_for_resume=sub {{status=>'ok'}};
  local *main::webui_automation_write_locked=sub {
   my ($path,$data)=@_;
-  return (0,'simulated disk full') if(($data->{status}||'') ne 'starting');  # only the revert write fails
+  return (0,'simulated disk full') if($path=~m{/run\.json$} && ($data->{status}||'') eq 'starting');  # only the starting write fails
   return (1,'');
  };
- save_run('stuck');
- PGAutomation::write_json_atomic($execution_path,{owner=>'automation',run_id=>'winner2',token=>'tok-winner2',status=>'starting'});
+ save_run('wfail');
+ unlink($execution_path);  # free TV -> reacquire path takes the claim, then the write fails
  $launches=0;
- my $s=PGAutomation::decode_json(&main::webui_automation_control('stuck','resume'));
- is($s->{error_code},'resume-state-uncertain','a failed revert is reported as an uncertain state, not a clean rival');
- like($s->{message},qr/Stop/,'and the operator is steered to Stop rather than retrying Resume');
- is($launches,0,'no runner is launched when the claim was lost');
+ my $w=PGAutomation::decode_json(&main::webui_automation_control('wfail','resume'));
+ is($w->{error_code},'write-failed','a failed starting write is reported as write-failed, not a rival');
+ is($launches,0,'no runner is launched when the manifest could not be published');
+ ok(!-e $execution_path,'the claim taken for the doomed resume is released, not left dangling');
+ is(PGAutomation::read_json_file(PGAutomation::run_dir('wfail').'/run.json')->{status},'interrupted',
+  'the run stays interrupted and resumable, never wedged at starting');
 }
 
-# (c) A legitimate paused resume whose own claim is intact still works.
+# (c) A legitimate paused resume whose own claim is intact still works, and a
+#     continuously-held claim clears any stale recalibrate flag (no rival ran).
 save_run('pausd',status=>'paused');
 PGAutomation::write_json_atomic($execution_path,{owner=>'automation',run_id=>'pausd',token=>'tok-pausd',status=>'paused'});
+PGAutomation::with_lock(PGAutomation::run_dir('pausd').'/run.json',sub { my ($r)=@_; $r->{items}[0]{resume_recalibrate}=JSON::PP::true; return $r; });
 $launches=0;
 my $c=PGAutomation::decode_json(&main::webui_automation_control('pausd','resume'));
 is($c->{status},'ok','a paused run with its own claim resumes');
 is($launches,1,'and its runner is launched');
+ok(!PGAutomation::read_json_file(PGAutomation::run_dir('pausd').'/run.json')->{items}[0]{resume_recalibrate},
+ 'a continuously-held resume clears the recalibrate flag -- the TV was never released');
 
 # --- Load-bearing wiring: deleting a guard must turn this test red, so pin the
 #     call sites the way t/idle_pattern_seed.t pins the seeder.
@@ -166,5 +173,14 @@ my ($body)=$src=~/sub webui_automation_control_body \(\@\) \{(.*)/s;
 my ($resume_block)=$body=~/if\(\$action eq "resume"\) \{(.*?)\n {1,2}\}\n {1,2}if\(\$action eq "stop"\)/s;
 like($resume_block,qr/webui_automation_resume_claim_decision.*rival/s,
  'the resume claim refuses to overwrite a different run rather than writing unconditionally');
+like($resume_block,qr/resume_recalibrate/,
+ 'and a reacquired claim marks the run to recalibrate rather than trust old checkpoints');
+# The claim must be taken before "starting" is published, so a conflict leaves
+# run.json untouched (no wedge). Pin that ordering: the with_lock claim appears
+# before the "starting" run.json write in the resume block.
+my $claim_pos=index($resume_block,'PGAutomation::with_lock');
+my $starting_pos=index($resume_block,'status}="starting"');
+ok($claim_pos>=0 && $starting_pos>=0 && $claim_pos<$starting_pos,
+ 'the execution claim is taken before run.json is published as starting');
 
 done_testing();

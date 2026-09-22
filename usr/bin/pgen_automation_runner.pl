@@ -4212,6 +4212,18 @@ sub _prepare_resume {
     # earlier attempt that then failed at job readiness must not stall every
     # later resume on the same missing curve.
     delete $item->{profile_baseline_needs_restore};
+    # A resume that reacquired a released TV claim cannot trust any committed
+    # checkpoint: another run may have recalibrated this TV while the job was
+    # interrupted, so the installed LUT is no longer proof of this job's result.
+    # Recalibrate from reset rather than keep results and skip to Apply to All.
+    if ($item->{resume_recalibrate}) {
+        delete $item->{resume_recalibrate};
+        _log_action('The TV was released to another run since this job was interrupted; recalibrating from reset because the installed calibration can no longer be trusted');
+        _drop_resume_checkpoints($item, { map { $_ => 1 } qw(reset-and-reapply-verified panel-light-settled greyscale-done volume-done session-closed apply-all-done post-readings-done item-complete) });
+        delete $item->{settings_recovery};
+        delete $item->{drift_recovery_pending};
+        return;
+    }
     if ($item->{profile_baseline_restore_failed}) {
         delete $item->{profile_baseline_restore_failed};
         delete $item->{profile_baseline_restore_failures};
