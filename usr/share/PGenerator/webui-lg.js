@@ -1401,6 +1401,11 @@ async function lgDisplayControlCommit(key){
   if(r&&r.status==='ok'&&r.verification_state==='verified'){
    const picture=r.picture_settings||{};
    lgDisplayControlValues[key]=(picture[key]!==undefined)?picture[key]:value;
+   // A successful write of a measurement-affecting control (WB offsets,
+   // colour temperature, brightness/contrast) changes what every patch
+   // reads; plumbing keys (hdmiRange, calibration mode) must NOT wipe
+   // history.
+   if(typeof meterLgTrimKeyAffectsPatch==='function'&&meterLgTrimKeyAffectsPatch(key)&&typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
    // Do not persist a synthesized (virtual_picture_settings) mode -- same
    // contamination path as lgRefreshPictureMode / lgDisplayControlRefresh.
    if(picture.pictureMode && !r.virtual_picture_settings){
@@ -1988,6 +1993,9 @@ async function lgSetPictureMode(){
   });
   if(r&&r.status==='ok'){
    const mode=(r.picture_settings&&r.picture_settings.pictureMode)||value;
+   // WB offsets are stored per picture mode: history from the old mode
+   // describes a different electrical curve.
+   if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
    lgPictureModeValue=mode;
    lgPictureModeSignalMode=signal;
    // Keep an unverified legacy selection as this session's DDC target, but

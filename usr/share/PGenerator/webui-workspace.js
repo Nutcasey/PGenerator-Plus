@@ -3511,13 +3511,15 @@ function meterGreyTvColumnHtml(channelKey,label,color,tvValue,liveEntry,halfRang
 	 // liveEntry.noise: deviation is inside the meter noise floor (Perceptual)
 	 // — dim the fill so it reads as "not a real error", same convention as the
 	 // canvas live-RGB bars. The dim alone is cryptic, so also carry a hover
-	 // title naming the floor: without it the faded bar looks like a render bug.
+	 // title naming the floor: without it the faded bar looks like a render
+	 // bug. liveEntry.floor is the EFFECTIVE floor this point was judged
+	 // against (empirical k·σ once history exists, else the flat number).
 	 const isNoise=!!(liveEntry&&liveEntry.noise);
 	 const noiseOpacity=isNoise?'opacity:.45;':'';
 	 // Hover explanation for a dimmed fill; plain text, no quotes introduced.
 	 const noiseTitleAttr=isNoise
-	 	? ' title="Deviation is within the meter noise floor (±'+meterRgbBalanceNoiseFloor()+' L* pre-gain) — noise, not a real error."'
-	 	: '';
+	 	 ? ' title="Deviation is within the meter noise floor (±'+meterFormatNoiseFloorValue(liveEntry.floor)+' L* pre-gain'+(liveEntry.floorNote||'')+') — noise, not a real error."'
+	 	 : '';
 	 const fillStyle=(delta==null)
 	 	  ? 'display:none;'
 	 	  : 'top:'+(delta>=0?(50-magnitude):50)+'%;height:'+magnitude+'%;background:'+color+';color:'+color+';border-radius:'+(delta>=0?'4px 4px 0 0':'0 0 4px 4px')+';'+noiseOpacity;
@@ -3949,10 +3951,14 @@ async function meterGreyAdjustCurrentStepChannel(channel,deltaStep){
 			   capabilities:response.picture_capabilities||state.capabilities||null
 			  };
 			  if(window.lgStatusState){
-			   window.lgStatusState.calibrationMode=!!response.calibration_mode;
-			   if(response.calibration_picture_mode) window.lgStatusState.calibrationPictureMode=response.calibration_picture_mode;
+			  window.lgStatusState.calibrationMode=!!response.calibration_mode;
+			  if(response.calibration_picture_mode) window.lgStatusState.calibrationPictureMode=response.calibration_picture_mode;
 			  }
-		  return true;
+			  // The write changed what this patch measures: drop the step's
+			  // scatter history so the old-setting samples cannot skew the
+			  // empirical floor of the new setting (re-reads rebuild σ).
+			  if(typeof meterInvalidateStepNoise==='function') meterInvalidateStepNoise(targetStep);
+			  return true;
 	 }catch(e){
 	  meterLgGreyState={status:'error',picture:previousPicture,needsRepair:false,message:'Unable to reach the LG TV control API.'};
 	  toast('Unable to reach the LG TV control API.',true);
@@ -4263,6 +4269,9 @@ async function meterAutoCalWritePanelLight(key,value,omitPictureMode){
   return meterAutoCalWritePanelLight(key,value,true);
  }
  if(!r||r.status!=='ok') throw new Error((r&&(r.repair_hint||r.message))||'Unable to adjust display panel light.');
+ // Panel light is panel-wide: scatter for every step was taken under the
+ // old luminance.
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  const pic=r.picture_settings||{};
  const readback=Number(pic[key]);
  if(Number.isFinite(readback)){
@@ -5333,6 +5342,9 @@ async function meterAutoCalWriteClipControl(key,value,pictureMode){
   _timeoutMs:20000
  });
  if(!r||r.status!=='ok') throw new Error((r&&(r.repair_hint||r.message))||'Unable to adjust '+key);
+ // Clip controls are panel-wide: every step's scatter was taken under the
+ // old value. (meterAutoCalWritePanelLight shares this path's semantics.)
+ if(typeof meterLgTrimKeyAffectsPatch==='function'&&meterLgTrimKeyAffectsPatch(key)&&typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  const pic=r.picture_settings||{};
  const readback=Number(pic[key]);
  return Number.isFinite(readback)?readback:settings[key];
@@ -5569,6 +5581,9 @@ async function meterAutoCalResetDdc(){
  if(response.ddc_reset_verified!==true){
   throw new Error('LG picture mode reset did not verify against the TV 1D LUT readback.');
  }
+ // The baseline reset zeroed every WB offset: scatter from the previous
+ // session's curve describes a setting that no longer exists.
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  // SDR reference reset: after the DDC white-balance / 1D LUT baseline is
  // cleared, run the reference SDR workflow (gamma-disable CAL_START/CAL_END
  // + identity BT.709 3D LUT / 1D DPG / 3x3 matrix outside cal mode). This
@@ -12067,7 +12082,14 @@ async function meterRunSeries(options){
   if(meterSelectionWillMeasureWhite) meterWhiteReading=null;
  }else{
   meterClearSelectionBaseline();
-  meterReplaceReadings([]);
+  // keepNoiseHistory=true: a full re-run is the SAME meter+target+panel
+  // measurement context — and 'run the series twice' IS the documented
+  // scatter-accumulation affordance. The default wipe here deleted pass 1
+  // the instant pass 2 started, so the store could never exceed 1 sample
+  // per step no matter how many runs were done (bench: pinned at 'pass 1
+  // done — re-run'). Stale-context wipes stay where they belong: Clear,
+  // reload, disconnect, series switch — none of which is a re-run.
+  meterReplaceReadings([],true);
   meterWhiteReading=savedWhiteSnapshot;
   meterSeriesBaselineBlack=savedBlackSnapshot;
  }
@@ -12386,10 +12408,22 @@ async function meterPollSeries(){
 	    :(Array.isArray(meterReadings)?meterReadings:[]);
 	   meterReplaceReadings(meterAttachSeriesMeta(
 	    meterRestoreSelectionWhiteReference(meterMergeSeriesReadings(baseline,incoming))
-	   ));
+	   ),true);
 	  }else{
-	   meterReplaceReadings(incoming);
+	   meterReplaceReadings(incoming,true);
 	  }
+  // Empirical noise history: a series IS a repeat-reading source — the
+  // operator's 'run the series twice' affordance only exists if each
+  // delivered measurement feeds the scatter store. The consecutive-XYZ
+  // dedupe inside the recorder collapses the per-second poll re-delivery
+  // of unchanged readings into one sample per actual measurement, while a
+  // second run's fresh meter variance records as genuine scatter.
+  // (Bench-reported defect: two full 21-pt runs left the coverage count
+  // at zero — the recorder was wired only to single-read and continuous
+  // paths, and the poll's wholesale replace wiped any history it saw.)
+  try{
+   incoming.forEach(rd=>{ if(rd&&!rd.error&&meterReadingHasLuminance(rd)) meterRecordReadingNoise(rd,rd); });
+  }catch(e){}
   // Only set white reference from actual 100% reading — never use
   // "brightest so far" during a running series, because that changes
   // every poll cycle and causes all ΔE / RGB balance values to shift.
@@ -12397,8 +12431,13 @@ async function meterPollSeries(){
   if(white) meterWhiteReading=white;
   // Selection mid-greys: restore the pre-run white so we never invent a
   // synthetic peak from the brightest selected patch after the run.
+  // keepNoiseHistory=true: this white re-seat replaces the array EVERY poll
+  // cycle of a selection run — with the default wipe it deleted the scatter
+  // the record loop above had just stored, so 'run the series twice' on a
+  // selected subset could never accumulate a sample (same defect class as
+  // the main poll replace fixed in 5d3028e1, this is its sibling site).
   if(meterSeriesSelectionRunActive&&!meterSelectionWillMeasureWhite){
-   meterReplaceReadings(meterRestoreSelectionWhiteReference(meterReadings));
+   meterReplaceReadings(meterRestoreSelectionWhiteReference(meterReadings),true);
   }
   // If we don't yet have an actual 100% measurement, use the same mode-aware
   // synthetic reference as one-off reads. Never replace a still-valid selection
@@ -12488,7 +12527,10 @@ async function meterPollSeries(){
   // greyscale error math keeps the original series peak.
   if(meterSeriesSelectionRunActive&&!meterSelectionWillMeasureWhite){
    try{
-    meterReplaceReadings(meterAttachSeriesMeta(meterRestoreSelectionWhiteReference(meterReadings||[])));
+    // keepNoiseHistory=true: the run just finished; this re-seat is a
+    // presentation fixup of the SAME measurement context, not a series
+    // switch, so the scatter the run built must survive it.
+    meterReplaceReadings(meterAttachSeriesMeta(meterRestoreSelectionWhiteReference(meterReadings||[])),true);
     const isColorDone=meterActiveSeriesType==='colors'||meterActiveSeriesType==='saturations';
     const sortedDone=isColorDone?[...meterReadings]:[...meterReadings].sort((a,b)=>(a.ire||0)-(b.ire||0));
     drawAllCharts(sortedDone);
@@ -15738,17 +15780,26 @@ function drawRGBChart(gs,allSteps,readingMap){
  drawDashedLine(ctx,chart,[[0,refY],[1,refY]],'#555');
  meterLivePlotPublish(ctx,chart,{steps:xSteps,target:[[0,refY],[1,refY]]});
  // Noise-floor zone: under Perceptual the 'within meter noise' threshold at
- // each IRE is floor x that point's shadow gain, so the zone widens toward
- // black. Shading it shows where the hover tooltip will say 'within meter
+ // each IRE is that point's effective floor x its shadow gain, so the zone
+ // widens toward black — from the flat operator number, or in empirical mode
+ // from k·σ of the point's own repeat-reading scatter once history exists.
+ // Shading it shows where the hover tooltip will say 'within meter
  // noise' before the operator has to hover. Pure annotation — plotted values
  // and the axis scale are untouched; clipping keeps it inside the plot under
  // a box-zoom.
- const noiseFloor=meterRgbBalanceActiveNoiseFloor();
- if(noiseFloor>0){
+ const noiseFloorLive=meterRgbBalanceNoiseFloorAnnotationLive();
+ if(noiseFloorLive){
   // chart.toX/toY take NORMALIZED [0,1] view coordinates (same convention as
   // refY and the rPts/gPts/bPts points above), not data values — convert.
   const toNorm=v=>(v-yMin)/(yMax-yMin);
-  const zone=[];
+  // Segments, not one list: a point whose effective floor is 0 (empirical
+  // mode, no usable scatter, empty typed fallback) has NOTHING to annotate
+  // — connecting across it would shade a band over a point whose accessor
+  // verdict was 'off' (review #22 round 4 P2: band and per-point judgement
+  // disagreed on partially characterised series). Each contiguous run of
+  // floored points gets its own polygon; the gaps stay clear.
+  const zoneSegments=[];
+  let zoneSeg=[];
   xSteps.forEach((step,idx)=>{
    const bal=balMap[step.ire];
    // Same point set as the trace: a noChroma (zero-light) step has no
@@ -15761,10 +15812,12 @@ function drawRGBChart(gs,allSteps,readingMap){
    const rdZone=readingMap&&readingMap[step.ire];
    if(!rdZone) return;
    const gain=meterPerceptualRgbBalanceGain(rdZone);
-   const dev=noiseFloor*gain;
-   zone.push({x:meterGreyCategoryChartX(xSteps,idx),hi:toNorm(100+dev),lo:toNorm(100-dev)});
+   const dev=meterRgbBalanceEffectiveNoiseFloor(rdZone)*gain;
+   if(!(dev>0)){ if(zoneSeg.length>1) zoneSegments.push(zoneSeg); zoneSeg=[]; return; }
+   zoneSeg.push({x:meterGreyCategoryChartX(xSteps,idx),hi:toNorm(100+dev),lo:toNorm(100-dev)});
   });
-  if(zone.length>1){
+  if(zoneSeg.length>1) zoneSegments.push(zoneSeg);
+  zoneSegments.forEach(zone=>{
    ctx.save();
    ctx.beginPath();ctx.rect(chart.pad.l,chart.pad.t,chart.w,chart.h);ctx.clip();
    ctx.beginPath();
@@ -15784,8 +15837,13 @@ function drawRGBChart(gs,allSteps,readingMap){
    // Name the band where it is widest (the leftmost plotted step sits toward
    // black): without this the shading reads as an unexplained watermark until
    // the operator hovers a point. Pill style matches the EOTF '0% =' label.
+   // Text names the mode: flat mode shows the operator constant (it is the
+   // same for every point); empirical stays generic because per-point floors
+   // vary with σ and the exact number lives in each point's tooltip.
    const zp=zone[0];
-   const zText='±'+noiseFloor+' L* noise';
+   const zText=(meterRgbBalanceNoiseFloorMode()==='empirical')
+    ? 'noise floor'
+    : '±'+meterFormatNoiseFloorValue(meterRgbBalanceNoiseFloor())+' L* noise';
    ctx.font='bold 9px sans-serif';
    const zW=ctx.measureText(zText).width;
    // Clamp keeps the whole pill inside the plot rect on both axes.
@@ -15797,7 +15855,7 @@ function drawRGBChart(gs,allSteps,readingMap){
    ctx.textAlign='left';ctx.textBaseline='alphabetic';
    ctx.fillText(zText,zx,zy+1);
    ctx.restore();
-  }
+  });
  }
  const rPts=[],gPts=[],bPts=[];
  // Off-scale tracking: a clamped point must never read as "error == axis
@@ -19155,12 +19213,18 @@ function chartHandleHover(e,canvasId){
   // computes deviation 0 and would read "within meter noise" for a patch
   // that emitted no measurable light — the chart omits the point for the
   // same reason (PR-16 review finding).
-  if(meterRgbBalanceNoiseFloor()>0&&!bal.noChroma){
+  // The floor is the point's EFFECTIVE floor: empirical k·σ of its own
+  // repeat-reading scatter once history exists, else the flat operator
+  // number — so the tooltip states what THIS point was judged against.
+  if(meterRgbBalanceNoiseFloorAnnotationLive()&&!bal.noChroma){
+   const pointFloor=meterRgbBalanceEffectiveNoiseFloor(rd);
    const pg=(Number.isFinite(perceptualGain)&&perceptualGain>0)?perceptualGain:1;
-   const parts=[['R',bal.R],['G',bal.G],['B',bal.B]]
-    .map(e=>{const d=Math.abs(e[1]-100)/pg;return (Number.isFinite(e[1])&&d<=meterRgbBalanceNoiseFloor())?e[0]+' '+d.toFixed(2):null;})
-    .filter(Boolean);
-   if(parts.length) html+='<br><span style="opacity:.75">'+parts.join(' · ')+' L* pre-gain — within meter noise</span>';
+   if(pointFloor>0){
+    const parts=[['R',bal.R],['G',bal.G],['B',bal.B]]
+     .map(e=>{const d=Math.abs(e[1]-100)/pg;return (Number.isFinite(e[1])&&d<=pointFloor)?e[0]+' '+d.toFixed(2):null;})
+     .filter(Boolean);
+    if(parts.length) html+='<br><span style="opacity:.75">'+parts.join(' · ')+' L* pre-gain — within meter noise (±'+meterFormatNoiseFloorValue(pointFloor)+' floor'+meterNoiseFloorSourceNote(rd)+')</span>';
+   }
   }
  }
  if(gammaAtClip) html+='<br>Gamma: at panel clip (excluded)';
@@ -20561,6 +20625,12 @@ meterDisplayTypeEl.addEventListener('change',function(){
  }
  this.dataset.lastStableValue=v;
  meterApplyDisplayTypeSelection(v,{patchSizeDefault:true});
+ // The technology itself changes what measurements mean (calibration path,
+ // pattern defaults) and resets Meter Profile below — invalidate scatter
+ // immediately so a stale floor cannot annotate before the next reading
+ // (review #22 round 5 P2; the record-time context fingerprint is the
+ // backstop for programmatic resets that fire no event).
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  // Display Type owns calibration path (OLED/LCD/WRGB). Selecting a type
  // resets Meter Profile (CCSS) to Auto so the generic built-in for that
  // technology is used; the operator can then pick a custom/display CCSS.
@@ -21473,6 +21543,10 @@ function meterOnCcssProfileChange(ev){
   try{ meterOpenCustomCcssEditor(); }catch(e){}
   return;
  }
+ // The correction profile changes what every reading IS: scatter recorded
+ // under another CCSS describes corrected values of a different curve
+ // (review #22 round 4 P2 — switching to No Correction kept the floor).
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  sel.dataset.lastStableValue=v;
  meterSyncCcssProfileHoverTitle(sel);
  try{
@@ -22157,6 +22231,10 @@ if(meterCcssCreateDisplayTypeEl) meterCcssCreateDisplayTypeEl.addEventListener('
 const meterMeasurementPortEl=document.getElementById('meterMeasurementPort');
 if(meterMeasurementPortEl) meterMeasurementPortEl.addEventListener('change',()=>{
  meterMeasurementPort=meterStoredMeasurementPort();
+ // A different instrument has different repeatability: scatter recorded on
+ // the old meter must not be interpreted as noise of the new one (review
+ // #22 round 4 P2 — switching ports kept the previous floor).
+ if(typeof meterInvalidateAllStepNoise==='function') meterInvalidateAllStepNoise();
  // Persist the operator's explicit selection as the durable preference so
  // meterSelectedMeasurementPort's saved/autodetect fallback chain -- used by
  // the status poll, profile-field visibility, and every read path -- agrees
