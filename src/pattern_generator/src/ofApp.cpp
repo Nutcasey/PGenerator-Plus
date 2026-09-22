@@ -88,6 +88,17 @@ void ofApp::setup(){
  ##########################################################
 */
 void ofApp::update(){
+ // Consume pattern changes before rendering starts. A notification during
+ // draw() must wait for the next update so the current frame stays complete.
+ string return_file=tmp_dir+ofToString("/running/return");
+ ifstream r(return_file.c_str());
+ if (r.good()) {
+  r.close();
+  open_file=1;
+  save_images=0;
+  unlink(return_file.c_str());
+ }
+
  std::vector<std::string> dimensions;
  std::vector<std::string> rgb;
  std::vector<std::string> rgbb;
@@ -95,6 +106,7 @@ void ofApp::update(){
  std::string str; 
 
  if(open_file) {
+  i=0;
   frame=frame_to_draw=entered=0;
   p_name=m_name="";
   source_max=255;
@@ -227,17 +239,6 @@ void ofApp::draw(){
  if(entered == 0)
   return;
  for(to_draw=0;to_draw<n_draw[i];to_draw++) {
-  string return_file=tmp_dir+ofToString("/running/return");
-  const char * return_file_char = return_file.c_str();
-  ifstream r(return_file_char);
-  if (r.good()) {
-   r.close();
-   i=0;
-   open_file=1;
-   save_images=0;
-   unlink(return_file_char);
-   return;
-  }
   char buffer[255];
   sprintf(buffer,"Doing the frame %d and the Draw %d",i,to_draw);
   ofApp::log(buffer);
