@@ -120,17 +120,49 @@ int main() {
         app.shader_begin(1);
         require(shader.values["is_image"][0]==1,"texture path changed");
         app.shader_end(1);
-        ofxRPI4Window::is_std_DoVi=1;
-        ofxRPI4Window::isDoVi=1;
         window.output_format=0;
-        for(int maximum : {255,1023,4095}) {
-            app.arr_source_max[0][0]=maximum;
-            for(int code : {0,1,maximum/2,maximum}) {
-                app.setColor(code,maximum-code,code/2);
+        window.rgb_quant_range=1;
+        for(int bits : {8,10}) for(int profile : {1,2}) for(int range : {0,1}) {
+            ofxRPI4Window::bit_depth=bits;
+            ofxRPI4Window::dv_profile=profile;
+            app.arr_source_range[0][0]=range;
+            // Revisit domains in both directions to catch stale source_max.
+            for(int source_max : {255,1023,4095,1023,255,0}) {
+                ofxRPI4Window::is_std_DoVi=1;
+                ofxRPI4Window::isDoVi=1;
+                app.arr_source_max[0][0]=source_max;
+                int maximum=source_max ? source_max : 255;
+                for(int code=-1;code<=maximum+1;++code) {
+                    app.setColor(code,maximum-code,code/2);
+                    // Every draw must upload both DV inputs; old values cannot
+                    // make a missing upload appear to pass this check.
+                    shader.values.clear();
+                    app.shader_begin(0);
+                    require(shader.active,"DV shader did not begin");
+                    require(shader.values.at("source_rgb")==std::vector<double>({
+                        double(std::max(0,std::min(maximum,code))),
+                        double(std::max(0,std::min(maximum,maximum-code))),
+                        double(std::max(0,std::min(maximum,code/2)))}),"DV codes changed");
+                    require(shader.values.at("source_max")[0]==maximum,"DV source domain changed");
+                    require(!shader.values.count("source_codes") && !shader.values.count("source_normalizer"),
+                        "DV used link-depth inputs instead of original source codes");
+                    app.shader_end(0);
+                    require(!shader.active,"DV shader did not end");
+                }
+                // Switching back to SDR must replace the previous DV inputs.
+                ofxRPI4Window::is_std_DoVi=0;
+                ofxRPI4Window::isDoVi=0;
+                window.output_format=1;
+                app.setColor(81,84,85);
+                shader.values.clear();
                 app.shader_begin(0);
-                require(shader.values["source_rgb"]==std::vector<double>({double(code),double(maximum-code),double(code/2)}),"DV codes changed");
-                require(shader.values["source_max"][0]==maximum,"DV source domain changed");
+                require(shader.active,"SDR shader did not begin after DV");
+                require(shader.values.at("source_codes")==std::vector<double>({81,84,85}),"SDR reused DV codes");
+                require(shader.values.at("source_normalizer")[0]==(1<<bits)-1,"SDR reused DV source domain");
+                require(!shader.values.count("source_rgb") && !shader.values.count("source_max"),"SDR uploaded DV inputs");
                 app.shader_end(0);
+                require(!shader.active,"SDR shader did not end after DV");
+                window.output_format=0;
             }
         }
         std::cout << "Real renderer paths preserve every 8/10-bit code and DV source inputs\n";

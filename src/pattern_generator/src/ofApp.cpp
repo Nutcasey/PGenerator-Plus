@@ -764,6 +764,8 @@ void ofApp::shader_begin(int is_image) {
   ofxRPI4Window::shader.begin();
   if (ofxRPI4Window::is_std_DoVi) {
 	ofxRPI4Window::shader.setUniform2f("resolution", ofGetWindowWidth(), ofGetWindowHeight());
+	// Standard DV packs original 8/10/12-bit source codes into the tunnel.
+	// Keep this source domain separate from the SDR/HDR link-depth uniforms below.
 	ofxRPI4Window::shader.setUniform3f("source_rgb",
 		static_cast<float>(dv_source_red),
 		static_cast<float>(dv_source_green),

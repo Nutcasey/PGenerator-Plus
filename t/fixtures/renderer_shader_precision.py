@@ -226,19 +226,20 @@ for backend in ("ofxRPI4Window", "ofxRPI4Window-pi5"):
     target(False)  # Standard DV deliberately packs 12-bit values into bytes.
     for name in ("source_rgb", "source_max"):
         assert glGetUniformLocation(current_program, name.encode()) >= 0
-    uniform("coeffs_num", 0.2126, 0.7152, 0.0722, floating=True)
-    uniform("coeffs_div", 1.8556, 1.5748, 0.5, floating=True)
-    for maximum, shift in ((255, 4), (1023, 2), (4095, 0)):
-        uniform("source_max", maximum)
-        for code in (0, 1, 16, 64, 81, 82, 84, 85, maximum // 2, maximum):
-            uniform("source_rgb", code, code, code, floating=True)
-            y = code << shift
-            expected = (128, y >> 4, y & 15)
-            assert read(False) == [expected, expected], (backend, maximum, code, read(False), expected)
-            checks += 1
-        for bt2020 in (False, True):
-            uniform("coeffs_num", *((0.2627, 0.6780, 0.0593) if bt2020 else (0.2126, 0.7152, 0.0722)), floating=True)
-            uniform("coeffs_div", *((1.8814, 1.4746, 0.5) if bt2020 else (1.8556, 1.5748, 0.5)), floating=True)
+    for bt2020 in (False, True):
+        uniform("coeffs_num", *((0.2627, 0.6780, 0.0593) if bt2020 else (0.2126, 0.7152, 0.0722)), floating=True)
+        uniform("coeffs_div", *((1.8814, 1.4746, 0.5) if bt2020 else (1.8556, 1.5748, 0.5)), floating=True)
+        for maximum, shift in ((255, 4), (1023, 2), (4095, 0)):
+            uniform("source_max", maximum)
+            # Exhaust the source domain, including clamping, so 12-bit low
+            # nibbles cannot disappear behind the 8-bit tunnel framebuffer.
+            for code in range(-1, maximum + 2):
+                uniform("source_rgb", code, code, code, floating=True)
+                y = max(0, min(maximum, code)) << shift
+                expected = (128, y >> 4, y & 15)
+                actual = read(False)
+                assert actual == [expected, expected], (backend, bt2020, maximum, code, actual, expected)
+                checks += 1
             for rgb in ((maximum, 0, 0), (0, maximum, 0), (0, 0, maximum), (81, 84, 85)):
                 uniform("source_rgb", *rgb, floating=True)
                 first, second = read(False)
