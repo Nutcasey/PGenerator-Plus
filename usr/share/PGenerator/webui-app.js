@@ -14372,22 +14372,21 @@ let meterNoiseAnalysisContext=null;
 //  - ccss:    the Meter Profile select value ('' = Auto: the technology's
 //             built-in curve — combined with tech above this IS the
 //             effective correction configuration).
-//  - tw/tbw:  the RESOLVED target-white anchor (review #22 round 6 P1):
-//             Target White {useMeasured,value} plus the resolved peak that
-//             rgbBalanceLstar actually divides through, via the SAME
-//             meterGreyTargetPeak() the balance math uses. Keying the manual
-//             fields alone would miss the re-measured-reference path.
-//  - tbk:     the RESOLVED black floor, via the same meterChartBlackLevel()
-//             the balance math consumes (manual value, measured 0%, or
-//             baseline/stamped fallback).
-// The reference tokens are read at RECORD time (not only from the target
-// handlers): the Measure buttons commit through meterSetTargetLevels(), a
-// series white/black re-read changes the measured reference with no event,
-// and both routes re-anchor every grey target — samples before and after
-// such a change are different quantities even when the patch XYZ is
-// identical (bench: Target White 100->200 between identical reads fabricated
-// a 7.7 L* floor and flagged every channel 'within noise'). Record-time
-// sync catches every vector, including the ones that fire no handler.
+// ROUND 7 — reference LEVELS are NOT fingerprint members. Round 6 keyed the
+// resolved peak/black floats and review found both failure modes of that
+// blanket-reset approach: exact-float reference keying wipes every step on a
+// 0.1% white-drift between series runs (the 'run the series twice' workflow
+// could never accumulate), while keying only the manual fields left the
+// event-free re-measured-reference path open. The store now holds RAW
+// readings (see meterRecordReadingNoise) and meterStepNoiseSigma RE-DERIVES
+// each sample's deviation under the current common reference at judgment
+// time, so ordinary reference refresh is reconciled instead of wiping: two
+// identical patch XYZs always recompute to one deviation (σ==0), whatever
+// white reference each happened to be recorded against. What remains here
+// are the identity/view keys a re-derivation CANNOT reconcile: the stored
+// XYZ itself means something different under another instrument, display
+// technology, or correction profile, and the view keys wipe eagerly so
+// cross-view floors never annotate between the edit and the next read.
 // Every read past the first two is individually guarded: a transient
 // accessor failure must not throw out of record — it yields the literal
 // 'err' token, and an err<->value flip wipes the store, which is the
@@ -14399,34 +14398,7 @@ function meterNoiseAnalysisContextString(){
  try{ const wp=meterTargetWhitePoint(); parts.push('wp:'+(wp?wp.x+','+wp.y:'err')); }catch(e){ parts.push('wp:err'); }
  try{ parts.push('tech:'+String((document.getElementById('meterDisplayType')||{}).value||'')); }catch(e){ parts.push('tech:err'); }
  try{ parts.push('ccss:'+String((document.getElementById('meterCcssProfile')||{}).value||'')); }catch(e){ parts.push('ccss:err'); }
- // Round 6 P1: target/reference LEVELS (not just the xy white point). The
- // tokens go through the same accessors rgbBalanceLstar's Lw/Lb come from,
- // so the fingerprint cannot drift from the quantity it guards.
- try{
-  const tw=meterTargetWhiteLevel();
-  parts.push('tw:'+(tw.useMeasured?'m':String(tw.value))
-   +'|p:'+meterNoiseTargetPeakY());
- }catch(e){ parts.push('tw:err'); }
- try{
-  const tb=meterTargetBlackLevel();
-  parts.push('tbk:'+(tb.useMeasured?'m':String(tb.value))
-   +'|b:'+meterNoiseResolvedBlackY());
- }catch(e){ parts.push('tbk:err'); }
  return parts.join('|');
-}
-// Resolved white-reference Y for the fingerprint: the measured white the
-// balance path feeds into meterGreyTargetPeak, exactly as meterLiveRgbData
-// resolves it (meterEffectiveGreyscaleWhiteReference -> luminance).
-function meterNoiseTargetPeakY(){
- const ref=meterEffectiveGreyscaleWhiteReference(Array.isArray(meterReadings)?meterReadings:[]);
- const refY=(ref&&typeof meterReadingLuminanceNits==='function')
-  ?meterReadingLuminanceNits(ref):((ref&&Number(ref.Y)>0)?Number(ref.Y):0);
- return String(meterGreyTargetPeak(refY>0?refY:meterColorReferenceNits()));
-}
-// Resolved black-floor Y for the fingerprint: the same accessor chain
-// meterLiveRgbData passes as rgbBalance's blackLevel argument.
-function meterNoiseResolvedBlackY(){
- return String(meterChartBlackLevel(Array.isArray(meterReadings)?meterReadings:[]));
 }
 // Check + (on change) wipe. Called at record time AND from both analysis
 // view-change handlers, so stale cross-view floors cannot annotate even in
@@ -14468,15 +14440,20 @@ function meterRecordReadingNoise(reading,step){
   meterSyncNoiseAnalysisContext();
   const key=meterStepNoiseKey(step||reading);
   if(!key) return;
-  const bal=meterLiveRgbData(reading);
-  if(!bal||bal.noChroma) return;
-  // Store PRE-gain deviations: the effective floor is compared against the
-  // raw L* deviation, and samples recorded while another formula was active
-  // (gain 1) or under a different slot gain must stay comparable — divide
-  // out the gain that produced these displayed values.
-  const g=(Number.isFinite(bal.gain)&&bal.gain>0)?bal.gain:1;
-  const sample=[(bal.R-100)/g,(bal.G-100)/g,(bal.B-100)/g];
-  if(!sample.every(Number.isFinite)) return;
+  // RAW readings, not derived deviations (review #22 round 7): the floor
+  // question is 'how does THIS patch repeat', and a deviation embeds the
+  // white/black reference and target levels at record time — re-measuring
+  // white between two runs would then either wipe the store (round-6
+  // fingerprint: any float drift killed the run-it-twice workflow) or mix
+  // samples computed on two scales (round-6 P2: false floors under a manual
+  // Target White). Storing the raw XYZ + the patch's own identity fields
+  // lets meterStepNoiseSigma re-derive every sample under ONE common,
+  // current reference at judgment time, so both failure modes go away:
+  // reference refresh is reconciled, and identical patch XYZ always
+  // recomputes to identical deviation (σ==0) whatever white each sample
+  // happened to be recorded against.
+  const X=Number(reading.X),Y=Number(reading.Y),Z=Number(reading.Z);
+  if(!(Number.isFinite(X)&&Number.isFinite(Y)&&Number.isFinite(Z)&&Y>0)) return;
   const store=meterNoiseHistoryStore();
   let h=store.get(key);
   if(!h){ h={vals:[]}; store.set(key,h); }
@@ -14487,9 +14464,17 @@ function meterRecordReadingNoise(reading,step){
   // identical to the first, so timestamp-blind dedupe silently discarded
   // the operator's 'run it twice' evidence and pinned the UI at 'pass 1'.
   const lastXYZ=h.lastXYZ;
-  const xyz=[reading.X,reading.Y,reading.Z];
+  const xyz=[X,Y,Z];
   const ts=Number(reading.timestamp)||0;
   if(lastXYZ&&lastXYZ.length===3&&lastXYZ.every((v,i)=>v===xyz[i])&&h.lastTS===ts) return;
+  // Sample = raw XYZ + the fields the balance re-derivation reads (IRE slot,
+  // wire code, worker target stamp). Tiny: 12 per step at most.
+  const sample={X:X,Y:Y,Z:Z};
+  if(reading.ire!=null) sample.ire=reading.ire;
+  if(reading.nominal_ire!=null) sample.nominal_ire=reading.nominal_ire;
+  if(reading.plot_ire!=null) sample.plot_ire=reading.plot_ire;
+  if(reading.r_code!=null) sample.r_code=reading.r_code;
+  if(reading.target_Yn!=null) sample.target_Yn=reading.target_Yn;
   h.vals.push(sample);
   h.lastXYZ=xyz;
   h.lastTS=ts;
@@ -14498,12 +14483,55 @@ function meterRecordReadingNoise(reading,step){
   try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
  }catch(e){}
 }
+// Re-evaluate one stored raw sample as a PRE-GAIN perceptual L* deviation
+// under the CURRENT common reference (white reference + black floor + target
+// levels resolved live). The judgment surfaces are Perceptual-gated, so
+// rgbBalancePerceptual is exactly the quantity the flag compares against;
+// dividing its own shadow gain out keeps samples comparable across slot
+// gains (the round-6 pre-gain rule, now applied at derivation instead of
+// at record). Returns null when the current reference cannot evaluate the
+// sample (no white measured yet); sigma() then ignores that sample, so a
+// partially-available reference degrades to the typed fallback instead of
+// mixing scales. Direct call into the balance core (not meterLiveRgbData)
+// also keeps this out of the tagBalNoise -> within-noise -> floor -> sigma
+// chain: no recursion by construction.
+function meterNoiseSampleDeviation(sample){
+ try{
+  if(!sample) return null;
+  const Y=Number(sample.Y);
+  if(!(Number.isFinite(Y)&&Y>0)) return null;
+  const ref=meterEffectiveGreyscaleWhiteReference(Array.isArray(meterReadings)?meterReadings:[]);
+  if(!ref) return null;
+  const black=meterChartBlackLevel(Array.isArray(meterReadings)?meterReadings:[]);
+  const rd={X:Number(sample.X),Y:Y,Z:Number(sample.Z)};
+  if(sample.ire!=null) rd.ire=sample.ire;
+  if(sample.nominal_ire!=null) rd.nominal_ire=sample.nominal_ire;
+  if(sample.plot_ire!=null) rd.plot_ire=sample.plot_ire;
+  if(sample.r_code!=null) rd.r_code=sample.r_code;
+  if(sample.target_Yn!=null) rd.target_Yn=sample.target_Yn;
+  const bal=rgbBalancePerceptual(rd,ref,meterGreyRefMode(),black);
+  if(!bal||bal.noChroma) return null;
+  const g=(Number.isFinite(bal.gain)&&bal.gain>0)?bal.gain:1;
+  const d=[(bal.R-100)/g,(bal.G-100)/g,(bal.B-100)/g];
+  return d.every(Number.isFinite)?d:null;
+ }catch(e){ return null; }
+}
 function meterStepNoiseSigma(key){
  try{
   const h=key?meterNoiseHistoryStore().get(key):null;
-  if(!h||h.vals.length<2) return null;
-  const sigmas=h.vals[0].map((_,ci)=>{
-   const v=h.vals.map(s=>s[ci]).filter(Number.isFinite);
+  if(!h||!Array.isArray(h.vals)||h.vals.length<2) return null;
+  // Derive every sample's deviation under the current common reference
+  // first (see meterNoiseSampleDeviation), THEN take the scatter: drift in
+  // the measured white/black between series runs moves all samples
+  // together, so it contributes zero fake σ.
+  const devs=[];
+  for(let i=0;i<h.vals.length;i++){
+   const d=meterNoiseSampleDeviation(h.vals[i]);
+   if(d) devs.push(d);
+  }
+  if(devs.length<2) return null;
+  const sigmas=devs[0].map((_,ci)=>{
+   const v=devs.map(d=>d[ci]).filter(Number.isFinite);
    if(v.length<2) return 0;
    const mean=v.reduce((a,b)=>a+b,0)/v.length;
    return Math.sqrt(v.reduce((a,b)=>a+(b-mean)*(b-mean),0)/(v.length-1));
@@ -14610,7 +14638,7 @@ function meterNoiseFloorSourceNote(stepOrReading){
   // not repeatability — so say exactly that instead of implying the point
   // earned its own floor.
   const sig=(()=>{try{return meterStepNoiseSigma(meterStepNoiseKey(stepOrReading));}catch(e){return null;}})();
-  if(sig===0||METER_NOISE_HISTORY_K*sig<METER_NOISE_FLOOR_MIN) return ' · '+n+' near-identical readings — meter cannot resolve its noise here; using typed floor';
+  if(!(sig>0)||METER_NOISE_HISTORY_K*sig<METER_NOISE_FLOOR_MIN) return ' · '+n+' near-identical readings — meter cannot resolve its noise here; using typed floor';
   return ' · measured scatter ('+n+' readings)';
  }
  // 1 sample is NOT 'no history': the patch has been read, it needs ONE
@@ -15988,13 +16016,10 @@ function meterSetTargetLevels(){
  };
  try{ localStorage.setItem(METER_TARGET_LEVELS_KEY,JSON.stringify(state)); }catch(e){}
  try{ meterWarnTargetWhiteAboveHdrMax(); }catch(e){}
- // Target White/Black re-anchor every grey balance target, so scatter
- // recorded under the previous levels is a different quantity (review #22
- // round 6 P1). Sync here so stale floors cannot annotate in the window
- // between the edit and the next reading; the record-time fingerprint also
- // carries tw/tbk/peak/black tokens for the event-free paths (measured
- // reference re-reads land with no handler).
- meterSyncNoiseAnalysisContext();
+ // No scatter invalidation here (round 7): target LEVELS no longer wipe —
+ // the store holds raw readings and sigma re-derives deviations under the
+// current levels, so an edit reconciles existing samples instead of
+ // erasing the operator's measured repeatability.
  // Let the checkbox/input state paint before recalculating charts. Rapid
  // toggles coalesce into one refresh instead of stacking expensive canvases.
  try{ meterScheduleTargetCurveRefresh(); }catch(e){}

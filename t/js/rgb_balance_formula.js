@@ -49,8 +49,7 @@ const FN_NAMES = [
   'meterNoiseHistoryStore',
   'meterSyncNoiseAnalysisContext',
   'meterNoiseAnalysisContextString',
-  'meterNoiseTargetPeakY',
-  'meterNoiseResolvedBlackY',
+  'meterNoiseSampleDeviation',
   'meterStepNoiseKey',
   'meterRecordReadingNoise',
   'meterReplaceReadings',
@@ -251,8 +250,11 @@ function meterGrayWorldWeight() { return null; }
 function meterReadingXYZ(rd) { return rd ? { X: rd.X, Y: rd.Y, Z: rd.Z } : null; }
 function meterResolveGreyRefMode(m) { return m || 'relative'; }
 function meterTargetWhitePoint() { return globalThis.__wpOverride || { x: 0.3127, y: 0.3290, X: 0.9505, Y: 1.0, Z: 1.0890 }; } // D65-ish, matches app default
-// Round 6 P1 fingerprint collaborators: target LEVELS and the resolved
-// reference/floor, all stub-driven so a test edit is the only wipe source.
+// Round 7 raw-sample re-architecture: record stores RAW readings and sigma
+// re-derives deviations through the REAL rgbBalancePerceptual against the
+// current reference, so the numerical fixtures drive __whiteRef (neutral at
+// 100 nit unless a test overrides it) instead of __liveBal. The balance
+// collaborators below are the same ones the __realCalc branch uses.
 function meterTargetWhiteLevel() { return globalThis.__targetWhite || { useMeasured: true, value: null }; }
 function meterTargetBlackLevel() { return globalThis.__targetBlack || { useMeasured: true, value: null }; }
 function meterEffectiveGreyscaleWhiteReference() { return globalThis.__whiteRef || null; }
@@ -345,6 +347,51 @@ function neutralD65(ire) {
   return { ire: ire, X: (x / y) * Y, Y: Y, Z: ((1 - x - y) / y) * Y };
 }
 function setFormula(v) { globalThis.__sel = v; } // v may be null/undefined or {value:...}
+
+// ---------------------------------------------------------------------------
+// Round 7 raw-sample fixtures. record() stores RAW readings and sigma
+// re-derives each sample's pre-gain deviation through the extracted
+// rgbBalancePerceptual against the CURRENT reference. In relative mode the
+// target is always the wp chromaticity lifted to the measured Y (the ire
+// branch and the no-ire branch coincide there), so with Y === whiteRef.Y the
+// deviation reduces to pure chromaticity error against wp — reproduced here
+// INDEPENDENTLY of rgbBalanceLstar's control flow (inline BT.709 rows + the
+// extracted ynToLstar). The shadow gain cancels (source multiplies then
+// divides by bal.gain), which this helper pins implicitly: a missing
+// division at 10 IRE would inflate sigma ~13x.
+// ---------------------------------------------------------------------------
+const FIX_WP = { X: 0.9505, Z: 1.0890 };
+const FIX_ROWS = [
+  [3.24096994, -1.53738318, -0.49861076],
+  [-0.96924364, 1.87596750, 0.04155506],
+  [0.05563008, -0.20397697, 1.05697156],
+];
+function refYNow() {
+  const wr = globalThis.__whiteRef;
+  const y = wr ? Number(wr.Y) : 0;
+  return y > 0 ? y : (Number(globalThis.__refNits) || 0);
+}
+function neutralRaw(Y) { return { X: FIX_WP.X * Y, Y: Y, Z: FIX_WP.Z * Y }; }
+function preGainDev(raw) {
+  const refY = refYNow();
+  if (!(refY > 0)) return null;
+  const mXn = raw.X / refY, mYn = raw.Y / refY, mZn = raw.Z / refY;
+  const tXn = FIX_WP.X * mYn, tYn = mYn, tZn = FIX_WP.Z * mYn;
+  return FIX_ROWS.map(r =>
+    S.ynToLstar(r[0] * mXn + r[1] * mYn + r[2] * mZn) -
+    S.ynToLstar(r[0] * tXn + r[1] * tYn + r[2] * tZn));
+}
+function sampleStdev(list) {
+  const mean = list.reduce((a, b) => a + b, 0) / list.length;
+  return Math.sqrt(list.reduce((a, b) => a + (b - mean) * (b - mean), 0) / (list.length - 1));
+}
+// Dominant-channel sigma over raw samples, computed the same way the source
+// does (max of per-channel sample stdevs) but from the independent
+// preGainDev above.
+function expectedSigmaOf(raws) {
+  const devs = raws.map(preGainDev);
+  return Math.max(...devs[0].map((_, ci) => sampleStdev(devs.map(d => d[ci]))));
+}
 
 const IRE_POINTS = [100, 90, 70, 50, 30, 10, 5];
 
@@ -1217,107 +1264,103 @@ test('noise_band_gain_comes_from_reading', () => {
 });
 
 test('empirical_floor_from_repeat_scatter', () => {
-  // Empirical mode: the per-point floor is k·σ of that step's own recorded
-  // pre-gain balance scatter. A step with no/<2 samples has no empirical
-  // floor and must fall back to the flat field (never silently blind).
+  // Empirical mode (round 7 raw-sample architecture): the store holds RAW
+  // readings; sigma re-derives each sample's pre-gain deviation through the
+  // real rgbBalancePerceptual against the CURRENT common reference, then
+  // takes the dominant-channel sample stdev. Expected values come from the
+  // independent preGainDev/expectedSigmaOf fixtures above — not from
+  // re-running the source's own path.
   globalThis.__noiseMode = null;
   globalThis.__noiseFloor = { value: '0.3' };
   assert(S.meterRgbBalanceNoiseFloorMode() === 'flat', 'missing select defaults to flat');
   globalThis.__noiseMode = { value: 'empirical' };
   assert(S.meterRgbBalanceNoiseFloorMode() === 'empirical', 'select drives the mode');
+  globalThis.__greyRef = 'relative';
+  globalThis.__whiteRef = neutralRaw(100);
+  globalThis.__blackY = 0;
+  S.meterReplaceReadings([]); // wipe store
   const step = { name: '45%' };
   // Flat mode ignores history entirely.
   assert(S.meterEmpiricalNoiseFloorFor(step) === null, 'flat mode: no empirical floor');
+  globalThis.__noiseMode = { value: 'empirical' };
   // Empirical mode, no history: null -> effective floor falls back to flat.
   assert(S.meterEmpiricalNoiseFloorFor(step) === null, 'no history yet: null');
   assertClose(S.meterRgbBalanceEffectiveNoiseFloor(step), 0.3, 1e-9, 'fallback = flat field');
-  // Feed three samples of a step whose displayed balance scatters around
-  // 100 with gain 1 (pre-gain == displayed deviation). Sample stdev of
-  // {0, +0.1, -0.1} is exactly 0.1 -> floor k·0.1.
-  globalThis.__liveBal = { R: 100.0, G: 100.0, B: 100.0, gain: 1 };
-  S.meterRecordReadingNoise({ X: 1, Y: 10, Z: 11 }, step);
+  // ire:10 fixtures exercise the shadow gain end to end: the re-derivation
+  // multiplies by gain and divides it back out, so sigma is gain-free. A
+  // missing division would inflate every value ~13x and break the
+  // assertClose below (that IS the pre-gain pin in the new architecture).
+  const r1 = Object.assign(neutralRaw(45), { ire: 10 });
+  const r2 = Object.assign({ X: FIX_WP.X * 45 + 0.02, Y: 45, Z: FIX_WP.Z * 45 }, { ire: 10 });
+  const r3 = Object.assign({ X: FIX_WP.X * 45, Y: 45, Z: FIX_WP.Z * 45 + 0.02 }, { ire: 10 });
+  S.meterRecordReadingNoise(r1, step);
   assert(S.meterEmpiricalNoiseFloorFor(step) === null, 'one sample: still no sigma');
-  globalThis.__liveBal = { R: 100.1, G: 100.0, B: 100.0, gain: 1 };
-  S.meterRecordReadingNoise({ X: 1, Y: 10, Z: 11.0001 }, step);
-  assertClose(S.meterStepNoiseSigma(S.meterStepNoiseKey(step)), 0.1 / Math.SQRT2, 1e-9,
-    'two-sample stdev of {0,0.1} is |d|/sqrt(2)');
-  globalThis.__liveBal = { R: 99.9, G: 100.0, B: 100.0, gain: 1 };
-  S.meterRecordReadingNoise({ X: 1, Y: 10, Z: 11.0002 }, step);
+  S.meterRecordReadingNoise(r2, step);
+  assertClose(S.meterStepNoiseSigma(S.meterStepNoiseKey(step)), expectedSigmaOf([r1, r2]), 1e-9,
+    'two-sample sigma = dominant-channel stdev of re-derived pre-gain deviations');
+  S.meterRecordReadingNoise(r3, step);
+  const expSigma = expectedSigmaOf([r1, r2, r3]);
   const f = S.meterEmpiricalNoiseFloorFor(step);
-  assertClose(f, METER_NOISE_HISTORY_K * 0.1, 1e-9, 'floor = k·sigma of the scatter');
-  // The flag now judges against k·sigma, not the flat 0.3: deviation 0.25
-  // (> flat 0.3? no: 0.25 < 0.3 flat-true; with k·sigma 0.2 it must be FALSE).
-  assert(S.meterRgbBalanceWithinNoise(100.25, 1, step) === false, 'empirical floor replaces the flat verdict');
-  assert(S.meterRgbBalanceWithinNoise(100.15, 1, step) === true, 'inside k·sigma flags');
+  assertClose(f, METER_NOISE_HISTORY_K * expSigma, 1e-9, 'floor = k\u00b7sigma of the re-derived scatter');
+  // The flag now judges against k\u00b7sigma, not the flat 0.3.
+  assert(S.meterRgbBalanceWithinNoise(100 + f * 1.25, 1, step) === false, 'empirical floor replaces the flat verdict');
+  assert(S.meterRgbBalanceWithinNoise(100 + f * 0.75, 1, step) === true, 'inside k\u00b7sigma flags');
   // An unknown step (no history) still uses the flat floor.
   assert(S.meterRgbBalanceWithinNoise(100.25, 1, { name: '5%' }) === true, 'unknown step: flat fallback');
-  // Samples store PRE-gain: gain-4 balances of ±0.8 displayed are ±0.2
-  // pre-gain, so the stdev lands at 0.2 in the same scale as above.
-  const step2 = { name: '5%' };
-  globalThis.__liveBal = { R: 100.0, G: 100.0, B: 100.0, gain: 4 };
-  S.meterRecordReadingNoise({ X: 1, Y: 1, Z: 1 }, step2);
-  globalThis.__liveBal = { R: 100.8, G: 100.0, B: 100.0, gain: 4 };
-  S.meterRecordReadingNoise({ X: 1, Y: 1, Z: 1.1 }, step2);
-  globalThis.__liveBal = { R: 99.2, G: 100.0, B: 100.0, gain: 4 };
-  S.meterRecordReadingNoise({ X: 1, Y: 1, Z: 1.2 }, step2);
-  assertClose(S.meterEmpiricalNoiseFloorFor(step2), METER_NOISE_HISTORY_K * 0.2, 1e-9,
-    'sigma computed on pre-gain deviations');
   // Re-delivering the SAME (last) XYZ is ONE measurement, not scatter
   // evidence — the dedupe is consecutive-only by design: a stale series poll
   // re-delivers the newest reading, and a genuinely re-aimed meter never
   // reproduces an identical X/Y/Z triple.
-  const sigmaBefore = S.meterStepNoiseSigma(S.meterStepNoiseKey(step2));
-  globalThis.__liveBal = { R: 99.2, G: 100.0, B: 100.0, gain: 4 };
-  S.meterRecordReadingNoise({ X: 1, Y: 1, Z: 1.2 }, step2);
-  assertClose(S.meterStepNoiseSigma(S.meterStepNoiseKey(step2)), sigmaBefore, 1e-12,
+  const sigmaBefore = S.meterStepNoiseSigma(S.meterStepNoiseKey(step));
+  S.meterRecordReadingNoise(r3, step);
+  assertClose(S.meterStepNoiseSigma(S.meterStepNoiseKey(step)), sigmaBefore, 1e-12,
     'duplicate XYZ poll must not add a sample');
   // BUT identical XYZ with a NEW timestamp is a genuine repeat measurement
   // (bench: settled panel + i1 returns bit-identical readings for a whole
   // second series run; timestamp-blind dedupe pinned 'pass 1 done' forever).
-  const valsBefore = S.meterNoiseHistoryStore().get(S.meterStepNoiseKey(step2)).vals.length;
-  S.meterRecordReadingNoise({ X: 1, Y: 1, Z: 1.2, timestamp: 999 }, step2);
-  assert(S.meterNoiseHistoryStore().get(S.meterStepNoiseKey(step2)).vals.length === valsBefore + 1,
+  const valsBefore = S.meterNoiseHistoryStore().get(S.meterStepNoiseKey(step)).vals.length;
+  S.meterRecordReadingNoise(Object.assign({}, r3, { timestamp: 999 }), step);
+  assert(S.meterNoiseHistoryStore().get(S.meterStepNoiseKey(step)).vals.length === valsBefore + 1,
     'identical XYZ with new timestamp records a second sample');
-  // σ==0 from identical repeats: floor falls back to typed (design kept) and
-  // the note says the meter cannot resolve noise here, not 'measured scatter'.
-  const stepZero = { name: 'zeroσ%' };
-  globalThis.__liveBal = { R: 100, G: 100, B: 100, gain: 1 };
-  S.meterRecordReadingNoise({ X: 5, Y: 50, Z: 55, timestamp: 1 }, stepZero);
-  S.meterRecordReadingNoise({ X: 5, Y: 50, Z: 55, timestamp: 2 }, stepZero);
+  // Repeats re-derived as bit-identical raws give sigma 0: floor falls back
+  // to typed (design kept) and the note says the meter cannot resolve noise
+  // here, not 'measured scatter'.
+  const stepZero = { name: 'zero\u03c3%' };
+  const zeroRaw = Object.assign(neutralRaw(50), { timestamp: 1 });
+  S.meterRecordReadingNoise(zeroRaw, stepZero);
+  S.meterRecordReadingNoise(Object.assign({}, zeroRaw, { timestamp: 2 }), stepZero);
   assert(S.meterEmpiricalNoiseFloorFor(stepZero) === null,
-    'σ==0 (all-identical repeats) falls back to typed floor');
+    '\u03c3==0 (all-identical repeats) falls back to typed floor');
   assert(S.meterNoiseFloorSourceNote(stepZero).includes('identical readings'),
-    'σ==0 note names quantization, not measured scatter');
-  // Sub-resolution scatter (review #22 finding 1): two NEAR-identical
-  // samples on a low-noise meter give a tiny positive σ; k·σ below the
-  // flat control's 0.01 L* resolution bound is quantization, not
-  // characterized scatter — the point must fall back to the typed floor
-  // and the note must say so, not claim 'measured scatter'.
-  const stepTiny = { name: 'tinyσ%' };
-  globalThis.__liveBal = { R: 100.000, G: 100.000, B: 100.000, gain: 1 };
-  S.meterRecordReadingNoise({ X: 6, Y: 60, Z: 66, timestamp: 1 }, stepTiny);
-  globalThis.__liveBal = { R: 100.002, G: 100.000, B: 100.000, gain: 1 };
-  S.meterRecordReadingNoise({ X: 6, Y: 60, Z: 66.0002, timestamp: 2 }, stepTiny);
+    '\u03c3==0 note names quantization, not measured scatter');
+  // Sub-resolution scatter (review #22 finding 1): two NEAR-identical raw
+  // samples give a tiny positive \u03c3; k\u00b7\u03c3 below the flat control's
+  // 0.01 L* resolution bound is quantization — typed fallback, and the note
+  // must say so.
+  const stepTiny = { name: 'tiny\u03c3%' };
+  const t1 = Object.assign(neutralRaw(60), { timestamp: 1 });
+  const t2 = Object.assign({ X: FIX_WP.X * 60 + 0.003, Y: 60, Z: FIX_WP.Z * 60 }, { timestamp: 2 });
+  S.meterRecordReadingNoise(t1, stepTiny);
+  S.meterRecordReadingNoise(t2, stepTiny);
   const tinySig = S.meterStepNoiseSigma(S.meterStepNoiseKey(stepTiny));
   assert(tinySig > 0 && METER_NOISE_HISTORY_K * tinySig < METER_NOISE_FLOOR_MIN,
-    'sub-minimum σ fixture (positive σ, k·σ < 0.01)');
+    'sub-minimum \u03c3 fixture (positive \u03c3, k\u00b7\u03c3 < 0.01)');
   assert(S.meterEmpiricalNoiseFloorFor(stepTiny) === null,
-    'k·σ below the 0.01 bound falls back to typed floor');
+    'k\u00b7\u03c3 below the 0.01 bound falls back to typed floor');
   assertClose(S.meterRgbBalanceEffectiveNoiseFloor(stepTiny), 0.3, 1e-9,
-    'effective floor for sub-minimum-σ point is the typed flat value');
+    'effective floor for sub-minimum-\u03c3 point is the typed flat value');
   assert(S.meterNoiseFloorSourceNote(stepTiny).includes('cannot resolve its noise'),
-    'sub-minimum-σ note discloses the typed-floor fallback');
-  // A σ whose k·σ is AT/above the bound still earns its own floor.
-  const stepEdge = { name: 'edgeσ%' };
-  globalThis.__liveBal = { R: 99.995, G: 100.000, B: 100.000, gain: 1 };
-  S.meterRecordReadingNoise({ X: 7, Y: 70, Z: 77, timestamp: 1 }, stepEdge);
-  globalThis.__liveBal = { R: 100.005, G: 100.000, B: 100.000, gain: 1 };
-  S.meterRecordReadingNoise({ X: 7, Y: 70, Z: 77.0002, timestamp: 2 }, stepEdge);
-  assertClose(S.meterEmpiricalNoiseFloorFor(stepEdge), METER_NOISE_HISTORY_K * 0.01 / Math.SQRT2, 1e-9,
-    'σ just above the bound still produces its empirical floor');
+    'sub-minimum-\u03c3 note discloses the typed-floor fallback');
+  // A \u03c3 whose k\u00b7\u03c3 is AT/above the bound still earns its own floor.
+  const stepEdge = { name: 'edge\u03c3%' };
+  const e1 = Object.assign(neutralRaw(70), { timestamp: 1 });
+  const e2 = Object.assign({ X: FIX_WP.X * 70 + 0.01, Y: 70, Z: FIX_WP.Z * 70 }, { timestamp: 2 });
+  S.meterRecordReadingNoise(e1, stepEdge);
+  S.meterRecordReadingNoise(e2, stepEdge);
+  assertClose(S.meterEmpiricalNoiseFloorFor(stepEdge), METER_NOISE_HISTORY_K * expectedSigmaOf([e1, e2]), 1e-9,
+    '\u03c3 just above the bound still produces its empirical floor');
   // Gates: non-greyscale and non-real readings record nothing.
   globalThis.__recIsGrey = false;
-  globalThis.__liveBal = { R: 105, G: 95, B: 100, gain: 1 };
   S.meterRecordReadingNoise({ X: 2, Y: 2, Z: 2 }, { name: 'red-patch' });
   assert(S.meterEmpiricalNoiseFloorFor({ name: 'red-patch' }) === null, 'color patch records nothing');
   globalThis.__recIsGrey = true;
@@ -1325,12 +1368,15 @@ test('empirical_floor_from_repeat_scatter', () => {
   S.meterRecordReadingNoise({ X: 3, Y: 3, Z: 3 }, { name: 'shell-step' });
   assert(S.meterEmpiricalNoiseFloorFor({ name: 'shell-step' }) === null, 'unread shell records nothing');
   globalThis.__recIsReal = true;
-  globalThis.__noiseMode = null;
-  globalThis.__noiseFloor = null;
-  globalThis.__liveBal = null;
+  // Readings without usable luminance record nothing (raw store gate).
+  S.meterRecordReadingNoise({ X: 0, Y: 0, Z: 0 }, { name: 'dark-step' });
+  assert(S.meterNoiseHistoryStore().get('dark-step') === undefined, 'Y<=0 reading records nothing');
   // Store reset path: meterReplaceReadings clears it on series switch.
+  // Raw-sample seed: neutral at Y=100 plus a chromaticity jitter (dx in X).
+  const seed = (jitters) => jitters.map(j => ({ X: FIX_WP.X * 100 + j, Y: 100, Z: FIX_WP.Z * 100 }));
+  globalThis.__whiteRef = neutralRaw(100);
   const store = S.meterNoiseHistoryStore();
-  store.set('45%', { vals: [[0, 0, 0], [0.1, -0.1, 0]] });
+  store.set('45%', { vals: seed([0, 0.05]) });
   assert(S.meterStepNoiseSigma('45%') > 0, 'store is shared module state');
   // Default replace = series switch: history wiped.
   S.meterReplaceReadings([{ name: '5%', Y: 1 }]);
@@ -1340,14 +1386,13 @@ test('empirical_floor_from_repeat_scatter', () => {
   // the poll wiped every cycle, so two runs left the count at zero).
   // NB: the default wipe above replaced the Map itself — refetch before use.
   const store2 = S.meterNoiseHistoryStore();
-  store2.set('45%', { vals: [[0, 0, 0], [0.1, -0.1, 0]] });
+  store2.set('45%', { vals: seed([0, 0.05]) });
   S.meterReplaceReadings([{ name: '5%', Y: 1 }], true);
   assert(S.meterStepNoiseSigma('45%') > 0, 'poll replaceReadings keeps history');
-
   // Floor-source annotation: the same ±number must say whether it came
   // from measured scatter or the typed fallback (UX: same-number ambiguity).
   globalThis.__noiseMode = { value: 'empirical' };
-  S.meterNoiseHistoryStore().set('note%', { vals: [[0, 0, 0], [0.1, -0.1, 0], [0, 0.1, -0.1], [-0.1, 0, 0.1]] });
+  S.meterNoiseHistoryStore().set('note%', { vals: seed([0, 0.05, 0.1, -0.05]) });
   assert(S.meterNoiseFloorSourceNote({ name: 'note%' }) === ' · measured scatter (4 readings)',
     'measured point names its sample count');
   assert(S.meterNoiseFloorSourceNote({ name: 'nope%' }) ===
@@ -1356,79 +1401,71 @@ test('empirical_floor_from_repeat_scatter', () => {
   // 1 sample is not 'no history': the patch WAS read; ask for exactly one
   // more (bench: after a first series pass every point sat at 1 sample and
   // the UI told the operator to start over).
-  S.meterNoiseHistoryStore().set('one%', { vals: [[0, 0, 0]] });
-  assert(S.meterNoiseFloorSourceNote({ name: 'one%' }) ===
-    ' · 1 reading so far — one more gives this point its own floor; using typed floor',
+  S.meterNoiseHistoryStore().set('one%', { vals: seed([0]) });
+  assert(S.meterNoiseFloorSourceNote({ name: 'one%' }).includes('1 reading so far'),
     '1-sample point asks for one more, not a restart');
   globalThis.__noiseMode = { value: 'flat' };
-  assert(S.meterNoiseFloorSourceNote(step) === '', 'flat mode: no source note');
-  globalThis.__noiseMode = { value: 'empirical' };
-
-  // Cap: k·sigma must never exceed the control's 10-point maximum, or
-  // 'within noise' would swallow the entire plot (review #22 item 3).
+  assert(S.meterNoiseFloorSourceNote({ name: 'note%' }) === '', 'flat mode: no source note');
   globalThis.__noiseMode = { value: 'empirical' };
   globalThis.__noiseFloor = { value: '0.3' };
-  S.meterNoiseHistoryStore().set('cap%', { vals: [[0, 0, 0], [10, 0, 0]] });
+  // Cap: k·sigma must never exceed the control's 10-point maximum, or
+  // 'within noise' would swallow the entire plot (review #22 item 3).
+  // Raw jitter 10 in X at Y=100 re-derives to sigma ~6.6 L* (k·sigma ~13),
+  // so the 10 L* clamp must bite.
+  S.meterNoiseHistoryStore().set('cap%', { vals: seed([0, 10]) });
   assert(S.meterStepNoiseSigma('cap%') > 5, 'cap fixture: k·sigma would exceed 10');
   assertClose(S.meterEmpiricalNoiseFloorFor({ name: 'cap%' }), 10, 1e-12,
     'empirical floor capped at 10 L*');
-
-  // sigma == 0 (quantized meter: identical balances over DISTINCT XYZ near
-  // black) is NOT a 0-wide floor — it falls back to the flat field
-  // (review #22 item 2).
-  S.meterNoiseHistoryStore().set('zero%', { vals: [[0, 0, 0], [0, 0, 0], [0, 0, 0]] });
+  // sigma == 0 (identical raw samples) is NOT a 0-wide floor — it falls
+  // back to the flat field (review #22 item 2).
+  S.meterNoiseHistoryStore().set('zero%', { vals: seed([0, 0, 0]) });
   assert(S.meterStepNoiseSigma('zero%') === 0, 'zero-scatter fixture');
   assert(S.meterEmpiricalNoiseFloorFor({ name: 'zero%' }) === null,
     'sigma 0 must not produce a 0-wide floor');
   assertClose(S.meterRgbBalanceEffectiveNoiseFloor({ name: 'zero%' }), 0.3, 1e-9,
     'sigma 0 point falls back to the flat floor');
-
+  // No white reference resolvable at judgment time: every re-derivation
+  // returns null and the point degrades to the typed fallback instead of
+  // mixing scales (round 7).
+  globalThis.__whiteRef = null; globalThis.__refNits = 0;
+  assert(S.meterStepNoiseSigma('zero%') === null, 'no reference: sigma is null, not a number');
+  assert(S.meterEmpiricalNoiseFloorFor({ name: 'note%' }) === null,
+    'no reference: empirical floor unavailable, typed fallback');
+  globalThis.__whiteRef = neutralRaw(100);
   // Trim invalidation: a WB write drops ONLY that step's scatter.
-  // (The replace tests above reset the store; seed both steps fresh.)
-  S.meterNoiseHistoryStore().set('5%', { vals: [[0, 0, 0], [0, 0.1, 0]] });
+  S.meterNoiseHistoryStore().set('5%', { vals: seed([0, 0.05]) });
   S.meterInvalidateStepNoise({ name: '45%' });
   assert(S.meterStepNoiseSigma('45%') === null, 'trimmed step: history dropped');
   assert(S.meterStepNoiseSigma('5%') !== null, 'other steps keep their history');
-
   // Which generic control writes invalidate EVERYTHING (review #22 item 1):
   // measurement-affecting keys yes, picture plumbing no.
   assert(S.meterLgTrimKeyAffectsPatch('whiteBalanceRed') === true, 'WB offset invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('Colour Temp') === true, 'colour temp invalidates');
-  // Real LG control keys are camelCase (webui-lg.js LG_DISPLAY_CONTROL_ITEMS);
-  // a space-only matcher silently missed colorTemperature on first review.
   assert(S.meterLgTrimKeyAffectsPatch('colorTemperature') === true, 'camelCase color temp invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('colour_temperature') === true, 'snake colour temp invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('brightness') === true, 'brightness invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('contrast') === true, 'contrast invalidates');
-  // Panel-luminance keys (review #22 finding 2): the autocal panel-light
-  // writer already wipes ALL scatter on these; the generic LG commit path
-  // must agree, or the same physical change keeps stale scatter alive.
   assert(S.meterLgTrimKeyAffectsPatch('backlight') === true, 'backlight invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('blackLevel') === true, 'blackLevel invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('blackLevelAdjust') === true, 'blackLevelAdjust invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('oledLight') === true, 'oledLight invalidates');
-  // Panel-output controls per review #22 round 4 P2: gamma regrades the
-  // response, energy saving / local dimming / tone mapping / eye comfort /
-  // BFI all change what the meter integrates.
   assert(S.meterLgTrimKeyAffectsPatch('gamma') === true, 'gamma invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('energySaving') === true, 'energySaving invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('localDimming') === true, 'localDimming invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('hdrDynamicToneMapping') === true, 'tone mapping invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('eyeComfortMode') === true, 'eye comfort invalidates');
   assert(S.meterLgTrimKeyAffectsPatch('black_frame_insertion') === true, 'BFI invalidates');
-  // True plumbing: signal formatting and menus do not change patch light.
   assert(S.meterLgTrimKeyAffectsPatch('colorDepth') === false, 'colorDepth keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('colorGamut') === false, 'gamut selection keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('sharpness') === false, 'sharpness keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('hdmiRange') === false, 'hdmiRange keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('calibration_mode') === false, 'cal mode keeps history');
   assert(S.meterLgTrimKeyAffectsPatch('') === false, 'empty key keeps history');
-
   S.meterInvalidateAllStepNoise();
   assert(S.meterStepNoiseSigma('5%') === null, 'panel-wide write wipes all scatter');
-
   globalThis.__noiseMode = null;
   globalThis.__noiseFloor = null;
+  globalThis.__greyRef = null;
 });
 
 test('empirical_mode_control_wiring', () => {
@@ -1661,80 +1698,89 @@ test('gamut_and_whitepoint_edits_wipe_scatter', () => {
   globalThis.__noiseFloor = null; globalThis.__liveBal = null;
 });
 
-test('target_levels_and_reference_wipe_scatter_real_calc', () => {
-  // Review #22 round 6 P1: the round-5 fingerprint carried the white-point
-  // xy but not the white/black LEVELS or the measured reference. Target
-  // White/Black and a re-measured white re-anchor rgbBalanceLstar's Lw/Lb,
-  // so identical patch XYZ under two levels produces a deviation delta that
-  // is analysis change, not meter scatter (reviewer bench: Target White
-  // 100->200 between identical reads fabricated a 7.7 L* floor; Target
-  // Black 0->0.1 fabricated 8.48 L*; re-measured white 100->110 fabricated
-  // 0.79 L* — each wrongly flagged all channels 'within noise'). Runs the
-  // REAL balance math through the __realCalc branch, like round 5.
+test('reference_refresh_reconciles_instead_of_wiping', () => {
+  // Review #22 round 7 REPLACES the round-6 blanket-reset design. Round 6
+  // keyed the resolved peak/black floats into the fingerprint: any drift in
+  // the measured white wiped every step (the run-the-series-twice workflow
+  // could never accumulate), and a manual Target White masked the
+  // normalization scale (false floors). New contract: raw samples are
+  // RETAINED across reference/target-level changes, and sigma re-derives
+  // them under the current common reference so (a) identical patch XYZ
+  // always recomputes to identical deviation -> sigma 0 -> typed fallback
+  // (no fabricated floor), and (b) genuine scatter still accumulates even
+  // when white drifts 0.1% between runs.
   globalThis.__noiseMode = { value: 'empirical' };
   globalThis.__noiseFloor = { value: '0.3' };
   globalThis.__sel = { value: 'perceptual' };
-  globalThis.__greyRef = 'eotf';
-  globalThis.__whiteRef = { X: 0.9505 * 100, Y: 100, Z: 1.0890 * 100 };
-  globalThis.__realCalc = true;
+  globalThis.__greyRef = 'relative';
+  globalThis.__realCalc = false;
   globalThis.__targetWhite = { useMeasured: true, value: null };
   globalThis.__targetBlack = { useMeasured: true, value: null };
   globalThis.__blackY = 0;
-  S.meterReplaceReadings([]); // wipe store, seed refs
-  // Vector 1 — manual Target White 100 -> 200 between IDENTICAL reads.
-  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 40, ire: 10 }, { name: '10%' });
-  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 1, 'levels-2.2 sample stored');
-  globalThis.__targetWhite = { useMeasured: false, value: 100 };
-  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 41, ire: 10 }, { name: '10%' });
-  globalThis.__targetWhite = { useMeasured: false, value: 200 };
-  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 42, ire: 10 }, { name: '10%' });
-  const hw = S.meterNoiseHistoryStore().get('10%');
-  assert(hw && hw.vals.length === 1, 'manual Target White edit wiped the previous-level samples');
+  S.meterReplaceReadings([]);
+  // Vector 1 — measured white drifts 100 -> 100.1 -> 100.2 across three
+  // 'runs' of the same patch (the reviewer's series-repeat repro). Samples
+  // must ACCUMULATE 1 -> 2 -> 3, and the same XYZ must stay at sigma 0.
+  globalThis.__whiteRef = neutralRaw(100);
+  const patch = (ts) => Object.assign(neutralRaw(10), { timestamp: ts });
+  S.meterRecordReadingNoise(patch(40), { name: '10%' });
+  globalThis.__whiteRef = neutralRaw(100.1);
+  S.meterRecordReadingNoise(patch(41), { name: '10%' });
+  globalThis.__whiteRef = neutralRaw(100.2);
+  S.meterRecordReadingNoise(patch(42), { name: '10%' });
+  const h = S.meterNoiseHistoryStore().get('10%');
+  assert(h && h.vals.length === 3,
+    'white-drift repeat runs ACCUMULATE samples (round-6 wiped at run 2)');
   assert(S.meterEmpiricalNoiseFloorFor({ name: '10%' }) === null,
-    'cross-level pair must NOT produce an empirical floor');
+    'identical patches under drifted white give sigma 0 -> typed fallback');
   assertClose(S.meterRgbBalanceEffectiveNoiseFloor({ name: '10%' }), 0.3, 1e-9,
-    'effective floor after a Target White edit is the typed value');
-  // Vector 2 — Target Black 0 -> 0.1 (BT.1886 bottom anchor moves).
+    'drift-reconciled point uses the typed floor, not a fabricated one');
+  // Vector 2 — manual Target White 100 -> 200 between identical reads
+  // (round-6 P2's false 0.096 floor vector): no wipe, sigma 0, typed floor.
+  S.meterReplaceReadings([]);
+  globalThis.__targetWhite = { useMeasured: false, value: 100 };
+  globalThis.__whiteRef = neutralRaw(100);
+  S.meterRecordReadingNoise(patch(50), { name: '10%' });
+  globalThis.__targetWhite = { useMeasured: false, value: 200 };
+  S.meterRecordReadingNoise(patch(51), { name: '10%' });
+  const h2 = S.meterNoiseHistoryStore().get('10%');
+  assert(h2 && h2.vals.length === 2, 'Target White edit RETAINS raw samples');
+  assert(S.meterEmpiricalNoiseFloorFor({ name: '10%' }) === null,
+    'cross-level identical patches re-derive to sigma 0 — no fabricated floor');
+  // Vector 3 — re-measured white 100 -> 110 under a MANUAL Target White
+  // (round-6 P2 exactly: fingerprint-free scale move). Raw samples retained,
+  // re-derived under the current 110 reference -> sigma 0 -> typed fallback.
+  S.meterReplaceReadings([]);
+  globalThis.__whiteRef = neutralRaw(100);
+  S.meterRecordReadingNoise(patch(60), { name: '10%' });
+  globalThis.__whiteRef = neutralRaw(110);
+  S.meterRecordReadingNoise(patch(61), { name: '10%' });
+  const h3 = S.meterNoiseHistoryStore().get('10%');
+  assert(h3 && h3.vals.length === 2, 're-measured white RETAINS raw samples (manual TW)');
+  assert(S.meterEmpiricalNoiseFloorFor({ name: '10%' }) === null,
+    'measured-reference move re-derives to sigma 0 — the round-6 0.096 floor is gone');
+  // Genuine scatter under a drifting reference: a real chromaticity repeat
+  // spread still produces its k·sigma floor, computed under the FINAL
+  // common reference for every sample.
   S.meterReplaceReadings([]);
   globalThis.__targetWhite = { useMeasured: true, value: null };
-  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 50, ire: 10 }, { name: '10%' });
-  globalThis.__targetBlack = { useMeasured: false, value: 0.1 };
-  globalThis.__blackY = 0.1; // keep the resolved-floor stub consistent
-  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 51, ire: 10 }, { name: '10%' });
-  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 1,
-    'manual Target Black edit wiped the previous-floor samples');
-  // Vector 3 — measured reference moves with NO control edit: re-reading
-  // white at 110 between identical reads is an event-free re-anchor (the
-  // reviewer's 'adding only the manual target fields would leave that path
-  // open' case). Only the resolved-peak token can catch it.
+  globalThis.__whiteRef = neutralRaw(100);
+  const a = Object.assign({ X: FIX_WP.X * 10 + 0.004, Y: 10, Z: FIX_WP.Z * 10 }, { timestamp: 70 });
+  globalThis.__whiteRef = neutralRaw(100.3); // drift between the two reads
+  const b = Object.assign({ X: FIX_WP.X * 10 - 0.004, Y: 10, Z: FIX_WP.Z * 10 }, { timestamp: 71 });
+  S.meterRecordReadingNoise(a, { name: '10%' });
+  S.meterRecordReadingNoise(b, { name: '10%' });
+  const sig = S.meterStepNoiseSigma('10%');
+  assert(sig > 0, 'genuine scatter survives a reference refresh');
+  assertClose(sig, expectedSigmaOf([a, b]), 1e-9,
+    'sigma is the stdev of deviations re-derived under the CURRENT reference');
+  // Cleanup.
   S.meterReplaceReadings([]);
-  globalThis.__targetBlack = { useMeasured: true, value: null };
-  globalThis.__blackY = 0;
-  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 60, ire: 10 }, { name: '10%' });
-  globalThis.__whiteRef = { X: 0.9505 * 110, Y: 110, Z: 1.0890 * 110 };
-  S.meterRecordReadingNoise({ X: 0.6, Y: 0.6, Z: 0.68, timestamp: 61, ire: 10 }, { name: '10%' });
-  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 1,
-    're-measured white reference (no control event) wiped the old-reference samples');
-  // Same-context accumulation still works: two distinct reads, levels and
-  // reference untouched, build a real scatter.
-  S.meterRecordReadingNoise({ X: 0.602, Y: 0.601, Z: 0.682, timestamp: 62, ire: 10 }, { name: '10%' });
-  assert(S.meterNoiseHistoryStore().get('10%').vals.length === 2,
-    'same-levels repeat accumulates through the real balance calc');
-  // Structural pin: meterSetTargetLevels (the Measure-button + manual-edit
-  // commit point) syncs the context so floors die at the gesture, not only
-  // at the next record.
-  const setSrc = extractFunction(srcText, 'meterSetTargetLevels');
-  assert(setSrc.includes('meterSyncNoiseAnalysisContext()'),
-    'meterSetTargetLevels syncs (wipes on change) the noise analysis context');
-  // Cleanup: leave store empty and level stubs unset.
-  S.meterReplaceReadings([]);
-  globalThis.__realCalc = false; globalThis.__whiteRef = null;
   globalThis.__targetWhite = null; globalThis.__targetBlack = null;
-  globalThis.__blackY = null;
+  globalThis.__blackY = null; globalThis.__whiteRef = null;
   globalThis.__sel = null; globalThis.__greyRef = null;
   globalThis.__noiseMode = null; globalThis.__noiseFloor = null;
 });
-
 test('panel_technology_and_profile_wipe_scatter', () => {
   // Review #22 round 5 P2: changing Display Type resets Meter Profile
   // (CCSS) programmatically — no change event fires — so the CCSS handler's
@@ -1784,11 +1830,7 @@ test('noise_fingerprint_members_and_tech_handler', () => {
   // Type handler invalidates scatter directly (its CCSS reset fires no
   // event, so the record-time fingerprint alone would defer the wipe).
   const ctxSrc = extractFunction(srcText, 'meterNoiseAnalysisContextString');
-  for (const tok of ['meterGreyTargetGammaSelection', 'meterAnalysisGamutKey', 'meterTargetWhitePoint', 'meterDisplayType', 'meterCcssProfile',
-    // Round 6 P1: resolved target/reference levels (reviewer: manual fields
-    // alone leave the re-measured-reference path open — the peak/black
-    // tokens go through the balance math's own accessors).
-    'meterTargetWhiteLevel', 'meterTargetBlackLevel', 'meterNoiseTargetPeakY', 'meterNoiseResolvedBlackY']) {
+  for (const tok of ['meterGreyTargetGammaSelection', 'meterAnalysisGamutKey', 'meterTargetWhitePoint', 'meterDisplayType', 'meterCcssProfile']) {
     assert(ctxSrc.includes(tok), 'fingerprint includes ' + tok);
   }
   // Fingerprint values actually change with the controls (behavior, through
@@ -1809,6 +1851,42 @@ test('noise_fingerprint_members_and_tech_handler', () => {
   const techBlock = wsText.slice(techIdx, wsText.indexOf('ccssFileInput', techIdx));
   assert(techBlock.includes('meterInvalidateAllStepNoise'),
     'Display Type change invalidates all scatter directly (its CCSS reset fires no event)');
+});
+
+test('round7_raw_store_and_no_level_wipe', () => {
+  // Review #22 round 7 structural pins for the raw-sample re-architecture:
+  // 1) the record path stores RAW readings (reading.X/Y/Z), NOT
+  //    meterLiveRgbData deviations;
+  // 2) the fingerprint carries NO target-level members (round-6 tw/tbk are
+  //    removed — reference drift must reconcile, not wipe);
+  // 3) meterSetTargetLevels no longer syncs/wipes (edits reconcile through
+  //    the sigma re-derivation instead of erasing measured repeatability).
+  const recSrc = extractFunction(srcText, 'meterRecordReadingNoise');
+  assert(/const X=Number\(reading\.X\)/.test(recSrc) && recSrc.includes('h.vals.push(sample)'),
+    'record stores raw XYZ readings');
+  assert(!recSrc.includes('meterLiveRgbData'),
+    'record no longer derives deviations through meterLiveRgbData');
+  const sigSrc = extractFunction(srcText, 'meterStepNoiseSigma');
+  assert(sigSrc.includes('meterNoiseSampleDeviation'),
+    'sigma re-derives sample deviations before taking the scatter');
+  const ctxSrc = extractFunction(srcText, 'meterNoiseAnalysisContextString');
+  for (const gone of ['meterTargetWhiteLevel', 'meterTargetBlackLevel', 'meterNoiseTargetPeakY', 'meterNoiseResolvedBlackY']) {
+    assert(!ctxSrc.includes(gone), 'fingerprint no longer keys ' + gone + ' (reconciliation replaced wiping)');
+  }
+  const setSrc = extractFunction(srcText, 'meterSetTargetLevels');
+  assert(!setSrc.includes('meterSyncNoiseAnalysisContext'),
+    'meterSetTargetLevels no longer wipes — level edits reconcile through re-derivation');
+  // Behavior: a recorded sample carries the fields the re-derivation needs.
+  globalThis.__noiseMode = { value: 'empirical' };
+  globalThis.__greyRef = 'relative';
+  globalThis.__whiteRef = neutralRaw(100);
+  S.meterReplaceReadings([]);
+  S.meterRecordReadingNoise({ X: 95.05, Y: 100, Z: 108.90, timestamp: 5, ire: 100, r_code: 900 }, { name: '100%' });
+  const s0 = S.meterNoiseHistoryStore().get('100%').vals[0];
+  assert(s0 && s0.X === 95.05 && s0.Y === 100 && s0.Z === 108.90 && s0.ire === 100 && s0.r_code === 900,
+    'sample keeps raw XYZ + IRE slot + wire code for the re-derivation');
+  S.meterReplaceReadings([]);
+  globalThis.__noiseMode = null; globalThis.__greyRef = null; globalThis.__whiteRef = null;
 });
 
 test('view_change_handlers_sync_noise_context', () => {

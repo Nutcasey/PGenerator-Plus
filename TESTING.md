@@ -187,11 +187,13 @@ published payload trees without checking AGENTS.md ignore rules)
   selectable meterRgbBalanceNoiseFloor input incl. its html options, the
   Flat/Empirical noise-floor mode (per-step k·σ from repeat-reading scatter,
   pre-gain samples, fallback to the flat value), the noise-analysis-context
- fingerprint (formula|grey-ref|gamma|gamut|whitept|tech|ccss|tw|tbk — every
- input that changes the recorded deviation quantity wipes the scatter store,
- incl. the RESOLVED target-white peak and black floor read through the same
- accessors the balance math uses, so re-measured references with no control
- event are caught at record time; the
+ fingerprint (formula|grey-ref|gamma|gamut|whitept|tech|ccss — the identity/
+ view keys a re-derivation cannot reconcile) plus the ROUND-7 raw-sample
+ store: repeat readings are stored as raw XYZ and each sample's pre-gain
+ deviation is re-derived under the current common white/black reference at
+ judgment time, so ordinary reference drift reconciles instead of wiping
+ (run-the-series-twice accumulates) while identical patches never fabricate
+ a floor across target/reference edits; the
  sandbox's meterLiveRgbData has a __realCalc branch that runs the REAL
  balance math — stubbed balance math is what hid the round-4/5 fabrications),
   the
