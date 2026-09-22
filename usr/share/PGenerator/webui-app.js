@@ -10119,12 +10119,37 @@ function meterRgbBalanceNoiseFloor(){
  const capped=Math.min(10,floor);
  return (capped>=0.01)?capped:0;
 }
+// Flat vs empirical mode (meterNoiseFloorMode select). 'flat' (default) is
+// the historic single operator number applied at every IRE. 'empirical' lets
+// each point's floor come from k·σ of its own repeat-reading scatter
+// (meterRgbBalanceEffectiveNoiseFloor); the typed flat value stays as the
+// fallback for points without enough history yet.
+function meterRgbBalanceNoiseFloorMode(){
+ const sel=document.getElementById('meterNoiseFloorMode');
+ if(sel&&sel.value==='empirical') return 'empirical';
+ return 'flat';
+}
+// 'The annotation can be live at all': a flat floor is on once a number is
+// set; empirical mode is on whenever history exists, so the flat field may
+// stay empty in empirical mode (it only serves as the fallback value).
+function meterRgbBalanceNoiseFloorActive(){
+ return meterRgbBalanceNoiseFloor()>0||meterRgbBalanceNoiseFloorMode()==='empirical';
+}
+// Display format for an EFFECTIVE (possibly empirical) floor: empirical k·σ
+// values are irrational-ish and must not print at float precision; the flat
+// operator value prints as typed (0.35 -> '0.35', not '0.35000000000000003').
+function meterFormatNoiseFloorValue(v){
+ const n=Number(v);
+ if(!Number.isFinite(n)||n<=0) return 'Off';
+ return (Math.abs(n-Math.round(n))<1e-9)?String(Math.round(n)):String(Math.round(n*100)/100);
+}
 // chValue is a balance channel result (100-centered), gain the perceptual gain
-// applied to it (1 for the unweighted formula). Returns true when the raw L*
-// deviation is inside the operator-selected meter noise floor (false when the
-// floor is Off or the value is not finite).
-function meterRgbBalanceWithinNoise(chValue,gain){
- const floor=meterRgbBalanceNoiseFloor();
+// applied to it (1 for the unweighted formula), point the reading/step the
+// value belongs to (empirical floor lookup; omit/unknown -> flat floor).
+// Returns true when the raw L* deviation is inside the effective meter noise
+// floor (false when the floor is Off or the value is not finite).
+function meterRgbBalanceWithinNoise(chValue,gain,point){
+ const floor=meterRgbBalanceEffectiveNoiseFloor(point);
  if(!(floor>0)) return false;
  if(!Number.isFinite(chValue)) return false;
  return Math.abs((chValue-100)/(Number.isFinite(gain)&&gain>0?gain:1))<=floor;
@@ -10136,12 +10161,14 @@ function meterRgbBalanceWithinNoise(chValue,gain){
 function meterRgbBalanceNoiseFloorApplies(){
  return meterRgbBalanceFormula()==='perceptual';
 }
-// The single definition of 'the annotation is live': the operator's floor,
-// or 0 when the selected formula does not use it. Every annotation site
-// (chart band, live bars, hover) gates on this or sits inside a Perceptual
-// branch, so the definition cannot drift between panels.
-function meterRgbBalanceActiveNoiseFloor(){
- return meterRgbBalanceNoiseFloorApplies()?meterRgbBalanceNoiseFloor():0;
+// The single predicate 'the annotation is live on the panels right now':
+// Perceptual must be selected AND a floor source must be capable of
+// annotating. In empirical mode the flat field may legitimately be empty
+// (points annotate from their own σ as history accumulates), so 'a floor
+// source exists' is Active(), not the flat number. Every panel gate uses
+// this; per-point values still resolve through EffectiveNoiseFloor().
+function meterRgbBalanceNoiseFloorAnnotationLive(){
+ return meterRgbBalanceNoiseFloorApplies()&&meterRgbBalanceNoiseFloorActive();
 }
 function meterUpdateNoiseFloorControlAvailability(){
  const input=document.getElementById('meterRgbBalanceNoiseFloor');
@@ -10163,11 +10190,29 @@ function meterUpdateNoiseFloorControlAvailability(){
  target.title=(applies&&target.dataset&&target.dataset.activeTitle)?target.dataset.activeTitle
   :'Noise floor applies to the Perceptual RGB bal formula only — switch RGB bal to Perceptual to use it. The saved value is kept.';
  // One-tap return to Off: clearing a typed number by hand is fiddly on a
- // touch screen, so show a × only when the floor is actually on. Dim it
+ // touch screen, so show a × whenever the annotation CAN be live. Gate on
+ // every activation source, not the typed field (the round-4 lesson applied
+ // to this sibling): Empirical mode with an EMPTY field annotates from
+ // scatter alone, and a field-only gate hid the only one-tap Off — the
+ // operator had to discover the mode select to stop the annotation. Dim it
  // with the rest of the row when the floor is inert — a lone bright control
  // in a dimmed row reads as live.
+ const empiricalMode=(meterRgbBalanceNoiseFloorMode()==='empirical');
  const clear=document.getElementById('meterRgbBalanceNoiseFloorClear');
- if(clear&&clear.style){ clear.style.display=applied>0?'':'none'; clear.style.opacity=applies?'':'0.45'; }
+ if(clear&&clear.style){
+  clear.style.display=(applied>0||empiricalMode)?'':'none';
+  clear.style.opacity=applies?'':'0.45';
+  // In Empirical mode the button does more than empty the field (see
+  // meterOnRgbBalanceNoiseFloorClear), so the hover text must describe the
+  // actual action. Cache the authored HTML title once — one source of truth,
+  // same pattern as the field label's activeTitle above.
+  if(clear.dataset){
+   if(!clear.dataset.authoredTitle) clear.dataset.authoredTitle=clear.title;
+   clear.title=empiricalMode
+    ? 'Turns the noise annotation off: clears the typed floor and switches the mode back to Flat (scatter history is kept).'
+    : (clear.dataset.authoredTitle||'');
+  }
+ }
  // Highlight the preset whose value equals the applied floor, so the button
  // row answers 'which one is in play' (a typed 0.35 matches none, which is
  // itself information). aria-pressed carries the same state to AT. No
@@ -10187,7 +10232,11 @@ function meterUpdateNoiseFloorControlAvailability(){
  // the hover title says why, and touch screens never hover. Show an inline
  // hint that doubles as a one-tap switch to the formula that uses the floor.
  const hint=document.getElementById('meterRgbBalanceNoiseFloorHint');
- if(hint&&hint.style) hint.style.display=(meterRgbBalanceNoiseFloor()>0&&!applies)?'':'none';
+ // Gate on Active(), not the flat field: empirical mode with an EMPTY
+ // typed field is a legitimate way to turn annotation on, and under a
+ // non-Perceptual formula it silently does nothing — the exact state the
+ // hint exists to expose. Field-only gating hid the repair in that case.
+ if(hint&&hint.style) hint.style.display=(meterRgbBalanceNoiseFloorActive()&&!applies)?'':'none';
 }
 // One-tap repair for the inline hint: select Perceptual RGB bal and run the
 // shared change path, exactly as if the operator had used the formula picker.
@@ -10215,12 +10264,24 @@ function meterApplyNoiseFloorPreset(value){
  meterOnRgbBalanceNoiseFloorChange();
 }
 // Clear the noise floor back to Off and redraw the annotation (chart band,
-// hover tooltips, live bars) exactly like an operator edit would.
+// hover tooltips, live bars) exactly like an operator edit would. 'Off' must
+// mean the ANNOTATION stops, not just the field empties: in Empirical mode a
+// field-only clear leaves every point annotating from its own scatter, so the
+// × — whose whole promise is one-tap Off — would visibly do nothing. Switch
+// the mode back to Flat too (field empty + flat = annotation off). Scatter
+// history is deliberately NOT wiped: returning to Empirical later keeps the
+// measured points, and the invalidation paths own history lifecycle.
 function meterOnRgbBalanceNoiseFloorClear(){
  const input=document.getElementById('meterRgbBalanceNoiseFloor');
  if(!input) return;
  input.value='';
+ const mode=document.getElementById('meterNoiseFloorMode');
+ if(mode&&mode.value==='empirical') mode.value='flat';
  meterOnRgbBalanceNoiseFloorChange();
+ // The mode may have just flipped to Flat outside the mode select's own
+ // handler: refresh the coverage status or '· N points measured' lingers
+ // under a Flat mode that shows nothing.
+ try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
 }
 // Commit-time normalization: the effective floor (meterRgbBalanceNoiseFloor)
 // caps at 10 and resolves non-positive/non-finite input to Off, but the field
@@ -10328,13 +10389,13 @@ function meterLiveRgbData(reading){
   // emitted no measurable light is annotated 'within meter noise — not a
   // real error' on the live bars and the LG TV columns. Same reasoning as
   // the hover and band exclusions.
-  if(meterRgbBalanceNoiseFloor()>0&&meterRgbBalanceFormula()==='perceptual'&&!bal.noChroma&&Number.isFinite(bal.R)){
+  if(meterRgbBalanceNoiseFloorActive()&&meterRgbBalanceFormula()==='perceptual'&&!bal.noChroma&&Number.isFinite(bal.R)){
    // Divide by the gain that was actually APPLIED to this balance result
    // (the core reports it on the object). The neutral-color branch balances
    // a rewritten clone, so the outer reading's gain can differ; fall back to
    // it only for balance objects that predate the gain field.
    const g=(Number.isFinite(bal.gain)&&bal.gain>0)?bal.gain:meterPerceptualRgbBalanceGain(reading);
-   bal.noise=[meterRgbBalanceWithinNoise(bal.R,g),meterRgbBalanceWithinNoise(bal.G,g),meterRgbBalanceWithinNoise(bal.B,g)];
+   bal.noise=[meterRgbBalanceWithinNoise(bal.R,g,reading),meterRgbBalanceWithinNoise(bal.G,g,reading),meterRgbBalanceWithinNoise(bal.B,g,reading)];
   }
   return bal;
  };
@@ -12006,8 +12067,69 @@ function meterOnRgbBalanceNoiseFloorChange(){
  }catch(e){}
 }
 
+// Flat <-> Empirical mode switch: identical presentation-only redraw to a
+// floor edit (band, hover, live bars re-resolve through the effective-floor
+// accessor). No commit normalization — the mode select is whole values only.
+function meterOnNoiseFloorModeChange(){
+ meterOnRgbBalanceFormulaChange();
+ try{
+  const live=meterCurrentPatchStep?meterFindReadingForStep(meterCurrentPatchStep):null;
+  if(!(live&&meterReadingIsRealMeasurement(live))){
+   const last=[...(meterReadings||[])].reverse().find(rd=>rd&&meterReadingHasLuminance(rd));
+   if(last&&typeof updateLiveReading==='function') updateLiveReading(last);
+  }
+ }catch(e){}
+ try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
+}
+// Empirical mode on an empty scatter store behaves EXACTLY like flat mode
+// (every point falls back to the typed floor) — with no visible difference
+// until you hover each point. The row must answer "is Empirical doing
+// anything?" without hovering: 'N points measured', or a named repair when
+// nothing has scatter yet. Called on mode change, after each recorded
+// sample, and on both invalidation paths so the count can never lag the
+// store it describes.
+function meterUpdateNoiseFloorModeStatus(){
+ const el=document.getElementById('meterNoiseFloorModeStatus');
+ if(!el) return;
+ let text='';
+ let title='';
+ try{
+  if(meterRgbBalanceNoiseFloorMode()==='empirical'){
+   let n=0, n1=0;
+   meterNoiseHistoryStore().forEach(h=>{
+    if(!h||!Array.isArray(h.vals)) return;
+    if(h.vals.length>=2) n++;
+    else if(h.vals.length===1) n1++;
+   });
+   // Glance text must fit the span's own 22ch cap (measured: 121px box,
+   // each string below <=110px). Three truthful states: measured, has
+   // pass-1 samples (the operator DID read the patch — saying 'no
+   // scatter, re-read' there is wrong and was bench-confusing), and
+   // nothing yet.
+   text=n>0?('· '+n+(n===1?' point measured':' points measured'))
+       :(n1>0?'· pass 1 done — re-run':'· no scatter — re-read');
+   title=n>0?('Per-point noise floors are live for '+n+' step'+(n===1?'':'s')+' this session'
+     +(n1>0?('; '+n1+' '+(n1===1?'step has':'steps have')+' 1 reading and '+(n1===1?'needs':'need')+' one more'):'')
+     +'. Points without >=2 repeat readings use the typed floor.')
+    :(n1>0?('First pass recorded one reading per step. One more pass over these steps gives each point its scatter; until then they use the typed floor.')
+           :'Empirical mode with no repeat readings behaves like Flat. Re-read patches (or run a series twice) to build each point\'s scatter.');
+  }
+ }catch(e){}
+ el.textContent=text;
+ el.title=title;
+ // inline-block, not the default inline: max-width and the ellipsis are
+ // no-ops on inline boxes (measured live: 22ch cap declared, 150px
+ // rendered). Round-2 cap only works once the box honors it.
+ el.style.display=text?'inline-block':'none';
+}
+
 function meterOnRgbBalanceFormulaChange(){
  try{ meterSaveColorPrefs(); }catch(e){}
+ // Formula switch changes what meterLiveRgbData returns: samples recorded
+ // under the previous formula are a different quantity (HCFR linear-RGB %
+ // vs perceptual L* deviations) and must not survive into the new view's
+ // sigma. Wipe on change even when there are no readings to redraw.
+ meterSyncNoiseAnalysisContext();
  // The noise floor only annotates the Perceptual view; refresh its dimmed
  // state first so it stays correct even when there are no readings to redraw.
  try{ meterUpdateNoiseFloorControlAvailability(); }catch(e){}
@@ -12033,6 +12155,11 @@ function meterOnRgbBalanceFormulaChange(){
 function meterOnGreyRefChange(src){
  meterUpdateSeparateLumVisibility();
  try{ meterSaveColorPrefs(); }catch(e){}
+ // Grey ref mode (relative/absolute/eotf) changes the balance TARGET and
+ // thus the recorded deviation: samples from the old mode are not the same
+ // quantity (review #22 round 4: relative->eotf fabricated a 2.58 L* floor
+ // between two identical readings).
+ meterSyncNoiseAnalysisContext();
  // Target Gamma has a dedicated change listener that regrades series targets
  // and performs the required full target-curve refresh.
  if(src==='target-gamma') return;
@@ -12082,6 +12209,7 @@ function meterSaveColorPrefs(){
    gray_world:    v('meterGrayWorld'),
    rgb_formula:   v('meterRgbBalanceFormula'),
    rgb_noise_floor: v('meterRgbBalanceNoiseFloor'),
+   rgb_noise_mode:  v('meterNoiseFloorMode'),
    de_form:       v('meterDeltaEForm'),
    color_de_form: v('meterColorDeltaEForm'),
   color_incl_lum:cb('meterColorIncludeLumError'),
@@ -12136,6 +12264,7 @@ function meterLoadColorPrefs(){
   setVal('meterGrayWorld',   p.gray_world);
   setVal('meterRgbBalanceFormula', p.rgb_formula);
   setVal('meterRgbBalanceNoiseFloor', p.rgb_noise_floor);
+  setVal('meterNoiseFloorMode', p.rgb_noise_mode);
   // Normalize immediately so the field never displays a stale out-of-range
   // value — but do NOT save here: meterSaveColorPrefs serializes the live DOM
   // for ALL prefs, and everything below this line has not been restored yet,
@@ -12144,6 +12273,10 @@ function meterLoadColorPrefs(){
   // the committed value happens after the last restore below.
   try{ meterCommitRgbBalanceNoiseFloorInput(); }catch(e3){}
   try{ meterUpdateNoiseFloorControlAvailability(); }catch(e2){}
+  // Reload in Empirical mode: the scatter store starts EMPTY (session
+  // memory), so without this the row silently shows 'Empirical σ' with no
+  // coverage state until the first new reading records a sample.
+  try{ meterUpdateNoiseFloorModeStatus(); }catch(e4){}
   setVal('meterDeltaEForm',  meterNormalizeSavedGreyDeltaEForm(p.de_form));
   setVal('meterColorDeltaEForm', p.color_de_form);
   setChk('meterColorIncludeLumError', p.color_incl_lum);
@@ -14130,10 +14263,24 @@ function meterRebuildReadingsIndex(readings){
  return meterReadingsIndex;
 }
 
-function meterReplaceReadings(readings){
+function meterReplaceReadings(readings,keepNoiseHistory){
  meterReadings=Array.isArray(readings)?readings:[];
  meterReadingsGeneration++;
  meterRebuildReadingsIndex(meterReadings);
+ // A wholesale readings-array swap is a series load/reset: the measured
+ // noise belongs to the previous meter+target+series state and must not
+ // annotate the new one (the array replace, unlike per-step upserts, is
+ // where a new measurement context begins). keepNoiseHistory=true is for
+ // the in-run series poller, which replaces the array every cycle to show
+ // progress: wiping there would erase the scatter the same run just
+ // produced and 'run the series twice' could never accumulate a sample
+ // (bench-reported: two full series runs left the count at zero). Steps
+ // of other series types carry different keys, so kept entries can never
+ // annotate a foreign series; a real context change (Clear, reload,
+ // disconnect) replaces via the default path and still wipes.
+ if(!keepNoiseHistory) meterNoiseHistory=null;
+ // Series reset also empties the scatter store: refresh the row count.
+ try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
  return meterReadings;
 }
 
@@ -14172,6 +14319,333 @@ function meterUpsertSeriesReading(reading,step){
 function meterReadingHasLuminance(rd){
  meterNormalizeMeasuredReading(rd);
  return !!rd&&((rd.luminance!=null&&rd.luminance>=0)||(rd.Y!=null&&rd.Y>=0));
+}
+
+// ── Empirical per-step noise history ────────────────────────────────────────
+// The 'within meter noise' annotation judged every point against one FLAT
+// pre-gain L* floor, which assumes the meter's repeatability is constant in
+// L* across the greyscale. It is not: colorimeter noise grows toward black
+// (first-order σ(L*) ∝ 1/√Y, plus TV black instability), so one flat number
+// is always simultaneously too forgiving at mid IRE and too strict near
+// black. Empirical mode replaces the guess with measurement: every accepted
+// reading of a step records its balance channels in a session ring buffer
+// keyed by the step; the per-point floor is k·σ (sample stdev) of that
+// history. The floor therefore adapts per IRE to the actual meter, target,
+// brightness and settle behaviour, and it keeps improving as the operator
+// re-reads points during a trim session (re-measuring the SAME step name is
+// what builds the history; reading every point once yields σ=0, i.e. no
+// annotation — the same inert behaviour as floor Off).
+// Session-scoped on purpose: noise is a property of the meter + target +
+// panel state; a mode/series reload must not carry old noise into a new
+// state. Stamps on the stored reading object cannot work — series reads
+// replace the whole readings array wholesale.
+const METER_NOISE_HISTORY_K=2;    // flag within ±2σ of the step's scatter
+const METER_NOISE_HISTORY_MAX=12; // samples per step (ring buffer)
+let meterNoiseHistory=null;
+// Analysis-context fingerprint for the scatter store: the recorder stores
+// meterLiveRgbData OUTPUT, which follows the selected RGB-balance formula
+// and Grey ref mode (HCFR's linear-RGB percentages and the eotf target are
+// DIFFERENT quantities from the perceptual pre-gain L* deviations; dividing
+// by shadow gain cannot reconcile them). Samples recorded under two
+// different analysis views must never share a sigma, so a context change
+// observed at record time wipes the store before the new sample lands
+// (review #22 round 4, P1: switching views between repeats fabricated a
+// 10-cap floor). The fingerprint covers EVERY input that changes the
+// recorded deviation quantity, not just the two view selectors (review
+// #22 round 5, P1: Target Gamma 2.2->2.4 between two identical continuous
+// reads folded the L* target shift — 2.1 L* at 10 IRE — into sigma). The
+// Flat/Empirical mode select stays OUT: a judgment switch, not a
+// measurement context.
+let meterNoiseAnalysisContext=null;
+// The full fingerprint. Members beyond formula|grey-ref, with why:
+//  - gamma:   the resolved grey target gamma (meterGreyTargetGammaSelection
+//             re-derives the target curve; the dropdown handler edits the
+//             live series while continuous reads own the patch);
+//  - gamut:   meterAnalysisGamutKey — the lin-RGB matrix the L* deltas are
+//             taken through (the Target Gamut handler regrades live);
+//  - whitept: meterTargetWhitePoint — target XY (custom-D65 fields, and
+//             meterUseMeasuredWhiteTarget writes them programmatically);
+//  - tech:    the Display Type select — a technology change resets Meter
+//             Profile directly (no change event fires, review #22 round 5
+//             P2), so the effective correction identity must be tracked at
+//             record time where no event is guaranteed;
+//  - ccss:    the Meter Profile select value ('' = Auto: the technology's
+//             built-in curve — combined with tech above this IS the
+//             effective correction configuration).
+// ROUND 7 — reference LEVELS are NOT fingerprint members. Round 6 keyed the
+// resolved peak/black floats and review found both failure modes of that
+// blanket-reset approach: exact-float reference keying wipes every step on a
+// 0.1% white-drift between series runs (the 'run the series twice' workflow
+// could never accumulate), while keying only the manual fields left the
+// event-free re-measured-reference path open. The store now holds RAW
+// readings (see meterRecordReadingNoise) and meterStepNoiseSigma RE-DERIVES
+// each sample's deviation under the current common reference at judgment
+// time, so ordinary reference refresh is reconciled instead of wiping: two
+// identical patch XYZs always recompute to one deviation (σ==0), whatever
+// white reference each happened to be recorded against. What remains here
+// are the identity/view keys a re-derivation CANNOT reconcile: the stored
+// XYZ itself means something different under another instrument, display
+// technology, or correction profile, and the view keys wipe eagerly so
+// cross-view floors never annotate between the edit and the next read.
+// Every read past the first two is individually guarded: a transient
+// accessor failure must not throw out of record — it yields the literal
+// 'err' token, and an err<->value flip wipes the store, which is the
+// fail-safe direction (over-wiping costs re-reads only).
+function meterNoiseAnalysisContextString(){
+ const parts=[meterRgbBalanceFormula(),meterGreyRefMode()];
+ try{ parts.push('g:'+String(meterGreyTargetGammaSelection()||'')); }catch(e){ parts.push('g:err'); }
+ try{ parts.push('gam:'+String(meterAnalysisGamutKey()||'')); }catch(e){ parts.push('gam:err'); }
+ try{ const wp=meterTargetWhitePoint(); parts.push('wp:'+(wp?wp.x+','+wp.y:'err')); }catch(e){ parts.push('wp:err'); }
+ try{ parts.push('tech:'+String((document.getElementById('meterDisplayType')||{}).value||'')); }catch(e){ parts.push('tech:err'); }
+ try{ parts.push('ccss:'+String((document.getElementById('meterCcssProfile')||{}).value||'')); }catch(e){ parts.push('ccss:err'); }
+ return parts.join('|');
+}
+// Check + (on change) wipe. Called at record time AND from both analysis
+// view-change handlers, so stale cross-view floors cannot annotate even in
+// the window between the switch and the next reading. The gamma/gamut/
+// custom-white handlers already route through meterOnGreyRefChange, so the
+// widened fingerprint fires the handler-time wipe on those edits too;
+// programmatic edits (DV signal-mode gamma setVal, technology-driven CCSS
+// reset) have no event and are caught by the record-time sync.
+function meterSyncNoiseAnalysisContext(){
+ try{
+  const ctx=meterNoiseAnalysisContextString();
+  if(meterNoiseAnalysisContext===ctx) return;
+  const had=meterNoiseAnalysisContext!==null;
+  meterNoiseAnalysisContext=ctx;
+  if(had){ meterNoiseHistoryStore().clear(); try{ meterUpdateNoiseFloorModeStatus(); }catch(e){} }
+ }catch(e){}
+}
+function meterNoiseHistoryStore(){
+ if(!meterNoiseHistory) meterNoiseHistory=new Map();
+ return meterNoiseHistory;
+}
+function meterStepNoiseKey(step){
+ if(!step) return '';
+ try{ if(typeof meterStepNameKey==='function'){ const k=meterStepNameKey(step); if(k) return k; } }catch(e){}
+ const name=String(step.name||'').trim();
+ if(name) return 'name:'+name;
+ const ire=Number(step.ire);
+ if(Number.isFinite(ire)) return 'ire:'+ire;
+ return '';
+}
+function meterRecordReadingNoise(reading,step){
+ try{
+  if(!reading||reading.noChroma) return;
+  if(!meterReadingIsGreyscale(reading)) return;
+  if(typeof meterReadingIsRealMeasurement==='function'&&!meterReadingIsRealMeasurement(reading)) return;
+  // Analysis-view change => every stored sample is a different quantity:
+  // wipe BEFORE recording so a cross-view pair can never form a sigma
+  // (see meterSyncNoiseAnalysisContext above).
+  meterSyncNoiseAnalysisContext();
+  const key=meterStepNoiseKey(step||reading);
+  if(!key) return;
+  // RAW readings, not derived deviations (review #22 round 7): the floor
+  // question is 'how does THIS patch repeat', and a deviation embeds the
+  // white/black reference and target levels at record time — re-measuring
+  // white between two runs would then either wipe the store (round-6
+  // fingerprint: any float drift killed the run-it-twice workflow) or mix
+  // samples computed on two scales (round-6 P2: false floors under a manual
+  // Target White). Storing the raw XYZ + the patch's own identity fields
+  // lets meterStepNoiseSigma re-derive every sample under ONE common,
+  // current reference at judgment time, so both failure modes go away:
+  // reference refresh is reconciled, and identical patch XYZ always
+  // recomputes to identical deviation (σ==0) whatever white each sample
+  // happened to be recorded against.
+  const X=Number(reading.X),Y=Number(reading.Y),Z=Number(reading.Z);
+  if(!(Number.isFinite(X)&&Number.isFinite(Y)&&Number.isFinite(Z)&&Y>0)) return;
+  const store=meterNoiseHistoryStore();
+  let h=store.get(key);
+  if(!h){ h={vals:[]}; store.set(key,h); }
+  // Collapse poll RE-DELIVERY only: identical XYZ AND identical timestamp is
+  // the same measurement served again by the series cache. Identical XYZ
+  // with a NEW timestamp is a genuine repeat measurement — bench-proven on
+  // a settled panel+colorimeter that a full second series run is bit-
+  // identical to the first, so timestamp-blind dedupe silently discarded
+  // the operator's 'run it twice' evidence and pinned the UI at 'pass 1'.
+  const lastXYZ=h.lastXYZ;
+  const xyz=[X,Y,Z];
+  const ts=Number(reading.timestamp)||0;
+  if(lastXYZ&&lastXYZ.length===3&&lastXYZ.every((v,i)=>v===xyz[i])&&h.lastTS===ts) return;
+  // Sample = raw XYZ + the fields the balance re-derivation reads (IRE slot,
+  // wire code, worker target stamp). Tiny: 12 per step at most.
+  const sample={X:X,Y:Y,Z:Z};
+  if(reading.ire!=null) sample.ire=reading.ire;
+  if(reading.nominal_ire!=null) sample.nominal_ire=reading.nominal_ire;
+  if(reading.plot_ire!=null) sample.plot_ire=reading.plot_ire;
+  if(reading.r_code!=null) sample.r_code=reading.r_code;
+  if(reading.target_Yn!=null) sample.target_Yn=reading.target_Yn;
+  h.vals.push(sample);
+  h.lastXYZ=xyz;
+  h.lastTS=ts;
+  if(h.vals.length>METER_NOISE_HISTORY_MAX) h.vals.shift();
+  // Keep the row's live 'N points measured' count honest as it grows.
+  try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
+ }catch(e){}
+}
+// Re-evaluate one stored raw sample as a PRE-GAIN perceptual L* deviation
+// under the CURRENT common reference (white reference + black floor + target
+// levels resolved live). The judgment surfaces are Perceptual-gated, so
+// rgbBalancePerceptual is exactly the quantity the flag compares against;
+// dividing its own shadow gain out keeps samples comparable across slot
+// gains (the round-6 pre-gain rule, now applied at derivation instead of
+// at record). Returns null when the current reference cannot evaluate the
+// sample (no white measured yet); sigma() then ignores that sample, so a
+// partially-available reference degrades to the typed fallback instead of
+// mixing scales. Direct call into the balance core (not meterLiveRgbData)
+// also keeps this out of the tagBalNoise -> within-noise -> floor -> sigma
+// chain: no recursion by construction.
+function meterNoiseSampleDeviation(sample){
+ try{
+  if(!sample) return null;
+  const Y=Number(sample.Y);
+  if(!(Number.isFinite(Y)&&Y>0)) return null;
+  const ref=meterEffectiveGreyscaleWhiteReference(Array.isArray(meterReadings)?meterReadings:[]);
+  if(!ref) return null;
+  const black=meterChartBlackLevel(Array.isArray(meterReadings)?meterReadings:[]);
+  const rd={X:Number(sample.X),Y:Y,Z:Number(sample.Z)};
+  if(sample.ire!=null) rd.ire=sample.ire;
+  if(sample.nominal_ire!=null) rd.nominal_ire=sample.nominal_ire;
+  if(sample.plot_ire!=null) rd.plot_ire=sample.plot_ire;
+  if(sample.r_code!=null) rd.r_code=sample.r_code;
+  if(sample.target_Yn!=null) rd.target_Yn=sample.target_Yn;
+  const bal=rgbBalancePerceptual(rd,ref,meterGreyRefMode(),black);
+  if(!bal||bal.noChroma) return null;
+  const g=(Number.isFinite(bal.gain)&&bal.gain>0)?bal.gain:1;
+  const d=[(bal.R-100)/g,(bal.G-100)/g,(bal.B-100)/g];
+  return d.every(Number.isFinite)?d:null;
+ }catch(e){ return null; }
+}
+function meterStepNoiseSigma(key){
+ try{
+  const h=key?meterNoiseHistoryStore().get(key):null;
+  if(!h||!Array.isArray(h.vals)||h.vals.length<2) return null;
+  // Derive every sample's deviation under the current common reference
+  // first (see meterNoiseSampleDeviation), THEN take the scatter: drift in
+  // the measured white/black between series runs moves all samples
+  // together, so it contributes zero fake σ.
+  const devs=[];
+  for(let i=0;i<h.vals.length;i++){
+   const d=meterNoiseSampleDeviation(h.vals[i]);
+   if(d) devs.push(d);
+  }
+  if(devs.length<2) return null;
+  const sigmas=devs[0].map((_,ci)=>{
+   const v=devs.map(d=>d[ci]).filter(Number.isFinite);
+   if(v.length<2) return 0;
+   const mean=v.reduce((a,b)=>a+b,0)/v.length;
+   return Math.sqrt(v.reduce((a,b)=>a+(b-mean)*(b-mean),0)/(v.length-1));
+  });
+  // Dominant channel σ: the noisiest channel governs the flag, because the
+  // within-noise annotation is per-channel and any channel flagged must sit
+  // inside its own scatter.
+  const dom=Math.max.apply(null,sigmas);
+  return (Number.isFinite(dom)&&dom>0)?dom:0;
+ }catch(e){ return null; }
+}
+// Which generic picture-settings keys represent a change to what a patch
+// MEASURES (as opposed to picture plumbing like hdmiRange or calibration
+// mode). A change to one of these invalidates scatter for EVERY step (the
+// control is not per-step), so the whole history is wiped; firing on
+// plumbing keys would erase history those writes did not affect. Pure
+// predicate so the harness pins both halves.
+function meterLgTrimKeyAffectsPatch(key){
+ // Normalize camelCase (whiteBalanceRed, colorTemperature) by squashing
+ // spaces: the real control key is 'colorTemperature', not 'color temp'.
+ // The luminance family is measurement-affecting whether written as
+ // 'brightness' or as panel light (backlight/blackLevel/blackLevelAdjust/
+ // oledLight — the keys meterAutoCalWritePanelLight drives, which wipes ALL
+ // scatter on the same physical reasoning: panel luminance changes what
+ // every patch reads). The same reasoning extends to every control that
+ // alters the PANEL OUTPUT itself (review #22 round 4): gamma regrades the
+ // luminance curve, gamut selection can move the panel's greyscale white
+ // point, energy saving and local dimming rescale it, HDR tone
+ // mapping redistributes it, eye comfort shifts the white point, and BFI
+ // changes the temporal profile an integrating colorimeter sees.
+ // hdmiRange/calibration-mode style plumbing keys simply do not match the
+ // pattern — no exclusion clause needed (a previous 'hdmirange' guard was
+ // dead code); the harness pins hdmiRange === false. Over-wiping costs only
+ // re-reads (fail-safe); under-wiping folds a real signal change into σ.
+ const k=String(key||'').toLowerCase().replace(/[\s_-]+/g,'');
+ return /whitebalance|brightness|contrast|colourtemp|colortemp|backlight|blacklevel|oledlight|gamma|gamut|energysaving|localdimming|tonemapping|eyecomfort|blackframeinsertion/.test(k);
+}
+// Drop a step's scatter samples: the trim just changed what the patch
+// measures, so the old scatter describes a setting that no longer exists
+// and would inflate (or deflate) the floor for the NEW setting. Callers are
+// the manual white-balance write paths; after the write, fresh re-reads
+// rebuild σ around the current picture.
+function meterInvalidateStepNoise(step){
+ try{
+  const key=meterStepNoiseKey(step);
+  if(key) meterNoiseHistoryStore().delete(key);
+  try{ meterUpdateNoiseFloorModeStatus(); }catch(e){}
+ }catch(e){}
+}
+// A generic (not per-step) control change — picture mode, brightness,
+// contrast — changes what EVERY patch measures, so all scatter history is
+// stale at once. Callers gate on meterLgTrimKeyAffectsPatch first.
+function meterInvalidateAllStepNoise(){
+ try{ meterNoiseHistoryStore().clear(); try{ meterUpdateNoiseFloorModeStatus(); }catch(e){} }catch(e){}
+}
+// The empirical floor in pre-gain L* points for a reading/step: k·σ of the
+// step's own balance scatter, capped at the control's 10-point maximum.
+// null (not a number) when there is not enough history — callers then fall
+// back to the flat operator floor, so a partially-measured series behaves
+// exactly like the old annotation instead of silently going blind. σ==0 is
+// also null: a quantized colorimeter can repeat identical readings over two
+// distinct XYZ samples near black, and a 0-wide floor would blind the
+// annotation at exactly the points where the operator needs context —
+// the typed flat value is the safer default there.
+// Same sub-resolution bound the flat control enforces (see
+// meterRgbBalanceNoiseFloor: floors < 0.01 L* render an invisible band and
+// flag points at a resolution no meter can defend). A low-noise meter with
+// two near-identical samples yields a tiny positive σ; k·σ below this bound
+// is quantization noise, not characterized scatter, so the point falls back
+// to the typed floor exactly like the σ==0 case.
+const METER_NOISE_FLOOR_MIN=0.01;
+function meterEmpiricalNoiseFloorFor(stepOrReading){
+ if(meterRgbBalanceNoiseFloorMode()!=='empirical') return null;
+ const sigma=meterStepNoiseSigma(meterStepNoiseKey(stepOrReading));
+ if(sigma==null||sigma===0) return null;
+ const floor=METER_NOISE_HISTORY_K*sigma;
+ if(floor<METER_NOISE_FLOOR_MIN) return null;
+ return Math.min(10,floor);
+}
+// Single definition of the EFFECTIVE pre-gain floor for one point:
+// empirical k·σ once that step has history, else the flat operator floor.
+// Every annotation site (hover, live bars, LG columns, chart band, off-scale
+// titles) and the flag itself must resolve their floor through this so the
+// band drawn and the flag computed can never disagree per point.
+function meterRgbBalanceEffectiveNoiseFloor(stepOrReading){
+ const empirical=meterEmpiricalNoiseFloorFor(stepOrReading);
+ if(empirical!=null) return empirical;
+ return meterRgbBalanceNoiseFloor();
+}
+// Says WHERE the point's displayed floor came from. Same-number ambiguity is
+// the defect: in empirical mode a point with <2 samples silently falls back
+// to the typed constant, and the tooltip rendered "±0.30 floor" identically
+// for a measured scatter and for the operator's own guess — the operator
+// cannot tell which points the meter has actually characterized. Pure
+// (returns '' in flat mode), so the harness pins all three states.
+function meterNoiseFloorSourceNote(stepOrReading){
+ if(meterRgbBalanceNoiseFloorMode()!=='empirical') return '';
+ const n=(()=>{try{
+  const h=meterNoiseHistoryStore().get(meterStepNoiseKey(stepOrReading));
+  return h&&Array.isArray(h.vals)?h.vals.length:0;
+ }catch(e){return 0;}})();
+ if(n>=2){
+  // '2 identical readings' is not 'measured scatter': σ==0 (or a k·σ below
+  // the meter-resolution bound) falls back to the typed floor — quantization,
+  // not repeatability — so say exactly that instead of implying the point
+  // earned its own floor.
+  const sig=(()=>{try{return meterStepNoiseSigma(meterStepNoiseKey(stepOrReading));}catch(e){return null;}})();
+  if(!(sig>0)||METER_NOISE_HISTORY_K*sig<METER_NOISE_FLOOR_MIN) return ' · '+n+' near-identical readings — meter cannot resolve its noise here; using typed floor';
+  return ' · measured scatter ('+n+' readings)';
+ }
+ // 1 sample is NOT 'no history': the patch has been read, it needs ONE
+ // more. Same bench-confusion as the row status, per-point flavor.
+ if(n===1) return ' · 1 reading so far — one more gives this point its own floor; using typed floor';
+ return ' · no history at this point yet — using typed floor; re-read this patch to measure it';
 }
 
 function meterReadingHasChromaticity(rd){
@@ -14769,12 +15243,20 @@ function meterRgbDeltasForLive(reading,bal,includeDeltaE){
  const center=isDelta?0:100;
  // bal.noise (from meterLiveRgbData) carries the per-channel 'within meter
  // noise' flags; the bar renderer dims a flagged bar (0.4 alpha on canvas,
-// .45 opacity in the HTML LG columns).
+ // .45 opacity in the HTML LG columns).
  const noise=Array.isArray(bal.noise)?bal.noise:null;
+ // The effective pre-gain floor for THIS point (empirical k·σ once the step
+ // has repeat-reading scatter, else the flat operator number). Carried per
+ // entry so every dimming surface (canvas title, LG column title) states the
+ // floor it actually judged against instead of re-reading the flat field.
+ const liveFloor=meterRgbBalanceEffectiveNoiseFloor(reading);
+ // Where that floor came from ('' in flat mode): the dimming-title surfaces
+ // append it so 'measured scatter' and 'typed fallback' read differently.
+ const liveFloorNote=meterNoiseFloorSourceNote(reading);
  const entries=[
-  {key:'R',label:'R',color:'#f44',v:(bal.R!=null)?bal.R-center:null,labelV:(bal.R!=null)?(isDelta?(bal.R-center):bal.R):null,showPlus:isDelta,noise:!!(noise&&noise[0])},
-  {key:'G',label:'G',color:'#4caf50',v:(bal.G!=null)?bal.G-center:null,labelV:(bal.G!=null)?(isDelta?(bal.G-center):bal.G):null,showPlus:isDelta,noise:!!(noise&&noise[1])},
-  {key:'B',label:'B',color:'#42a5f5',v:(bal.B!=null)?bal.B-center:null,labelV:(bal.B!=null)?(isDelta?(bal.B-center):bal.B):null,showPlus:isDelta,noise:!!(noise&&noise[2])}
+  {key:'R',label:'R',color:'#f44',v:(bal.R!=null)?bal.R-center:null,labelV:(bal.R!=null)?(isDelta?(bal.R-center):bal.R):null,showPlus:isDelta,noise:!!(noise&&noise[0]),floor:liveFloor,floorNote:liveFloorNote},
+  {key:'G',label:'G',color:'#4caf50',v:(bal.G!=null)?bal.G-center:null,labelV:(bal.G!=null)?(isDelta?(bal.G-center):bal.G):null,showPlus:isDelta,noise:!!(noise&&noise[1]),floor:liveFloor,floorNote:liveFloorNote},
+  {key:'B',label:'B',color:'#42a5f5',v:(bal.B!=null)?bal.B-center:null,labelV:(bal.B!=null)?(isDelta?(bal.B-center):bal.B):null,showPlus:isDelta,noise:!!(noise&&noise[2]),floor:liveFloor,floorNote:liveFloorNote}
  ];
  if(includeDeltaE&&reading){
   let de=null;
@@ -14865,9 +15347,9 @@ function drawDeltaBarsVertical(canvasId,spec){
  // canvas carried one, so a stale assertion never survives a redraw.
  try{
   if(spec&&spec.kind==='rgb'&&Array.isArray(spec.entries)){
-   const flagged=spec.entries.filter(e=>e.noise&&e.v!=null).map(e=>e.label);
+   const flagged=spec.entries.filter(e=>e.noise&&e.v!=null);
    c.title=flagged.length
-    ? flagged.join(', ')+' within meter noise floor (±'+meterRgbBalanceNoiseFloor()+' L* pre-gain) — noise, not a real error.'
+    ? flagged.map(e=>e.label).join(', ')+' within meter noise floor (±'+meterFormatNoiseFloorValue(flagged[0].floor)+' L* pre-gain'+(flagged[0].floorNote||'')+') — noise, not a real error.'
     : '';
   } else if(c.title&&c.title.indexOf('within meter noise floor')>=0){
    c.title='';
@@ -15157,6 +15639,16 @@ function meterApplySingleReadResult(result,requestedStep){
    // If a series is loaded and a patch is selected, store reading in series results
    if(meterSeriesSteps&&requestedStep){
     meterUpsertSeriesReading(rd,requestedStep);
+    // Feed the empirical per-point noise history (no-op unless building
+    // scatter samples; self-gated on greyscale + real measurement).
+    // Recorder sites are exactly the three commit paths (here, continuous
+    // read below, series poll in webui-workspace); the structural pins
+    // series_poll_feeds_and_keeps_noise_scatter / run_start_keeps_noise_scatter
+    // guard the replaces inside meterPollSeries/meterRunSeries only. The
+    // backend-AutoCal status replaces (meterAutoCalApplyStatus etc.) also
+    // wipe by default and record nothing today — if a recorder is ever wired
+    // into those paths, their replaces need keepNoiseHistory=true too.
+    meterRecordReadingNoise(rd,requestedStep);
     // Auto-detect white reference from the canonical stamped series reading.
     const white=meterFindSeriesWhiteReading(meterReadings);
     if(white) meterWhiteReading=white;
@@ -15525,6 +16017,10 @@ function meterSetTargetLevels(){
  };
  try{ localStorage.setItem(METER_TARGET_LEVELS_KEY,JSON.stringify(state)); }catch(e){}
  try{ meterWarnTargetWhiteAboveHdrMax(); }catch(e){}
+ // No scatter invalidation here (round 7): target LEVELS no longer wipe —
+ // the store holds raw readings and sigma re-derives deviations under the
+// current levels, so an edit reconciles existing samples instead of
+ // erasing the operator's measured repeatability.
  // Let the checkbox/input state paint before recalculating charts. Rapid
  // toggles coalesce into one refresh instead of stacking expensive canvases.
  try{ meterScheduleTargetCurveRefresh(); }catch(e){}
@@ -16583,6 +17079,7 @@ async function meterContinuousLoop(){
    const stampStep=requestedStep;
    if(meterSeriesSteps&&stampStep){
     meterUpsertSeriesReading(rd,stampStep);
+    meterRecordReadingNoise(rd,stampStep);
     const white=meterFindSeriesWhiteReading(meterReadings);
     if(white) meterWhiteReading=white;
     const completedIresC=new Set();
