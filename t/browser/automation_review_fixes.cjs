@@ -27,6 +27,9 @@ window.pgAutomationConfirmOverride=()=>true;
   await page.setViewport({width:1440,height:1100});
   await page.goto('http://127.0.0.1:'+server.address().port);
   await page.waitForFunction(()=>pgAutomation.loaded);
+  // The idle render must not wipe the standing action tooltips set in the HTML.
+  assert.deepEqual(await page.evaluate(()=>[pgAutomationEl('StartButton').title,pgAutomationEl('ReadinessButton').title]),['Rechecks every job, then calibrates.','Checks the queue only. Does not calibrate.'],'action tooltips survive initialisation');
+  assert.deepEqual(await page.evaluate(()=>[pgAutomationEl('StartButton').disabled,pgAutomationEl('ReadinessButton').disabled]),[false,false],'idle actions are enabled');
   await page.click('button[onclick="pgAutomationNewRecipe(\'queue\')"]');
   await page.waitForFunction(()=>!pgAutomationEl('EditorSave').disabled);
   assert.ok(await page.$$eval('[data-pg-automation-pin]:checked',nodes=>nodes.length)>0,'matrix-filtered reference controls start selected');
@@ -86,6 +89,15 @@ window.pgAutomationConfirmOverride=()=>true;
    pgAutomationRenderLiveRun(pgAutomation.current.run);
   });
   assert.ok(await page.$eval('#pgAutomationStartButton',el=>el.disabled&&el.title.includes('interrupted')));
+  assert.ok(await page.$eval('#pgAutomationReadinessButton',el=>el.disabled&&el.title.includes('interrupted')),'a blocker reason takes the tooltip while disabled');
+  await page.evaluate(()=>{pgAutomation.current=window.mockCurrent={status:'ok'};pgAutomationRenderLiveRun(null);});
+  assert.deepEqual(await page.evaluate(()=>[pgAutomationEl('StartButton').title,pgAutomationEl('ReadinessButton').title]),['Rechecks every job, then calibrates.','Checks the queue only. Does not calibrate.'],'action tooltips return once the blocker clears');
+  assert.deepEqual(await page.evaluate(()=>[pgAutomationEl('StartButton').disabled,pgAutomationEl('ReadinessButton').disabled]),[false,false],'actions re-enable once the blocker clears');
+  await page.evaluate(()=>{
+   const failure={stage:'job-readiness',message:'Combined failure'};
+   pgAutomation.current=window.mockCurrent={run:{id:'parked',status:'interrupted',active_item:0,failure,items:[{name:'Job',failure,readiness:{checks:Array.from({length:13},(_,i)=>({name:'item-0-key-control'+i,ok:0,level:'error',message:'control'+i+' is not supported by the LG TV. Configure this job.'}))}}]}};
+   pgAutomationRenderLiveRun(pgAutomation.current.run);
+  });
   assert.match(await page.$eval('#pgAutomationActionBlocker',el=>el.textContent),/Stop/);
   assert.match(await page.$eval('#pgAutomationProgress',el=>el.textContent),/Problems requiring attention \(13\)/);
   assert.equal(await page.$eval('#pgAutomationActivity',el=>el.open),false,'failure never forces log open');
@@ -102,7 +114,7 @@ window.pgAutomationConfirmOverride=()=>true;
    pgAutomation.current=window.mockCurrent={run:{id:'checked',status:'failed',preflight_only:true,items:pgAutomation.queue.items.map(item=>({name:item.name||item.picture_mode,status:'checked'})),preflight_result:{scope:'queue',ready:0,message:'Queue blocked before calibration',checks:[{ok:0,level:'error',item_number:3,message:'Job four unsupported'}]}}};
    pgAutomationRenderLiveRun(pgAutomation.current.run);
   });
-  assert.match(await page.$eval('#pgAutomationLive',el=>el.textContent),/Last whole-queue check/,'check-only run is not reported as a calibration');
+  assert.match(await page.$eval('#pgAutomationLive',el=>el.textContent),/Last readiness check/,'check-only run is not reported as a calibration');
   assert.match(await page.$eval('#pgAutomationReadiness',el=>el.textContent),/Job four unsupported/,'late incompatibility is visible');
   // P1: the same saved result is not shown under a different (here empty) queue.
   await page.evaluate(()=>{pgAutomation.queue={name:'Test Queue',items:[]};pgAutomationRenderLiveRun(pgAutomation.current.run);});
