@@ -3803,6 +3803,15 @@ async function systemBackupWaitForReboot(){
  }
  systemBackupSetStatus('Could not confirm that PGenerator+ restarted. Reload this page after the device is back online.',true);
 }
+// Chromium browsers (Chrome, Arc, Edge, Brave) hold non-text downloads from a
+// plain-HTTP page as "Unconfirmed NNNNNN.crdownload" until the user chooses
+// Keep; the file is fully transferred but looks stalled (issue #35).
+function systemBackupKeepHint(){
+ if(window.isSecureContext)return '';
+ // userAgentData is secure-context only, so it is absent exactly here.
+ if(!/\bChrome\//.test(navigator.userAgent||''))return '';
+ return ' If the browser lists it as "Unconfirmed" or .crdownload, open its downloads list and choose Keep.';
+}
 async function exportSystemSettings(){
  const btn=document.getElementById('exportSystemSettingsBtn');
  if(btn){btn.disabled=true;btn.textContent='Creating Backup...';}
@@ -3822,7 +3831,7 @@ async function exportSystemSettings(){
   link.download=filename;
   document.body.appendChild(link);link.click();link.remove();
   URL.revokeObjectURL(link.href);
-  systemBackupSetStatus('System backup downloaded ('+(blob.size/1048576).toFixed(1)+' MB).',false);
+  systemBackupSetStatus('System backup downloaded ('+(blob.size/1048576).toFixed(1)+' MB).'+systemBackupKeepHint(),false);
   toast('System backup downloaded');
  }catch(error){
   systemBackupSetStatus(error&&error.message?error.message:'System backup failed',true);
