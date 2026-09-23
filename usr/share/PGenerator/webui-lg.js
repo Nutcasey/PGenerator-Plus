@@ -2414,6 +2414,7 @@ async function lgCalHistoryDownload(id){
   if(item.type==='3d'){
    const href=item.download||('/api/3d-lut/cube?file='+encodeURIComponent((item.base||'')+'.cube'));
    window.location.href=href;
+   if(typeof noteInsecureDownload==='function') noteInsecureDownload((item.base||'LUT')+'.cube');
    return;
   }
   if(item.type==='1d'){
