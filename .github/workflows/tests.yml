@@ -56,10 +56,15 @@ jobs:
           node -c usr/share/PGenerator/webui-automation.js
           node -c usr/share/PGenerator/webui-app.js
           node -c usr/share/PGenerator/webui-workspace.js
-      - name: Verify the renderer test compiler
+      - name: Confirm a C++ compiler is present for the renderer test
+        # t/renderer_pattern_handoff.t compiles the real ofApp update()/draw()
+        # methods and SKIPS where no working toolchain exists -- the appliance
+        # ships a c++ driver with no assembler. Assert the compiler here so the
+        # renderer regression can never silently vanish from CI.
         run: |
+          c++ --version
           printf 'int main(){return 0;}\n' > /tmp/cxx_probe.cpp
-          c++ -std=c++11 /tmp/cxx_probe.cpp -o /tmp/cxx_probe
+          c++ -std=c++11 -O0 /tmp/cxx_probe.cpp -o /tmp/cxx_probe
       - name: Run the test suite
         env:
           PGEN_REQUIRE_SHADER_TESTS: '1'
@@ -83,6 +88,8 @@ jobs:
           node t/browser/automation_progress.cjs
           node t/browser/automation_history.cjs
           node t/browser/automation_refresh.cjs
+          node t/browser/automation_report_refresh.cjs
+          node t/browser/automation_table_follow.cjs
           node t/browser/automation_editor.cjs
           node t/browser/automation_settings_plan.cjs
           node t/browser/automation_review_fixes.cjs

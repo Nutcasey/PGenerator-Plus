@@ -3,6 +3,7 @@
 #
 
 use JSON::PP ();
+use Digest::SHA qw(sha256_hex);
 use PGAutomation ();
 use PGCalibrationLog ();
 use File::Path qw(make_path remove_tree);
@@ -74,12 +75,64 @@ sub lg_picture_settings_cache_path (@) {
 
 sub lg_read_picture_settings_cache (@) {
  my $path=&lg_picture_settings_cache_path();
- return {} if(!open(my $fh,"<:raw",$path));
- my $raw="";
- { local $/; $raw=<$fh>//""; }
- close($fh);
- my $cache=eval { JSON::PP::decode_json($raw) };
- return (ref($cache) eq "HASH") ? $cache : {};
+ my $store=PGAutomation::read_json_file($path);
+ return {} if(ref($store) ne 'HASH');
+ return $store if(($store->{schema_version}||0)==2);
+ return {} if(($store->{schema_version}||0)!=3);
+ my $id=$store->{current}||'';
+ my $context_path=&lg_picture_settings_context_path($id);
+ my $cache=$context_path && ref($store->{contexts}) eq 'HASH' && exists($store->{contexts}{$id})
+  ? PGAutomation::read_json_file($context_path) : undef;
+ $cache=undef if(ref($cache) ne 'HASH' || ref($cache->{context}) ne 'HASH'
+  || sha256_hex(PGAutomation::encode_json($cache->{context})) ne $id
+  || ref($cache->{picture_settings}) ne 'HASH' || ref($cache->{read_at}) ne 'HASH');
+ $store->{contexts}=ref($cache) eq 'HASH' ? {$id=>$cache} : {};
+ return $store;
+}
+
+sub lg_picture_settings_context_path (@) {
+ my ($id)=@_;
+ return '' if(!defined($id) || $id !~ /\A[0-9a-f]{64}\z/);
+ return &lg_data_dir()."/picture-settings-cache/$id.json";
+}
+
+# Recover files left between a context write and the index commit. Run under
+# the index lock so an in-flight writer's new context cannot be swept away.
+sub lg_picture_settings_cache_sweep (@) {
+ my ($store)=@_;
+ return if(ref($store) ne 'HASH' || ($store->{schema_version}||0)!=3 || ref($store->{contexts}) ne 'HASH');
+ my $dir=&lg_data_dir().'/picture-settings-cache';
+ opendir(my $dh,$dir) or return;
+ my @ids=map {substr($_,0,64)} grep {/\A[0-9a-f]{64}\.json\z/} readdir($dh);
+ closedir($dh);
+ my ($failed,$error)=(0,'');
+ foreach my $id (@ids) {
+  next if(exists($store->{contexts}{$id}));
+  my $path=&lg_picture_settings_context_path($id);
+  if(!unlink($path) && -e $path) {$failed++;$error="$!";}
+ }
+ # Retry inaccessible orphans on the next write without blocking fresh data
+ # or clearing an unconfirmed current context.
+ PGCalibrationLog::event('Daemon','picture-settings-cache-prune-failed',{files=>$failed,reason=>$error}) if($failed);
+}
+
+# Split the old aggregate once, retaining the mode history and per-key ages.
+# Subsequent reads and writes touch only the index and the selected context.
+sub lg_picture_settings_cache_upgrade (@) {
+ my ($store)=@_;
+ return $store if(ref($store) eq 'HASH' && ($store->{schema_version}||0)==3 && ref($store->{contexts}) eq 'HASH');
+ my $index={schema_version=>3,contexts=>{}};
+ return $index if(ref($store) ne 'HASH' || ($store->{schema_version}||0)!=2 || ref($store->{contexts}) ne 'HASH');
+ foreach my $old_id (keys %{$store->{contexts}}) {
+  my $cache=$store->{contexts}{$old_id};
+  next if(ref($cache) ne 'HASH' || ref($cache->{context}) ne 'HASH');
+  my $id=sha256_hex(PGAutomation::encode_json($cache->{context}));
+  die "Unable to migrate picture-settings cache\n"
+   if(!PGAutomation::write_json_atomic(&lg_picture_settings_context_path($id),$cache));
+  $index->{contexts}{$id}={updated_at=>$cache->{updated_at}||0};
+  $index->{current}=$id if($old_id eq ($store->{current}||''));
+ }
+ return $index;
 }
 
 # Remember the last live picture-settings answer served over HTTP, merged per
@@ -112,11 +165,15 @@ sub lg_remember_picture_settings (@) {
  # An unscoped/virtual response must not leave an old coherent snapshot
  # labelled as current. Retain history but clear the current pointer.
  my ($ok)=PGAutomation::with_lock(&lg_picture_settings_cache_path(),sub {
-  my ($store)=@_;$store={} if(ref($store) ne 'HASH' || ($store->{schema_version}||0)!=2);
-  $store->{schema_version}=2;$store->{contexts}||={};
+  &lg_picture_settings_cache_sweep($_[0]);
+  my $store=&lg_picture_settings_cache_upgrade($_[0]);
   if(!$context){delete $store->{current};return $store;}
-  my $id=PGAutomation::encode_json($context);
-  my $cache=$store->{contexts}{$id}||={context=>$context,picture_settings=>{},read_at=>{}};
+  my $id=sha256_hex(PGAutomation::encode_json($context));
+  my $path=&lg_picture_settings_context_path($id);
+  my $cache=exists($store->{contexts}{$id}) ? PGAutomation::read_json_file($path) : undef;
+  $cache={context=>$context,picture_settings=>{},read_at=>{}}
+   if(ref($cache) ne 'HASH' || PGAutomation::encode_json($cache->{context}) ne PGAutomation::encode_json($context)
+    || ref($cache->{picture_settings}) ne 'HASH' || ref($cache->{read_at}) ne 'HASH');
   foreach my $key (keys %{$result->{picture_settings}}) {
    $cache->{picture_settings}{$key}=$result->{picture_settings}{$key};
    $cache->{read_at}{$key}=time();
@@ -131,9 +188,16 @@ sub lg_remember_picture_settings (@) {
     $cache->{$key}=$result->{$key} if(exists($result->{$key}));
    }
   }
-  $cache->{updated_at}=time();$store->{current}=$id;
+  $cache->{updated_at}=time();
+  die "Unable to save picture-settings cache\n" if(!PGAutomation::write_json_atomic($path,$cache));
+  $store->{contexts}{$id}={updated_at=>$cache->{updated_at}};
+  $store->{current}=$id;
   my @old=sort {($store->{contexts}{$b}{updated_at}||0)<=>($store->{contexts}{$a}{updated_at}||0)} grep {$_ ne $id} keys %{$store->{contexts}};
-  delete @{$store->{contexts}}{@old[31..$#old]} if(@old>31);
+  foreach my $old (@old>31 ? @old[31..$#old] : ()) {
+   my $old_path=&lg_picture_settings_context_path($old);
+   die "Unable to prune picture-settings cache: $!\n" if($old_path && !unlink($old_path) && -e $old_path);
+   delete $store->{contexts}{$old};
+  }
   return $store;
  });
  return $ok;
@@ -152,7 +216,7 @@ sub lg_browser_picture_settings_while_automation (@) {
  my $token=$payload->{automation_token}||'';
  return '' if($token ne '' && $token eq ($execution->{token}||''));
  my $store=&lg_read_picture_settings_cache();
- my $cache=($store->{schema_version}||0)==2 ? $store->{contexts}{$store->{current}||''} : undef;
+ my $cache=($store->{schema_version}||0)=~/\A[23]\z/ ? $store->{contexts}{$store->{current}||''} : undef;
  my $cache_present=ref($cache) eq 'HASH' ? 1 : 0;
  my $context=ref($cache) eq 'HASH' ? $cache->{context}||{} : {};
  my %request_fields=(picture_mode=>'mode',tv_input=>'input',signal_mode=>'signal',category=>'category');
@@ -3967,7 +4031,9 @@ sub webui_lg_api (@) {
   my $cached=&lg_browser_picture_settings_while_automation($body);
   return $cached if($cached ne "");
   my $json=&webui_lg_picture_settings($body);
-  &lg_remember_picture_settings($json,$body);
+  my $started=PGCalibrationLog::monotonic();
+  my $saved=&lg_remember_picture_settings($json,$body);
+  PGCalibrationLog::event('Daemon','picture-settings-cache',{saved=>$saved ? 1 : 0,elapsed_ms=>PGCalibrationLog::elapsed_ms($started)});
   return $json;
  }
  if($path eq "/api/lg/picture-settings/set" && $method eq "POST") {

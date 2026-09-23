@@ -1691,7 +1691,6 @@ void ofxRPI4Window::rgb2ycbcr_shader()
 		uniform int source_normalizer;
 
 		uniform int color_format;
-		uniform int passthrough_422;
 
 		uniform int is_image;
 		uniform int scalar1;
@@ -1714,7 +1713,7 @@ void ofxRPI4Window::rgb2ycbcr_shader()
 		{
 			// Solid inputs are link-depth codes, already range-normalized by the app.
 			vec3 codes = solid ? vec3(source_codes) : rgb.rgb * float(scale);
-			if (color_format == 0 || (color_format == 2 && passthrough_422 == 1)) {
+			if (color_format == 0) {
 				return solid ? vec4(codes / float(source_normalizer), 1.0) : rgb;
 			}
 			float Y, Cb, Cr, a;

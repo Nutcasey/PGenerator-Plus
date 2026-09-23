@@ -345,7 +345,7 @@ public:
 	uint32_t buffer_width = 0, buffer_height = 0;
     static ofShader shader;  
     static bool usesColourShader() {
-        return !is_std_DoVi && (avi_info.output_format != 0 || bit_depth == 10 ||
+        return !is_std_DoVi && (avi_info.output_format != 0 || bit_depth == 10 || bit_depth == 12 ||
             (isDoVi && avi_info.rgb_quant_range == 2));
     }
  //   static ofShader dovi_shader; 	

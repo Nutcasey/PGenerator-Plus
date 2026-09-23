@@ -1,0 +1,922 @@
+{
+  "version": 1,
+  "source": "Completed Raspberry Pi calibration stages, 18–20 September 2026. Point fractions from saved Point finished log events; includes final commit time.",
+  "records": [
+    {
+      "source": "recorded-job-1",
+      "job": {
+        "signal_format": "hdr10",
+        "display_type": "oled_generic",
+        "delay_ms": 1000,
+        "low_light": {
+          "enabled": true,
+          "mode": "a",
+          "trigger": 1
+        },
+        "patch_insert": true,
+        "patch_insert_time_enabled": true,
+        "patch_insert_time_frequency_ms": 5000,
+        "patch_insert_time_duration_ms": 5000,
+        "patch_insert_patch_enabled": true,
+        "patch_insert_patch_every": 1,
+        "patch_insert_patch_duration_ms": 1000,
+        "signal_range": "1",
+        "color_format": "1",
+        "pre_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "post_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "stages": {
+          "apply_all": 1,
+          "calibration": 1,
+          "post_readings": 0,
+          "pre_readings": 0
+        },
+        "panel_light": {
+          "fixed_value": "100",
+          "key": "backlight",
+          "policy": "fixed",
+          "target_luminance": 100
+        },
+        "settle_seconds": 8,
+        "calibration": {
+          "dark_detail": true,
+          "target_delta_e": 0.5,
+          "delta_e_formula": "deitp",
+          "method": "matrix",
+          "profile_source": "matrix",
+          "lattice_size": 3,
+          "solve_cube_size": 33,
+          "shadow_fix": true,
+          "lattice_residuals": false
+        }
+      },
+      "stages": {
+        "item-started": {
+          "seconds": 1.05
+        },
+        "tv-setup-verified": {
+          "seconds": 136.08
+        },
+        "reset-and-reapply-verified": {
+          "seconds": 191.54
+        },
+        "panel-light-settled": {
+          "seconds": 75.99
+        },
+        "greyscale-done": {
+          "seconds": 7421.89,
+          "curve": {
+            "total_steps": 37,
+            "fractions": [
+              0,
+              0.05012,
+              0.12557,
+              0.14484,
+              0.16074,
+              0.18095,
+              0.19483,
+              0.20655,
+              0.21652,
+              0.2277,
+              0.23309,
+              0.2467,
+              0.24967,
+              0.26435,
+              0.27594,
+              0.3037,
+              0.33266,
+              0.35921,
+              0.39384,
+              0.42685,
+              0.44436,
+              0.44733,
+              0.46188,
+              0.47306,
+              0.4899,
+              0.51645,
+              0.53356,
+              0.54959,
+              0.56279,
+              0.63892,
+              0.65981,
+              0.74213,
+              0.78053,
+              0.82715,
+              0.86218,
+              0.9061,
+              0.95124,
+              0.99166
+            ]
+          }
+        },
+        "greyscale-settings-verified": {
+          "seconds": 50.57
+        },
+        "volume-done": {
+          "seconds": 2882.69,
+          "tail_seconds": 2772.69
+        },
+        "volume-settings-verified": {
+          "seconds": 40.77
+        },
+        "session-closed": {
+          "seconds": 78.52
+        },
+        "apply-all-done": {
+          "seconds": 40.91
+        }
+      }
+    },
+    {
+      "source": "recorded-job-2",
+      "job": {
+        "signal_format": "sdr",
+        "display_type": "oled_generic",
+        "delay_ms": 1000,
+        "low_light": {
+          "enabled": true,
+          "mode": "a",
+          "trigger": 1
+        },
+        "patch_insert": true,
+        "patch_insert_time_enabled": true,
+        "patch_insert_time_frequency_ms": 45000,
+        "patch_insert_time_duration_ms": 5000,
+        "patch_insert_patch_enabled": false,
+        "patch_insert_patch_every": 1,
+        "patch_insert_patch_duration_ms": 1000,
+        "signal_range": "1",
+        "color_format": "1",
+        "pre_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "post_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "stages": {
+          "apply_all": 1,
+          "calibration": 1,
+          "post_readings": 0,
+          "pre_readings": 0
+        },
+        "panel_light": {
+          "fixed_value": "100",
+          "key": "backlight",
+          "policy": "fixed",
+          "target_luminance": 100
+        },
+        "settle_seconds": 8,
+        "calibration": {
+          "dark_detail": true,
+          "target_delta_e": 0.5,
+          "delta_e_formula": "deitp",
+          "method": "hybrid",
+          "profile_source": "hybrid3",
+          "lattice_size": "3",
+          "solve_cube_size": 33,
+          "shadow_fix": 0,
+          "lattice_residuals": true
+        }
+      },
+      "stages": {
+        "item-started": {
+          "seconds": 1.31
+        },
+        "tv-setup-verified": {
+          "seconds": 90.68
+        },
+        "reset-and-reapply-verified": {
+          "seconds": 826.82
+        },
+        "panel-light-settled": {
+          "seconds": 78.54
+        },
+        "greyscale-done": {
+          "seconds": 3896.69,
+          "curve": {
+            "total_steps": 35,
+            "fractions": [
+              0,
+              0.05928,
+              0.08854,
+              0.1065,
+              0.11856,
+              0.14833,
+              0.16245,
+              0.16322,
+              0.16758,
+              0.18349,
+              0.1876,
+              0.19632,
+              0.19735,
+              0.21865,
+              0.21967,
+              0.22814,
+              0.25252,
+              0.25842,
+              0.28049,
+              0.28922,
+              0.29564,
+              0.30462,
+              0.31976,
+              0.33413,
+              0.36467,
+              0.37955,
+              0.4278,
+              0.4473,
+              0.48631,
+              0.53661,
+              0.63669,
+              0.67006,
+              0.72215,
+              0.75192,
+              0.90461,
+              0.98545
+            ]
+          }
+        },
+        "greyscale-settings-verified": {
+          "seconds": 45.74
+        },
+        "volume-done": {
+          "seconds": 694.09,
+          "tail_seconds": 84.09
+        },
+        "volume-settings-verified": {
+          "seconds": 44.39
+        },
+        "session-closed": {
+          "seconds": 64.69
+        },
+        "apply-all-done": {
+          "seconds": 53
+        }
+      }
+    },
+    {
+      "source": "recorded-job-3",
+      "job": {
+        "signal_format": "dv",
+        "display_type": "oled_generic",
+        "delay_ms": 1000,
+        "low_light": {
+          "enabled": true,
+          "mode": "a",
+          "trigger": 1
+        },
+        "patch_insert": true,
+        "patch_insert_time_enabled": true,
+        "patch_insert_time_frequency_ms": 5000,
+        "patch_insert_time_duration_ms": 5000,
+        "patch_insert_patch_enabled": true,
+        "patch_insert_patch_every": 1,
+        "patch_insert_patch_duration_ms": 1000,
+        "signal_range": "2",
+        "color_format": "0",
+        "pre_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "post_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "stages": {
+          "apply_all": 1,
+          "calibration": 1,
+          "post_readings": 0,
+          "pre_readings": 0
+        },
+        "panel_light": {
+          "fixed_value": "100",
+          "key": "backlight",
+          "policy": "fixed",
+          "target_luminance": 100
+        },
+        "settle_seconds": 8,
+        "calibration": {
+          "dark_detail": true,
+          "target_delta_e": 0.5,
+          "delta_e_formula": "deitp",
+          "method": "matrix",
+          "profile_source": "matrix",
+          "lattice_size": 3,
+          "solve_cube_size": 33,
+          "shadow_fix": 0,
+          "lattice_residuals": false
+        }
+      },
+      "stages": {
+        "item-started": {
+          "seconds": 1.75
+        },
+        "tv-setup-verified": {
+          "seconds": 54.04
+        },
+        "reset-and-reapply-verified": {
+          "seconds": 119.73
+        },
+        "panel-light-settled": {
+          "seconds": 53.27
+        },
+        "greyscale-done": {
+          "seconds": 4153.4,
+          "curve": {
+            "total_steps": 37,
+            "fractions": [
+              0,
+              0.03949,
+              0.11918,
+              0.13603,
+              0.15,
+              0.15963,
+              0.19309,
+              0.20947,
+              0.2374,
+              0.24245,
+              0.27062,
+              0.30337,
+              0.32455,
+              0.33442,
+              0.33996,
+              0.34574,
+              0.36043,
+              0.37223,
+              0.39173,
+              0.41749,
+              0.46372,
+              0.47359,
+              0.47864,
+              0.50296,
+              0.5227,
+              0.57375,
+              0.58482,
+              0.62142,
+              0.67752,
+              0.70087,
+              0.7288,
+              0.75601,
+              0.80344,
+              0.84437,
+              0.8735,
+              0.90239,
+              0.94164,
+              0.97101
+            ]
+          }
+        },
+        "greyscale-settings-verified": {
+          "seconds": 30.32
+        },
+        "volume-done": {
+          "seconds": 184.54
+        },
+        "volume-settings-verified": {
+          "seconds": 41.16
+        },
+        "session-closed": {
+          "seconds": 67.81
+        },
+        "apply-all-done": {
+          "seconds": 53.29
+        }
+      }
+    },
+    {
+      "source": "recorded-job-4",
+      "job": {
+        "signal_format": "dv",
+        "display_type": "oled_generic",
+        "delay_ms": 1000,
+        "low_light": {
+          "enabled": true,
+          "mode": "a",
+          "trigger": 1
+        },
+        "patch_insert": true,
+        "patch_insert_time_enabled": true,
+        "patch_insert_time_frequency_ms": 5000,
+        "patch_insert_time_duration_ms": 5000,
+        "patch_insert_patch_enabled": true,
+        "patch_insert_patch_every": 1,
+        "patch_insert_patch_duration_ms": 1000,
+        "signal_range": "2",
+        "color_format": "0",
+        "pre_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "post_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "stages": {
+          "apply_all": 1,
+          "calibration": 1,
+          "post_readings": 0,
+          "pre_readings": 0
+        },
+        "panel_light": {
+          "fixed_value": "100",
+          "key": "backlight",
+          "policy": "fixed",
+          "target_luminance": 100
+        },
+        "settle_seconds": 8,
+        "calibration": {
+          "dark_detail": true,
+          "target_delta_e": 0.5,
+          "delta_e_formula": "deitp",
+          "method": "matrix",
+          "profile_source": "matrix",
+          "lattice_size": 3,
+          "solve_cube_size": 33,
+          "shadow_fix": 0,
+          "lattice_residuals": false
+        }
+      },
+      "stages": {
+        "item-started": {
+          "seconds": 2.34
+        },
+        "tv-setup-verified": {
+          "seconds": 56.29
+        },
+        "reset-and-reapply-verified": {
+          "seconds": 192.9
+        },
+        "panel-light-settled": {
+          "seconds": 55.21
+        },
+        "greyscale-done": {
+          "seconds": 4128.49,
+          "curve": {
+            "total_steps": 37,
+            "fractions": [
+              0,
+              0.04433,
+              0.09689,
+              0.11602,
+              0.12571,
+              0.14025,
+              0.19571,
+              0.20952,
+              0.24295,
+              0.24827,
+              0.26911,
+              0.30568,
+              0.31101,
+              0.3161,
+              0.32143,
+              0.33136,
+              0.33669,
+              0.34662,
+              0.36115,
+              0.39361,
+              0.43406,
+              0.44932,
+              0.45465,
+              0.48831,
+              0.5169,
+              0.54669,
+              0.57333,
+              0.60531,
+              0.68136,
+              0.71479,
+              0.74555,
+              0.7814,
+              0.81071,
+              0.82742,
+              0.8686,
+              0.89791,
+              0.94127,
+              0.97784
+            ]
+          }
+        },
+        "greyscale-settings-verified": {
+          "seconds": 33.58
+        },
+        "volume-done": {
+          "seconds": 139.16
+        },
+        "volume-settings-verified": {
+          "seconds": 227.17
+        },
+        "session-closed": {
+          "seconds": 37.44
+        },
+        "apply-all-done": {
+          "seconds": 73
+        }
+      }
+    },
+    {
+      "source": "recorded-job-5",
+      "job": {
+        "signal_format": "hdr10",
+        "display_type": "oled_generic",
+        "delay_ms": 1000,
+        "low_light": {
+          "enabled": true,
+          "mode": "a",
+          "trigger": 1
+        },
+        "patch_insert": true,
+        "patch_insert_time_enabled": true,
+        "patch_insert_time_frequency_ms": 5000,
+        "patch_insert_time_duration_ms": 5000,
+        "patch_insert_patch_enabled": true,
+        "patch_insert_patch_every": 1,
+        "patch_insert_patch_duration_ms": 1000,
+        "signal_range": "1",
+        "color_format": "1",
+        "pre_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "post_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "stages": {
+          "apply_all": 1,
+          "calibration": 1,
+          "post_readings": 0,
+          "pre_readings": 0
+        },
+        "panel_light": {
+          "fixed_value": "100",
+          "key": "backlight",
+          "policy": "fixed",
+          "target_luminance": 100
+        },
+        "settle_seconds": 8,
+        "calibration": {
+          "dark_detail": true,
+          "target_delta_e": 0.5,
+          "delta_e_formula": "deitp",
+          "method": "matrix",
+          "profile_source": "matrix",
+          "lattice_size": 3,
+          "solve_cube_size": 33,
+          "shadow_fix": true,
+          "lattice_residuals": false
+        }
+      },
+      "stages": {
+        "item-started": {
+          "seconds": 2.28
+        },
+        "tv-setup-verified": {
+          "seconds": 56.53
+        },
+        "reset-and-reapply-verified": {
+          "seconds": 219.67
+        },
+        "panel-light-settled": {
+          "seconds": 98.84
+        },
+        "greyscale-done": {
+          "seconds": 7861.64,
+          "curve": {
+            "total_steps": 37,
+            "fractions": [
+              0,
+              0.04859,
+              0.11168,
+              0.13369,
+              0.14514,
+              0.15684,
+              0.18317,
+              0.18902,
+              0.20085,
+              0.20352,
+              0.21497,
+              0.22387,
+              0.23036,
+              0.2357,
+              0.26419,
+              0.27959,
+              0.31113,
+              0.32945,
+              0.35794,
+              0.36087,
+              0.39216,
+              0.42485,
+              0.46301,
+              0.47318,
+              0.4901,
+              0.52012,
+              0.5233,
+              0.56579,
+              0.58029,
+              0.6131,
+              0.63028,
+              0.6926,
+              0.7155,
+              0.80696,
+              0.87386,
+              0.91253,
+              0.94993,
+              0.99152
+            ]
+          }
+        },
+        "greyscale-settings-verified": {
+          "seconds": 32.72
+        },
+        "volume-done": {
+          "seconds": 1705.99,
+          "tail_seconds": 1605.99
+        },
+        "volume-settings-verified": {
+          "seconds": 61.38
+        },
+        "session-closed": {
+          "seconds": 37.32
+        },
+        "apply-all-done": {
+          "seconds": 52.49
+        }
+      }
+    },
+    {
+      "source": "recorded-job-6",
+      "job": {
+        "signal_format": "sdr",
+        "display_type": "oled_generic",
+        "delay_ms": 1000,
+        "low_light": {
+          "enabled": true,
+          "mode": "a",
+          "trigger": 1
+        },
+        "patch_insert": true,
+        "patch_insert_time_enabled": true,
+        "patch_insert_time_frequency_ms": 45000,
+        "patch_insert_time_duration_ms": 5000,
+        "patch_insert_patch_enabled": false,
+        "patch_insert_patch_every": 1,
+        "patch_insert_patch_duration_ms": 1000,
+        "signal_range": "1",
+        "color_format": "1",
+        "pre_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "post_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "stages": {
+          "apply_all": 1,
+          "calibration": 1,
+          "post_readings": 0,
+          "pre_readings": 0
+        },
+        "panel_light": {
+          "fixed_value": "95",
+          "key": "backlight",
+          "policy": "fixed",
+          "target_luminance": 100
+        },
+        "settle_seconds": 8,
+        "calibration": {
+          "dark_detail": true,
+          "target_delta_e": 0.5,
+          "delta_e_formula": "deitp",
+          "method": "hybrid",
+          "profile_source": "hybrid3",
+          "lattice_size": "3",
+          "solve_cube_size": 33,
+          "shadow_fix": 0,
+          "lattice_residuals": true
+        }
+      },
+      "stages": {
+        "item-started": {
+          "seconds": 2.53
+        },
+        "tv-setup-verified": {
+          "seconds": 78.47
+        },
+        "reset-and-reapply-verified": {
+          "seconds": 800.68
+        },
+        "panel-light-settled": {
+          "seconds": 126.96
+        },
+        "greyscale-done": {
+          "seconds": 3698.63,
+          "curve": {
+            "total_steps": 35,
+            "fractions": [
+              0,
+              0.07354,
+              0.10409,
+              0.13897,
+              0.14735,
+              0.15195,
+              0.1725,
+              0.17358,
+              0.18142,
+              0.18574,
+              0.20305,
+              0.21494,
+              0.21603,
+              0.21711,
+              0.23522,
+              0.24712,
+              0.26442,
+              0.26929,
+              0.28064,
+              0.28524,
+              0.29849,
+              0.29984,
+              0.31877,
+              0.3458,
+              0.42746,
+              0.46477,
+              0.49424,
+              0.5283,
+              0.56264,
+              0.62699,
+              0.66376,
+              0.68836,
+              0.73487,
+              0.77758,
+              0.9344,
+              0.98171
+            ]
+          }
+        },
+        "greyscale-settings-verified": {
+          "seconds": 32.88
+        },
+        "volume-done": {
+          "seconds": 687.75,
+          "tail_seconds": 92.75
+        },
+        "volume-settings-verified": {
+          "seconds": 63.9
+        },
+        "session-closed": {
+          "seconds": 56.58
+        },
+        "apply-all-done": {
+          "seconds": 62.51
+        }
+      }
+    },
+    {
+      "source": "recorded-job-7",
+      "job": {
+        "signal_format": "sdr",
+        "display_type": "oled_generic",
+        "delay_ms": 1000,
+        "low_light": {
+          "enabled": true,
+          "mode": "a",
+          "trigger": 1
+        },
+        "patch_insert": true,
+        "patch_insert_time_enabled": true,
+        "patch_insert_time_frequency_ms": 5000,
+        "patch_insert_time_duration_ms": 5000,
+        "patch_insert_patch_enabled": true,
+        "patch_insert_patch_every": 1,
+        "patch_insert_patch_duration_ms": 1000,
+        "signal_range": "1",
+        "color_format": "1",
+        "pre_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "post_series": [
+          "greyscale-21",
+          "colors-30",
+          "saturations-24"
+        ],
+        "stages": {
+          "apply_all": 1,
+          "calibration": 1,
+          "post_readings": 0,
+          "pre_readings": 0
+        },
+        "panel_light": {
+          "fixed_value": 95,
+          "key": "backlight",
+          "policy": "target",
+          "target_luminance": 120
+        },
+        "settle_seconds": 8,
+        "calibration": {
+          "dark_detail": true,
+          "target_delta_e": 0.2,
+          "delta_e_formula": "deitp",
+          "method": "hybrid",
+          "profile_source": "hybrid9",
+          "lattice_size": "9",
+          "solve_cube_size": 33,
+          "shadow_fix": 0,
+          "lattice_residuals": true
+        }
+      },
+      "stages": {
+        "item-started": {
+          "seconds": 0.36
+        },
+        "tv-setup-verified": {
+          "seconds": 35.58
+        },
+        "reset-and-reapply-verified": {
+          "seconds": 151.56
+        },
+        "panel-light-settled": {
+          "seconds": 311.21
+        },
+        "greyscale-done": {
+          "seconds": 6010.78,
+          "curve": {
+            "total_steps": 35,
+            "fractions": [
+              0,
+              0.04053,
+              0.04913,
+              0.06172,
+              0.06826,
+              0.07486,
+              0.07913,
+              0.09371,
+              0.09786,
+              0.10421,
+              0.10613,
+              0.10819,
+              0.13746,
+              0.14425,
+              0.14839,
+              0.16441,
+              0.16859,
+              0.17694,
+              0.19105,
+              0.19548,
+              0.20444,
+              0.23519,
+              0.26036,
+              0.27587,
+              0.32747,
+              0.36958,
+              0.40843,
+              0.44333,
+              0.482,
+              0.55652,
+              0.6141,
+              0.6392,
+              0.69734,
+              0.79165,
+              0.93658,
+              0.99069
+            ]
+          }
+        },
+        "greyscale-settings-verified": {
+          "seconds": 25.66
+        },
+        "volume-done": {
+          "seconds": 13858.32,
+          "tail_seconds": 94.04
+        },
+        "volume-settings-verified": {
+          "seconds": 42.03
+        },
+        "session-closed": {
+          "seconds": 55.24
+        },
+        "apply-all-done": {
+          "seconds": 28.45
+        }
+      }
+    }
+  ]
+}

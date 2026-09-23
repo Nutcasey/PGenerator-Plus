@@ -15,7 +15,6 @@ void ofSetColor(int r, int g, int b, int a=255) { style_color={double(r),double(
 void ofClear(float r, float g, float b, float a) { clear_color={r/255.,g/255.,b/255.,a/255.}; }
 int ofGetWindowWidth() { return 1920; }
 int ofGetWindowHeight() { return 1080; }
-bool usesLowLatencyDoVi422Transport() { return false; }
 struct Texture { void bind() {} void unbind() {} };
 struct Image { Texture texture; Texture &getTexture() { return texture; } };
 struct Fbo { void begin() {} void end() {} };
@@ -46,6 +45,7 @@ public:
     int dv_source_red=0,dv_source_green=0,dv_source_blue=0,dv_source_max=255;
     int arr_source_range[1][1]={{0}},arr_source_max[1][1]={{1023}},arr_redbg[1][1]={{0}};
     float background_color[4]={0,0,0,1};
+    std::vector<int> dv_background;
     Image img,float_img;
     Fbo fbo8,fbo10;
     void setColor(int,int,int);
@@ -53,7 +53,7 @@ public:
     void setBackground(int,int,int);
     void clearBackground(int,int,int,int);
     void restoreBackground();
-    void setDoViBackground(int,int,int) {}
+    void setDoViBackground(int r,int g,int b) { dv_background={r,g,b}; }
     void shader_begin(int);
     void shader_end(int);
 };
@@ -66,7 +66,8 @@ int main() {
         ofApp app;
         auto &window=ofxRPI4Window::avi_info;
         auto &shader=ofxRPI4Window::shader;
-        for(int bits : {8,10}) for(int format : {0,1,2}) for(int range : {0,1,2}) {
+        for(int hdr : {0,1}) for(int bits : {8,10,12}) for(int format : {0,1,2}) for(int range : {0,1,2}) {
+            ofxRPI4Window::isHDR=hdr;
             ofxRPI4Window::bit_depth=bits;
             window.output_format=format; window.rgb_quant_range=range;
             int maximum=(1<<bits)-1;
@@ -74,7 +75,7 @@ int main() {
                 app.arr_source_range[0][0]=0;
                 app.setColor(code,maximum-code,code/2);
                 app.shader_begin(0);
-                require(shader.active==ofxRPI4Window::usesColourShader(),"wrong shader selection");
+                require(shader.active==(format!=0 || bits!=8),"wrong shader selection");
                 if(shader.active) {
                     require(shader.values["source_codes"]==std::vector<double>({double(code),double(maximum-code),double(code/2)}),"solid code was quantized");
                     require(shader.values["source_normalizer"][0]==maximum,"wrong source domain");
@@ -132,6 +133,15 @@ int main() {
                 ofxRPI4Window::isDoVi=1;
                 app.arr_source_max[0][0]=source_max;
                 int maximum=source_max ? source_max : 255;
+                // Backgrounds retain the original DV domain even though the
+                // tunnel surface is only 8/10 bits. BG=-1 must not repack it.
+                app.dv_background.clear();
+                app.setBackground(maximum,maximum/2,0);
+                require(app.dv_background==std::vector<int>({maximum,maximum/2,0}),"DV background source domain changed");
+                app.arr_redbg[0][0]=-1;
+                app.setBackground(-1,-1,-1);
+                require(app.dv_background==std::vector<int>({maximum,maximum/2,0}),"BG=-1 changed DV background");
+                app.arr_redbg[0][0]=0;
                 for(int code=-1;code<=maximum+1;++code) {
                     app.setColor(code,maximum-code,code/2);
                     // Every draw must upload both DV inputs; old values cannot
@@ -165,7 +175,7 @@ int main() {
                 window.output_format=0;
             }
         }
-        std::cout << "Real renderer paths preserve every 8/10-bit code and DV source inputs\n";
+        std::cout << "Real renderer paths preserve every 8/10/12-bit code and DV source inputs\n";
         return 0;
     } catch(const std::exception &e) { std::cerr << e.what() << '\n'; return 1; }
 }

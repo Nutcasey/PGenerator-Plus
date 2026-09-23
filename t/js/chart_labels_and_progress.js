@@ -35,6 +35,7 @@ const ws=read('webui-workspace.js'),app=read('webui-app.js'),auto=read('webui-au
  const elements={chartGammaValueLabel:{textContent:''},meterPerChannelGamma:{checked:true}};
  const ctx={Math,Number,Object,Array,isFinite,
   document:{getElementById:id=>elements[id]||null},
+  meterLivePlotPublish:()=>{},meterLiveCiePublish:()=>{},meterLiveCieInset:()=>{},
   getChartCtx:()=>({}),meterChartIsHlg:()=>false,meterGreyTargetUsesPq:()=>hdr,meterChartIsHdr:()=>hdr,meterChartIsDv:()=>false,
   meterTargetGammaLabel:()=>'ST 2084',meterUseLgAutoCal26GammaAxis:()=>false,meterGreyscaleChartWhiteReference:()=>whiteRd,
   meterFilterGammaChartItems:x=>x,meterReadingLuminanceNits:rd=>rd.luminance,meterChartBlackLevel:()=>0,meterFilterEotfLuminanceChartItems:x=>x,
@@ -78,12 +79,12 @@ const ws=read('webui-workspace.js'),app=read('webui-app.js'),auto=read('webui-au
  Object.assign(ctx,{meterGreyscaleReportReadings:()=>({visible:[...readings,whiteRd],white:whiteRd,raw:[...readings,whiteRd]}),meterGreyRefMode:()=>'relative',meterDeltaEForm:()=>'de2000',
   meterDeltaEFormLabel:()=>'dE2000',rgbBalance:()=>({R:100,G:100,B:100}),meterColorDeltaE2000:()=>1,meterGrayWorldWeight:()=>0});
  const html=ctx.table();
- const cell=ire=>html.match(new RegExp('<tr><td>'+ire+'%</td>(?:<td>[^<]*</td>){4}<td>([^<]*)</td>'))[1];
+ const cell=ire=>html.match(new RegExp('<tr[^>]*><td>'+ire+'%</td>(?:<td>[^<]*</td>){4}<td>([^<]*)</td>'))[1];
  assert.equal(cell(85),'clip','the report table marks a clipped step instead of printing a zero gamma');
  assert.equal(cell(80),'clip','from the onset');
  assert.match(cell(75),/^\d\.\d\d$/,'and keeps the roll-off value');
  hdr=false;
- assert.match(ctx.table().match(/<tr><td>85%<\/td>(?:<td>[^<]*<\/td>){4}<td>([^<]*)<\/td>/)[1],/^0\.\d\d$/,'SDR tables are unchanged');
+ assert.match(ctx.table().match(/<tr[^>]*><td>85%<\/td>(?:<td>[^<]*<\/td>){4}<td>([^<]*)<\/td>/)[1],/^0\.\d\d$/,'SDR tables are unchanged');
  hdr=true;
 }
 // CSV and tooltip use the same onset rule.

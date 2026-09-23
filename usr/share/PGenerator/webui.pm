@@ -13458,6 +13458,11 @@ sub webui_automation_public_run (@) {
     && ($eta->{calculated_at}||0)>=($run->{resumed_at}||0)) {
   # Never expose internal profile identities or arbitrary saved payload fields.
   $public->{time_estimate}={map {$_=>$eta->{$_}} qw(scope remaining_seconds calculated_at active_item stage job_remaining_seconds job_unknown_stages batch_known_seconds batch_unknown_stages known_stages remaining_stages approximate_history stage_remaining_seconds pass_remaining_seconds)};
+  for my $key (qw(seeded_history adaptive)) {$public->{time_estimate}{$key}=$eta->{$key} if exists($eta->{$key});}
+  if(ref($eta->{ranges}) eq 'HASH') {
+   $public->{time_estimate}{ranges}={map {my $key=$_; ref($eta->{ranges}{$key}) eq 'HASH'
+    ? ($key=>{map {$_=>$eta->{ranges}{$key}{$_}} qw(low high)}) : ()} qw(job batch stage pass)};
+  }
  }
  my $op=$run->{operation_progress};
  $public->{operation_progress}={map {$_=>$op->{$_}} qw(stage completed total unit message)}
@@ -14064,7 +14069,7 @@ sub webui_automation_job_detail (@) {
 # failure, which is all the row renders. Opening a run fetches the run. The
 # jobs, with their checks, warnings and checkpoints, used to ride along: 72
 # runs listed as 588 KB.
-our @WEBUI_LISTING_ROW_KEYS=qw(id queue_name status created_at created_at_iso completed_at failure);
+our @WEBUI_LISTING_ROW_KEYS=qw(id queue_name status created_at created_at_iso completed_at preflight_only failure);
 sub webui_automation_listing_run (@) {
  my ($run)=@_;
  return undef if(ref($run) ne "HASH");
@@ -14075,6 +14080,11 @@ sub webui_automation_listing_run (@) {
   status=>$run->{status}||"idle",
  };
  foreach my $key (qw(created_at created_at_iso completed_at)) { $row->{$key}=$run->{$key} if(exists($run->{$key})); }
+ # A readiness pass finishes "complete" exactly like a calibration, so History
+ # cannot tell them apart without this flag. Carry it as a plain 0/1 rather
+ # than the manifest's JSON boolean: the row is re-encoded into the listing
+ # cache, and a JSON::PP::Boolean survives that round trip as an object.
+ $row->{preflight_only}=$run->{preflight_only} ? 1 : 0;
  if(ref($run->{failure}) eq "HASH") {
   $row->{failure}={stage=>$run->{failure}{stage}||"",message=>$run->{failure}{message}||""};
   $row->{failure}{error_code}=$run->{failure}{error_code} if($run->{failure}{error_code});
@@ -14086,9 +14096,10 @@ sub webui_automation_listing_run (@) {
 # this version is replaced the first time History is listed: trimmed from
 # the old summary when that still matches the manifest, rebuilt from the
 # manifest otherwise.
-# 3: the row carries no items (19 Sep 2026); 2 still carried the trimmed job
-# list; 1 and unversioned carried the whole public run.
-our $WEBUI_LISTING_CACHE_VERSION=3;
+# 4: the row carries preflight_only (21 Sep 2026); 3: the row carries no items
+# (19 Sep 2026); 2 still carried the trimmed job list; 1 and unversioned
+# carried the whole public run.
+our $WEBUI_LISTING_CACHE_VERSION=4;
 sub webui_automation_listing_upgrade (@) {
  my ($old)=@_;
  # Anything short of a row (no run id, a failure that is not a record) is
@@ -14096,6 +14107,14 @@ sub webui_automation_listing_upgrade (@) {
  return undef if(ref($old) ne "HASH" || !defined($old->{id}) || ref($old->{id}) || $old->{id} eq "");
  return undef if(defined($old->{failure}) && ref($old->{failure}) ne "HASH");
  my %row=map { ($_=>$old->{$_}) } grep { exists($old->{$_}) } @WEBUI_LISTING_ROW_KEYS;
+ # Trimming only ever DROPS keys, so a pre-v4 summary carries no
+ # preflight_only. Default it rather than rebuild from the manifest: this trim
+ # path exists so an upgrade does not re-decode every run (72 of them take
+ # minutes on the appliance). 0 keeps a trimmed row identical in shape to a
+ # freshly built one, and the History badge is additive, so an old readiness
+ # pass stays unlabeled rather than being relabeled a calibration. Every new
+ # run carries the real value.
+ $row{preflight_only}=$old->{preflight_only} ? 1 : 0;
  $row{failure}={map { exists($old->{failure}{$_}) ? ($_=>$old->{failure}{$_}) : () } qw(stage message error_code)} if(ref($old->{failure}) eq "HASH");
  return \%row;
 }
@@ -15249,13 +15268,27 @@ sub webui_automation_control (@) {
  return $response;
 }
 
+# "The TV is free" and "a rival owns the TV" are different answers on Resume.
+# An absent claim (undef, e.g. released by failure cleanup) is free to
+# re-acquire; a claim this run already owns is 'ok' to refresh; any claim held
+# by a different run_id or token is a 'rival'. Only the absent case differs
+# from the historical guard, which stranded an interrupted run whose own claim
+# cleanup had already released.
+sub webui_automation_resume_claim_decision (@) {
+ my ($execution,$run)=@_;
+ return "ok" if(ref($execution) ne "HASH");
+ return "rival" if(($execution->{run_id}||"") ne ($run->{id}||"") || !$run->{token} || ($execution->{token}||"") ne $run->{token});
+ return "ok";
+}
+
 sub webui_automation_reconnect_for_resume (@) {
  my ($run)=@_;
- # Only the run holding the execution claim may reconnect on Resume. The
- # ordinary Connect button remains guarded against competing operations.
+ # Only a genuinely competing run is turned away here; a run whose own claim
+ # cleanup released reconnects and re-acquires the free TV. The ordinary
+ # Connect button remains guarded against competing operations.
  my $execution=&webui_automation_read_execution();
  return {status=>"error",error_code=>"automation-owner-mismatch",message=>"Another run owns the TV; this run cannot resume."}
-  if(ref($execution) ne "HASH" || ($execution->{run_id}||"") ne ($run->{id}||"") || !$run->{token} || ($execution->{token}||"") ne $run->{token});
+  if(&webui_automation_resume_claim_decision($execution,$run) eq "rival");
  my $lg=PGAutomation::decode_json(&webui_lg_status_json("Automation resume"))||{};
  return {status=>"ok"} if($lg->{connected} && !$lg->{disconnected});
  return {status=>"error",error_code=>"tv-not-paired",message=>"The saved TV pairing is unavailable. Stop this queue and pair the TV before restarting it."} if(!$lg->{paired});
@@ -15320,17 +15353,40 @@ sub webui_automation_control_body (@) {
   return &webui_automation_json($readiness) if(!$readiness->{ready});
   return &webui_automation_error("Unable to write automation control","write-failed")
    if(!PGAutomation::write_json_atomic(PGAutomation::run_dir($run_id)."/control.json",{request=>"none",updated_at=>PGAutomation::now()},0664));
+  # Claim the single TV worker atomically BEFORE publishing "starting", so a
+  # rival that raced past reconnect_for_resume leaves run.json untouched and the
+  # run cleanly interrupted -- never wedged at starting. Never overwrite a
+  # different run's claim. Note whether the claim was reacquired from a released
+  # state: a TV freed to another run may have been recalibrated in the meantime,
+  # so a reacquired resume must recalibrate rather than trust saved checkpoints.
+  my ($claim_conflict,$reacquired);
+  my ($execution_updated,undef,$execution_error)=PGAutomation::with_lock(PGAutomation::base_dir()."/execution.json",sub {
+   my ($current)=@_;
+   if(&webui_automation_resume_claim_decision($current,$run) eq "rival") {
+    $claim_conflict=1; return undef;
+   }
+   $reacquired=(ref($current) ne "HASH") ? 1 : 0;
+   return {owner=>"automation",run_id=>$run_id,token=>$run->{token},pid=>0,status=>"starting",updated_at=>PGAutomation::now()};
+  });
+  return &webui_automation_error("Another run owns the TV; this run cannot resume.","automation-owner-mismatch") if($claim_conflict);
+  return &webui_automation_error("Unable to claim automation execution".($execution_error ? ": $execution_error" : ""),"write-failed") if(!$execution_updated);
+  if($reacquired) { $_->{resume_recalibrate}=JSON::PP::true for(@{ref($run->{items}) eq "ARRAY" ? $run->{items} : []}); }
+  else { delete($_->{resume_recalibrate}) for(@{ref($run->{items}) eq "ARRAY" ? $run->{items} : []}); }
   $run->{status}="starting"; delete($run->{failure}); delete($run->{stop_relaunches}); $run->{resumed_at}=PGAutomation::now(); $run->{runner_pid}=0;
   $run->{heartbeat}=undef;
   $run->{active_stage}="readiness"; $run->{stage_started_at}=$run->{resumed_at};
   $run->{worker_status}={message=>"Starting the resumed runner; TV and meter checks precede measurement patterns."};
   my ($updated,$update_error)=&webui_automation_write_locked(PGAutomation::run_dir($run_id)."/run.json",$run);
-  return &webui_automation_error("Unable to update automation run".($update_error ? ": $update_error" : ""),"write-failed") if(!$updated);
-  my ($execution_updated,$execution_error)=&webui_automation_write_locked(PGAutomation::base_dir()."/execution.json",{owner=>"automation",run_id=>$run_id,token=>$run->{token},pid=>0,status=>"starting",updated_at=>PGAutomation::now()});
-  if(!$execution_updated) {
-   $run->{status}="paused"; $run->{runner_pid}=0;
-   &webui_automation_write_locked(PGAutomation::run_dir($run_id)."/run.json",$run);
-   return &webui_automation_error("Unable to claim automation execution".($execution_error ? ": $execution_error" : ""),"write-failed");
+  if(!$updated) {
+   # The claim is taken but "starting" could not be published. Release our own
+   # claim so the run stays cleanly interrupted rather than owning a TV with no
+   # manifest; the failed atomic write leaves run.json at its prior status.
+   PGAutomation::with_lock(PGAutomation::base_dir()."/execution.json",sub {
+    my ($current)=@_;
+    return {__pg_automation_delete=>1} if(ref($current) eq "HASH" && ($current->{run_id}||"") eq $run_id && ($current->{token}||"") eq ($run->{token}||""));
+    return undef;
+   });
+   return &webui_automation_error("Unable to update automation run".($update_error ? ": $update_error" : ""),"write-failed");
   }
   if(!&webui_automation_launch_runner($run_id,$run->{token})) {
    $run->{status}="interrupted"; $run->{runner_pid}=0;

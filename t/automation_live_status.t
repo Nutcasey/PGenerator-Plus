@@ -70,6 +70,26 @@ is(PGAutomation::read_json_file($run_file)->{runner_pid},$$,'a forced heartbeat 
  PGAutomation::with_lock($run_file,sub {$_[0]{heartbeat}=$fresh-600;return $_[0];});
  main::_update_run(sub {$_[0]{checkpoint}='pre-readings-done';});
  cmp_ok($status->()->{heartbeat},'>=',$fresh,'a manifest write never rolls the live heartbeat back');
+ # worker_timing rides the same fast path and never reaches status.json on its
+ # own, so a republish taken from the manifest would silently hand the estimate
+ # an older point clock and make the patch under the meter look overdue.
+ my $clock=sub {my ($point)=@_;return {started_at=>$fresh-300,start_step=>0,kind=>'grey',stage=>'greyscale-done',series_key=>'',recent_point_seconds=>[],point_started_at=>$point};};
+ main::_update_live(sub {$_[0]{worker_timing}=$clock->($fresh);});
+ PGAutomation::with_lock($run_file,sub {$_[0]{worker_timing}=$clock->($fresh-240);$_[0]{queue_revision}=2;return $_[0];});
+ main::_update_live(sub {$_[0]{heartbeat}=time();});
+ my $identity=$status->()->{time_estimate}{identity}||'';
+ like($identity,qr/\Q$fresh\E/,'a republish after a daemon edit keeps the live point clock');
+ unlike($identity,qr/@{[$fresh-240]}/,'and does not restore the manifest\'s older one');
+ main::_update_run(sub {$_[0]{worker_timing}=$clock->($fresh+120);});
+ like($status->()->{time_estimate}{identity}||'',qr/@{[$fresh+120]}/,'a manifest write with a newer clock is still adopted');
+ for my $offset (0,30) {
+  my $point=$fresh+120;
+  main::_update_live(sub {$_[0]{worker_timing}={%{$clock->($point)},tail_started_at=>$point+$offset};});
+  PGAutomation::with_lock($run_file,sub {$_[0]{worker_timing}=$clock->($point);return $_[0];});
+  main::_update_live(sub {});
+  like($status->()->{time_estimate}{identity}||'',qr/"tail_started_at":@{[$point+$offset]}/,
+   "daemon republish preserves the tail clock at offset $offset");
+ }
  # The daemon edits the manifest too (queue edit while running). The next
  # tick must republish from it, not from the copy taken before.
  PGAutomation::with_lock($run_file,sub {push @{$_[0]{items}},{name=>'DV Filmmaker',status=>'queued'};$_[0]{queue_revision}=1;return $_[0];});
@@ -197,4 +217,52 @@ my $slim=main::_slim_profile($catalogue);
 ok(!exists($slim->{settings_capabilities}) && !exists($slim->{picture_mode_catalogue}),'a job keeps the profile without the catalogues');
 is($slim->{capability_profile_hash},'a'x64,'and keeps what identifies the TV');
 is($catalogue->{capability_profile_id},'fixture','the caller\'s copy is not changed');
+
+{
+ my $clock=2000;local *main::time=sub {$clock};
+ my $seed=PGAutomation::read_json_file("$Bin/../usr/share/PGenerator/automation-timing.json")->{records}[1];
+ main::_update_run(sub {
+  my ($r)=@_;$r->{status}='running';$r->{active_item}=0;$r->{active_stage}='greyscale-done';$r->{stage_started_at}=1000;
+  $r->{items}=[{%{$seed->{job}},status=>'running'}];
+  $r->{worker_status}={status=>'running',current_step=>10,total_steps=>35};
+  $r->{worker_timing}={kind=>'grey',stage=>'greyscale-done',started_at=>1000,start_step=>0,point_started_at=>1990};
+ });
+ my $manifest=PGAutomation::read_raw($run_file);
+ my $prior=$status->()->{time_estimate}{stage_remaining_seconds};
+ $clock=2005;
+ main::_update_live(sub {$_[0]{worker_status}{current_step}=11;$_[0]{worker_timing}{point_started_at}=2005;});
+ is($status->()->{time_estimate}{calculated_at},2005,'new point recalculates ETA on the fast progress path');
+ isnt($status->()->{time_estimate}{stage_remaining_seconds},$prior,'new measured work changes the live remainder');
+ is(PGAutomation::read_raw($run_file),$manifest,'live ETA does not rewrite the large manifest');
+ ok(!exists($status->()->{items}[0]{calibration}),'private ETA context does not expand the status payload');
+ my $durable=PGAutomation::read_json_file($run_file)->{time_estimate};
+ {
+  local *PGAutomationETA::update=sub {die "simulated ETA failure\n"};
+  for (1..2) {
+   main::_update_live(sub {});
+   is_deeply($status->()->{time_estimate},$durable,'repeated advisory failure falls back to the durable estimate');
+  }
+ }
+ $clock=2025;main::_update_live(sub {});
+ is($status->()->{time_estimate}{calculated_at},2025,'live ETA recovers on the next successful calculation');
+ {
+  # A daemon transition can retain the last running estimate in the manifest.
+  # Advisory failures must not bring its old countdown into a finished run.
+  local *PGAutomationETA::update=sub {die "simulated ETA failure\n"};
+  for my $state (qw(paused stopping complete complete-with-warnings failed stopped interrupted)) {
+   main::webui_automation_with_manifest($run_id,sub {$_[0]{status}=$state;$_[0]{time_estimate}=$durable;return $_[0];});
+   my $saved=PGAutomation::read_raw($run_file);
+   main::_update_live(sub {});
+   is($status->()->{status},$state,"$state transition is published despite ETA failure");
+   ok(!exists($status->()->{time_estimate}),"$state clears the countdown even when ETA fails");
+   main::_update_live(sub {});
+   ok(!exists($status->()->{time_estimate}),"$state stays cleared on a repeated ETA failure");
+   is(PGAutomation::read_raw($run_file),$saved,"$state ETA failures preserve the manifest and timing evidence");
+  }
+ }
+ $clock=2045;main::_update_run(sub {$_[0]{status}='running';});
+ is($status->()->{time_estimate}{calculated_at},2045,'resuming after terminal ETA failures calculates a fresh estimate');
+ main::_update_run(sub {$_[0]{status}='paused';});
+ ok(!exists($status->()->{time_estimate}),'successful clearing on pause does not resurrect a saved estimate');
+}
 done_testing();

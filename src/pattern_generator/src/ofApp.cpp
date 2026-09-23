@@ -55,9 +55,6 @@ inline bool usesDolbyVisionTransport() {
  return ofxRPI4Window::isDoVi || ofxRPI4Window::is_std_DoVi;
 }
 
-inline bool usesLowLatencyDoVi422Transport() {
-	return false;
-}
 }
 
 /*
@@ -84,6 +81,17 @@ void ofApp::setup(){
  ##########################################################
 */
 void ofApp::update(){
+ // Consume pattern changes before rendering starts. A notification during
+ // draw() must wait for the next update so the current frame stays complete.
+ string return_file=tmp_dir+ofToString("/running/return");
+ ifstream r(return_file.c_str());
+ if (r.good()) {
+  r.close();
+  open_file=1;
+  save_images=0;
+  unlink(return_file.c_str());
+ }
+
  std::vector<std::string> dimensions;
  std::vector<std::string> rgb;
  std::vector<std::string> rgbb;
@@ -91,6 +99,7 @@ void ofApp::update(){
  std::string str; 
 
  if(open_file) {
+  i=0;
   frame=frame_to_draw=entered=0;
   p_name=m_name="";
   source_max=255;
@@ -224,17 +233,6 @@ void ofApp::draw(){
   return;
  restoreBackground();
  for(to_draw=0;to_draw<n_draw[i];to_draw++) {
-  string return_file=tmp_dir+ofToString("/running/return");
-  const char * return_file_char = return_file.c_str();
-  ifstream r(return_file_char);
-  if (r.good()) {
-   r.close();
-   i=0;
-   open_file=1;
-   save_images=0;
-   unlink(return_file_char);
-   return;
-  }
   char buffer[255];
   sprintf(buffer,"Doing the frame %d and the Draw %d",i,to_draw);
   ofApp::log(buffer);
@@ -544,60 +542,26 @@ void ofApp::restoreBackground() {
 }
 
 void ofApp::setBackground(int redbg, int greenbg, int bluebg) {
+ if(arr_redbg[i][to_draw] == -1) return;
  redbg=normalizeSourceValue(redbg,arr_source_range[i][to_draw]);
  greenbg=normalizeSourceValue(greenbg,arr_source_range[i][to_draw]);
  bluebg=normalizeSourceValue(bluebg,arr_source_range[i][to_draw]);
- int lldv422=usesLowLatencyDoVi422Transport();
- if (ofxRPI4Window::isHDR && !ofxRPI4Window::isDoVi && !ofxRPI4Window::is_std_DoVi) { 
-  if (ofxRPI4Window::bit_depth == 10) {  
-   if(arr_redbg[i][to_draw] != -1) {
-	if (ofxRPI4Window::avi_info.output_format != 0) {
-     RGB data = RGB(redbg,greenbg,bluebg);
-     YCbCr bg = RGB2YCbCr(data,10, ofxRPI4Window::avi_info.colorimetry, ofxRPI4Window::avi_info.rgb_quant_range);
-     if (ofxRPI4Window::avi_info.output_format == 1) clearBackground(bg.Cb,bg.Cr,bg.Y,1023);  //in YCbCr444, luminance is last channel
-     if (ofxRPI4Window::avi_info.output_format == 2) clearBackground(bg.Y,bg.Cb,bg.Cr,1023);  //in YCbCr422
-    } else                                           clearBackground(redbg,greenbg,bluebg,1023);
-   }
-  } else {
-   if(arr_redbg[i][to_draw] != -1) {
-	if (ofxRPI4Window::avi_info.output_format != 0) {
-     RGB data = RGB(redbg,greenbg,bluebg);
-     YCbCr bg = RGB2YCbCr(data,8,ofxRPI4Window::avi_info.colorimetry, ofxRPI4Window::avi_info.rgb_quant_range);
-     if (ofxRPI4Window::avi_info.output_format == 1) clearBackground(bg.Cb,bg.Cr,bg.Y,255);  //in YCbCr444, luminance is last channel
-     if (ofxRPI4Window::avi_info.output_format == 2) clearBackground(bg.Y,bg.Cb,bg.Cr,255);  //in YCbCr422
-    } else                                           clearBackground(redbg,greenbg,bluebg,255);
-   }
-  }
+ // HDR BITS=12 uses a float surface; its neutral chroma is 2048/4095.
+ // Standard DV keeps its separate source domain and tunnel background path.
+ int depth=ofxRPI4Window::bit_depth;
+ if(depth != 10 && depth != 12) depth=8;
+ int maximum=(1 << depth)-1;
+ if(ofxRPI4Window::avi_info.output_format != 0 || ofxRPI4Window::is_std_DoVi) {
+  YCbCr bg=RGB2YCbCr(RGB(redbg,greenbg,bluebg),depth,
+      ofxRPI4Window::avi_info.colorimetry,ofxRPI4Window::avi_info.rgb_quant_range);
+  if(ofxRPI4Window::avi_info.output_format == 1)
+   clearBackground(bg.Cb,bg.Cr,bg.Y,maximum); // YCbCr444 carries luminance last.
+  if(ofxRPI4Window::avi_info.output_format == 2)
+   clearBackground(bg.Y,bg.Cb,bg.Cr,maximum);
+  if(ofxRPI4Window::is_std_DoVi && ofxRPI4Window::colorspace_on)
+   ofApp::setDoViBackground(redbg,greenbg,bluebg);
  } else {
-  if (ofxRPI4Window::bit_depth == 10) {  
-   if(arr_redbg[i][to_draw] != -1) {
-	if (ofxRPI4Window::avi_info.output_format != 0 || ofxRPI4Window::is_std_DoVi) {
-	 if (lldv422) {
-	  clearBackground(redbg,greenbg,bluebg,1023);
-	 } else {
-	     RGB data = RGB(redbg,greenbg,bluebg);
-	     YCbCr bg = RGB2YCbCr(data,10, ofxRPI4Window::avi_info.colorimetry, ofxRPI4Window::avi_info.rgb_quant_range);
-	     if (ofxRPI4Window::avi_info.output_format == 1) 					clearBackground(bg.Cb,bg.Cr,bg.Y,1023);  //in YCbCr444, luminance is last channel
-	     if (ofxRPI4Window::avi_info.output_format == 2) 					clearBackground(bg.Y,bg.Cb,bg.Cr,1023);  //in YCbCr422
-		 if (ofxRPI4Window::is_std_DoVi && ofxRPI4Window::colorspace_on)	ofApp::setDoViBackground(redbg,greenbg,bluebg); //set dovi background only if standard dovi mode and drawing patterns
-	 }
-	    } else                                           					clearBackground(redbg,greenbg,bluebg,1023);
-   }
-  } else {
-   if(arr_redbg[i][to_draw] != -1) {
-		if (ofxRPI4Window::avi_info.output_format != 0 || ofxRPI4Window::is_std_DoVi) {
-		 if (lldv422) {
-		  clearBackground(redbg,greenbg,bluebg,255);
-		 } else {
-	     RGB data = RGB(redbg,greenbg,bluebg);
-	     YCbCr bg = RGB2YCbCr(data,8,ofxRPI4Window::avi_info.colorimetry, ofxRPI4Window::avi_info.rgb_quant_range);
-	     if (ofxRPI4Window::avi_info.output_format == 1)					clearBackground(bg.Cb,bg.Cr,bg.Y,255);  //in YCbCr444, luminance is last channel
-	     if (ofxRPI4Window::avi_info.output_format == 2) 					clearBackground(bg.Y,bg.Cb,bg.Cr,255);  //in YCbCr422
-		 if (ofxRPI4Window::is_std_DoVi && ofxRPI4Window::colorspace_on) 	ofApp::setDoViBackground(redbg,greenbg,bluebg);  //set dovi background only if standard dovi mode and drawing patterns
-		 }
-	    } else                                          					clearBackground(redbg,greenbg,bluebg,255);
-   }
-  }
+  clearBackground(redbg,greenbg,bluebg,maximum);
  }
 }
 
@@ -813,7 +777,6 @@ void ofApp::shader_begin(int is_image) {
     ofxRPI4Window::shader.setUniform1i("scale", scale);
     ofxRPI4Window::shader.setUniform1i("normalizer", normalizer);
     ofxRPI4Window::shader.setUniform1i("color_format", ofxRPI4Window::avi_info.output_format);
-    ofxRPI4Window::shader.setUniform1i("passthrough_422", usesLowLatencyDoVi422Transport() ? 1 : 0);
     ofxRPI4Window::shader.setUniform1i("rgb_quant_range", ofxRPI4Window::avi_info.rgb_quant_range);
     ofxRPI4Window::shader.setUniform1i("bits", ofxRPI4Window::bit_depth);
     ofxRPI4Window::shader.setUniform1i("is_image", is_image);
