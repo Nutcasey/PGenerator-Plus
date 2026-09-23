@@ -936,7 +936,14 @@ function pgAutomationQueueSelectionChanged(load){
   else{pgAutomation.selectedQueue='';pgAutomation.loadedQueueSnapshot='';pgAutomationSaveDraft();}
  }
  const value=pgAutomationValue('SavedQueueSelect',''),button=pgAutomationEl('DeleteQueueButton');
- if(button)button.disabled=value===''||value==='reference-settings';
+ if(button){
+  button.disabled=value===''||value==='reference-settings';
+  // A greyed control with no reason reads as "the queue cannot be cleared".
+  // Say which of the two reasons applies, and where the other action lives.
+  button.title=value===''?'This queue is not saved yet. Save it first, or remove jobs with the job’s More menu.'
+   :value==='reference-settings'?'The built-in reference queue cannot be deleted.'
+   :'Delete this saved queue.';
+ }
  const reload=pgAutomationEl('ReloadQueueButton');if(reload)reload.disabled=value==='';
  return pending;
 }
@@ -1235,11 +1242,17 @@ function pgAutomationRenderProgress(){
  const showRun=run&&(!preActive||['running','starting','stopping','completing','paused','interrupted'].includes(run.status));
  if(showRun&&pgAutomationTerminal(run)){
   box.style.display='';box.dataset.error=String(run.status==='failed'||!!pgAutomation.statusError);box.setAttribute('role',run.status==='failed'?'alert':'status');
-  box.innerHTML='<strong>Last batch '+pgAutomationEscape(run.status.replace(/-/g,' '))+' · '+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Calibration queue')+'</strong><p class="auto-muted">'+(run.preflight_only?'No calibration has started. Return to Queue and select Run queue to begin.':'No calibration is running. Jobs and results are saved in History.')+'</p>'
+  // "Last batch complete" for a readiness pass reads as a finished calibration
+  // of that queue, which is how three checks in a row looked like a working
+  // batch that produced nothing. Name what actually ran.
+  // This box sits above the tab strip, so it is on screen from History and
+  // Live Run too. Keep naming the Queue tab: "select Run queue" is not
+  // actionable from a tab that does not show that button.
+  box.innerHTML='<strong>'+(run.preflight_only?'Last readiness check ':'Last batch ')+pgAutomationEscape(run.status.replace(/-/g,' '))+' · '+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Calibration queue')+'</strong><p class="auto-muted">'+(run.preflight_only?'This checked the queue only — no calibration was performed. Return to Queue and select Run queue to calibrate.':'No calibration is running. Jobs and results are saved in History.')+'</p>'
    +(run.status==='failed'?pgAutomationFailureHtml(run):'')
    +(pgAutomation.statusError?'<p>'+pgAutomationEscape(pgAutomation.statusError)+'</p>':'')
    +pgAutomationRunWarningsHtml(run)
-   +'<button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationClearLastRun()">Clear last batch</button>';
+   +'<button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationClearLastRun()">'+(run.preflight_only?'Clear last check':'Clear last batch')+'</button>';
   return;
  }
  let title='',message='',issues=[],completed=0,total=0,error=false;
@@ -1419,7 +1432,10 @@ function pgAutomationRenderLiveRun(run,execution){
  pgAutomationEl('StartButton').disabled=!!(occupied||pgAutomation.busy);
  pgAutomationEl('ReadinessButton').disabled=!!(occupied||pgAutomation.pendingChecks);
  const reason=run?.cleanup_required?'Cleanup is still required. Open Live Run and use Retry cleanup.':checking?'Readiness checks are in progress.':occupied?'The previous batch is '+run.status+'. Open Live Run to resume it or Stop it before starting a new queue.':pgAutomation.busy?'A start request is in progress.':'';
- for(const id of ['StartButton','ReadinessButton'])pgAutomationEl(id).title=reason;
+ // A blocker reason wins while set; when it clears, fall back to the standing
+ // explanation of what each action does rather than leaving the title empty.
+ const actionTitle={StartButton:'Rechecks every job, then calibrates.',ReadinessButton:'Checks the queue only. Does not calibrate.'};
+ for(const id of ['StartButton','ReadinessButton'])pgAutomationEl(id).title=reason||actionTitle[id];
  const blocker=pgAutomationEl('ActionBlocker');
  if(blocker){blocker.hidden=!reason;blocker.innerHTML=pgAutomationEscape(reason)+(occupied&&!checking?' <button type="button" class="btn btn-sm btn-secondary" onclick="pgAutomationTab(\'live\')">Open Live Run</button>':'');}
  pgAutomationEl('PauseButton').disabled=status!=='running'||run?.preflight_only||run?.active_stage==='queue-preflight';pgAutomationEl('ResumeButton').disabled=!!run?.preflight_only||!!run?.cleanup_required||!['paused','interrupted'].includes(status);
@@ -1433,7 +1449,7 @@ function pgAutomationRenderLiveRun(run,execution){
  if(!run){live.innerHTML='<div class="auto-empty">'+(checking?'Checking the whole queue against the connected TV before calibration. Signal and picture modes are temporarily switched and restored.':pre&&['blocked','failed','interrupted'].includes(pre.status)?'Calibration has not started. Resolve the startup problems shown above, then retry.':'No active batch. Completed and stopped runs are in History.')+'</div>';pgAutomationEl('LiveDetail').innerHTML='';delete pgAutomation.jobViews.live;return;}
  const terminal=pgAutomationTerminal(run),active=run.active_item!=null?Number(run.active_item):-1,items=run.items||[],worker=terminal?{}:{...(run.worker_status||{}),message:(run.status==='running'?run.operation_progress?.message:null)||run.worker_status?.message};
  if(terminal){
-  live.innerHTML='<h3>'+(run.preflight_only?'Last whole-queue check · ':'Last batch · ')+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Batch')+'</h3><p class="auto-muted">'+pgAutomationEscape(status.replace(/-/g,' '))+' · Nothing is running. Results remain available below and in History.</p>'
+  live.innerHTML='<h3>'+(run.preflight_only?'Last readiness check · ':'Last batch · ')+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Batch')+'</h3><p class="auto-muted">'+pgAutomationEscape(status.replace(/-/g,' '))+' · Nothing is running. Results remain available below and in History.</p>'
    +pgAutomationRunWarningsHtml(run)
    +pgAutomationBatchSummary(run)
    +items.map((item,i)=>pgAutomationJobButton(item,i,'live',run.id,false)).join('');
@@ -1528,7 +1544,7 @@ async function pgAutomationPollLive(){
  }
 }
 function pgAutomationHistorySummary(run,index){
- return '<div class="auto-history-row"><div><strong>'+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Automation queue')+'</strong><small>'+pgAutomationEscape(pgAutomationFormatTime(run.created_at_iso)||run.id||'')+' · '+pgAutomationEscape((run.status||'').replace(/-/g,' '))+'</small>'+(run.status==='complete-with-warnings'?'<p class="auto-warning-note">Completed with warnings. Open the run for details.</p>':'')+(run.failure?'<p style="color:var(--red)">'+pgAutomationEscape(pgAutomationIssueText(run.failure))+'</p>':'')+'</div><div class="auto-actions"><button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationOpenHistory('+index+')">Open</button><button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationDeleteRun('+index+')">Delete</button></div></div>';
+ return '<div class="auto-history-row"><div><strong>'+pgAutomationEscape(pgAutomationQueueName(run.queue_name)||'Automation queue')+'</strong><small>'+pgAutomationEscape(pgAutomationFormatTime(run.created_at_iso)||run.id||'')+' · '+pgAutomationEscape((run.status||'').replace(/-/g,' '))+'</small>'+(run.preflight_only?'<p class="auto-muted">Readiness check · no calibration performed</p>':'')+(run.status==='complete-with-warnings'?'<p class="auto-warning-note">Completed with warnings. Open the run for details.</p>':'')+(run.failure?'<p style="color:var(--red)">'+pgAutomationEscape(pgAutomationIssueText(run.failure))+'</p>':'')+'</div><div class="auto-actions"><button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationOpenHistory('+index+')">Open</button><button class="btn btn-sm btn-secondary" type="button" onclick="pgAutomationDeleteRun('+index+')">Delete</button></div></div>';
 }
 
 function pgAutomationRenderHistoryList(){
