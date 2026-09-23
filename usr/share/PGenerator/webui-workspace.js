@@ -487,6 +487,7 @@ function meterDownloadSolvedLut(name){
   document.body.appendChild(a);
   a.click();
   a.remove();
+  noteInsecureDownload(file);
  }catch(e){
   // Fallback: fetch + blob (same as other exports).
   fetch('/api/3d-lut/cube?file='+encodeURIComponent(file)).then(function(resp){
@@ -21012,6 +21013,7 @@ async function ccssExportSelected(){
    setTimeout(()=>URL.revokeObjectURL(href),1000);
    ccssExportSetStatus('Downloaded '+filename,false);
    toast('Downloaded '+filename);
+   noteInsecureDownload(filename);
   }else{
    const payload=await res.json().catch(()=>null);
    const message=(payload&&payload.message)||'Export failed';
