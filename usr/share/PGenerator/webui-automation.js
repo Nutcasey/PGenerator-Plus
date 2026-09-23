@@ -9,6 +9,166 @@ var pgAutomation = {
 };
 const PG_AUTOMATION_SERIES=[['Grey','greyscale-21','Greyscale'],['Colors','colors-30','ColorChecker'],['Sats','saturations-24','Saturation']];
 const PG_AUTOMATION_LABELS={deitp:'ΔE ITP',de2000:'ΔE2000',bt1886:'BT.1886 (2.4)','2.2':'Gamma 2.2','2.4':'Gamma 2.4',srgb:'sRGB',st2084:'ST 2084',hlg:'HLG',bt709:'BT.709',p3d65:'DCI-P3 / D65',bt2020:'BT.2020'};
+// Fields whose value changes the calibrated result. A job keeps template_id and
+// template_mode, so the pristine reference item can be rebuilt and compared
+// against it -- no stored copy of the template is needed.
+//
+// Workflow choices (stages, the pre/post series, the name) and anything derived
+// from the meter or link (ccss_override, refresh_rate, panel_light.key) are
+// deliberately absent: opting a job into extra sweeps is not "modified" in the
+// sense that matters, and a badge that lights up on every customised job is
+// noise -- which is the failure this is meant to prevent, not repeat.
+const PG_AUTOMATION_DRIFT_FIELDS=[
+ // target_luminance is deliberately absent, top level and under calibration.
+ // It is an input the runner overwrites with what it measured: a real finished
+ // SDR job carries 31.99 against the template's 100. "Copy this run to an
+ // editable queue" puts exactly that item back on the queue, so comparing it
+ // would badge a job nobody touched. panel_light.fixed_value below is the
+ // setting that actually drives it, and it does not move on its own.
+ 'picture_mode','signal_format','target_gamma','target_gamut','target_delta_e',
+ 'delta_e_formula','tv_gamma_follows_target','color_format','max_bpc','rgb_quant_range',
+ 'patch_size','delay_ms','settle_seconds','display_type','observer',
+ 'target_white.x','target_white.y',
+ 'panel_light.policy','panel_light.fixed_value',
+ 'panel_protection.disable',
+ 'calibration.target_gamma','calibration.target_gamut',
+ 'calibration.target_delta_e','calibration.delta_e_formula','calibration.method',
+ 'calibration.profile_source','calibration.lattice_size','calibration.solve_cube_size',
+ 'calibration.lattice_residuals','calibration.dark_detail','calibration.shadow_fix',
+ 'calibration.target_white.x','calibration.target_white.y',
+];
+function pgAutomationDriftAt(object,path){
+ return path.split('.').reduce((value,key)=>(value==null?undefined:value[key]),object);
+}
+// Compare like with like: JSON round trips turn true into 1 and 85 into "85",
+// and a job that came back from the Pi has been through that twice. Comparing
+// raw values would report every boolean as drift.
+function pgAutomationDriftSame(a,b){
+ if(a===undefined&&b===undefined)return true;
+ if(typeof a==='boolean'||typeof b==='boolean')return (a?1:0)===(b?1:0);
+ if(a==null||b==null)return a==null&&b==null;
+ // Some TV settings carry a structured value (a legacy blackLevel map is one),
+ // not a scalar. String(obj) is "[object Object]" for every object, so a scalar
+ // compare would silently call two different maps equal. Recurse over the
+ // contents, keeping the loose scalar coercion at the leaves.
+ if(typeof a==='object'||typeof b==='object'){
+  if(typeof a!=='object'||typeof b!=='object')return false;
+  for(const key of new Set([...Object.keys(a),...Object.keys(b)])){
+   if(!pgAutomationDriftSame(a[key],b[key]))return false;
+  }
+  return true;
+ }
+ return String(a)===String(b);
+}
+// What a job is measured against, plus how to name that source, or null when
+// there is nothing to compare it to. Two kinds of provenance resolve here:
+//
+//  - source_recipe: the job was added from a saved recipe (see
+//    pgAutomationQueueAdd). This is the proximate provenance and wins over any
+//    template the recipe itself descends from -- the operator is asking "does
+//    this still match the recipe I chose?", not the reference behind it. The
+//    recipe is compared as it stands now; one deleted after the job was queued
+//    has no reference, so the job is left unbadged. The recipe is snapshotted
+//    so it is normalized the same way the queued job already was (an untouched
+//    job then matches its recipe exactly, even for a legacy recipe that the
+//    snapshot upgrades in place).
+//  - template_id: the job was built straight from a reference template, which
+//    is rebuilt fresh and compared. Nothing about the template is stored.
+function pgAutomationDriftReference(item){
+ if(!item)return null;
+ if(item.source_recipe){
+  const recipe=(pgAutomation.recipes||[]).find(entry=>entry&&entry.id===item.source_recipe);
+  if(!recipe)return null;
+  return {reference:pgAutomationSnapshot(recipe),noun:'recipe',source:'the “'+(recipe.name||'saved')+'” recipe'};
+ }
+ if(item.template_mode&&/^reference-settings-v/.test(item.template_id||'')){
+  let reference;
+  try{
+   reference=pgAutomationReferenceItems([item.template_mode],{
+    panel_key:item.panel_light&&item.panel_light.key,
+    ccss_override:item.ccss_override,refresh_rate:item.refresh_rate,
+   })[0];
+  }catch(error){return null;}
+  if(!reference)return null;
+  return {reference,noun:'reference',source:'the '+item.template_mode+' reference settings'};
+ }
+ return null;
+}
+// The fields in which a job differs from a resolved reference, or null when
+// they are identical. Shared by the template and recipe branches; the field
+// list and loose compares below are the whole design of what counts as drift.
+function pgAutomationDriftAgainst(item,reference){
+ const drift=[];
+ for(const path of PG_AUTOMATION_DRIFT_FIELDS){
+  const was=pgAutomationDriftAt(reference,path),now=pgAutomationDriftAt(item,path);
+  if(!pgAutomationDriftSame(was,now))drift.push({field:path,was,now});
+ }
+ // The TV settings block is open-ended, so compare the union of both sides
+ // rather than a fixed list: a control the job added or dropped is drift too.
+ // The panel-light aliases are handled below, not here.
+ const refSettings=reference.settings||{},itemSettings=item.settings||{};
+ for(const key of new Set([...Object.keys(refSettings),...Object.keys(itemSettings)])){
+  if(PG_AUTOMATION_PANEL_ALIASES.includes(key))continue;
+  const was=refSettings[key],now=itemSettings[key];
+  if(!pgAutomationDriftSame(was,now))drift.push({field:'settings.'+key,was,now});
+ }
+ // Which of backlight/oledLight/oledPixelBrightness a TV exposes is a
+ // compatibility binding, not an edit: pgAutomationRecipeFromForm rewrites the
+ // job to the current alias on every save. Comparing the aliases separately
+ // would report the old one unset and the new one set for a routine rebind, so
+ // compare the level once under one name -- a real brightness change still is.
+ const wasLevel=pgAutomationPanelLevel(refSettings),nowLevel=pgAutomationPanelLevel(itemSettings);
+ if(!pgAutomationDriftSame(wasLevel,nowLevel))drift.push({field:'settings.panel_light',was:wasLevel,now:nowLevel});
+ // Under target policy the requested setup-white luminance drives the whole
+ // adjustment loop, so an edit to it is a real change. target_luminance is
+ // excluded everywhere else because a fixed-policy job reports its measured
+ // native white there (a finished SDR job carries 31.99 against a template's
+ // 100), and the runner never repurposes the field that way under target
+ // policy -- so compare the requested target only when both sides still ask
+ // for one, leaving the fixed-policy exclusion untouched.
+ if((item.panel_light&&item.panel_light.policy)==='target'&&(reference.panel_light&&reference.panel_light.policy)==='target'){
+  const was=pgAutomationDriftAt(reference,'panel_light.target_luminance'),now=pgAutomationDriftAt(item,'panel_light.target_luminance');
+  if(!pgAutomationDriftSame(was,now))drift.push({field:'panel_light.target_luminance',was,now});
+ }
+ return drift.length?drift:null;
+}
+// The three panel-light control aliases. Only one is set on a job at a time
+// (the editor deletes the rest), so the first present is the panel-light level.
+const PG_AUTOMATION_PANEL_ALIASES=['backlight','oledLight','oledPixelBrightness'];
+function pgAutomationPanelLevel(settings){
+ for(const key of PG_AUTOMATION_PANEL_ALIASES){if(settings&&settings[key]!=null)return settings[key];}
+ return undefined;
+}
+// The differences between a queued job and the reference it was built from --
+// a saved recipe or a template -- or null when there are none and for a job
+// with no provenance to compare against. Returns every differing field so the
+// operator can judge intent -- naming them is the point; guessing which were
+// deliberate is not.
+function pgAutomationTemplateDrift(item){
+ const resolved=pgAutomationDriftReference(item);
+ return resolved?pgAutomationDriftAgainst(item,resolved.reference):null;
+}
+function pgAutomationDriftText(drift){
+ // Format each side through pgAutomationSettingValue so a structured value
+ // reads as its JSON, not "[object Object]"; undefined stays "unset".
+ const show=value=>value===undefined?'unset':pgAutomationSettingValue(value);
+ return drift.map(d=>d.field+': '+show(d.was)+' → '+show(d.now)).join('\n');
+}
+// A job named after its recipe or template but carrying different values is
+// invisible otherwise: the row shows only the name. Name the count on the row
+// and the fields on hover, so a job that is not what it says it is can be
+// spotted before it calibrates rather than afterwards in the run record. The
+// row reads "Differs from recipe/reference": one stem that is accurate whether
+// the job was edited or the reference it points at moved underneath it.
+function pgAutomationDriftBadge(item){
+ const resolved=pgAutomationDriftReference(item);
+ if(!resolved)return '';
+ const drift=pgAutomationDriftAgainst(item,resolved.reference);
+ if(!drift)return '';
+ return '<span class="auto-pill auto-drift" title="Differs from '+pgAutomationEscape(resolved.source)
+  +':\n'+pgAutomationEscape(pgAutomationDriftText(drift))+'">Differs from '+pgAutomationEscape(resolved.noun)+' · '
+  +drift.length+' field'+(drift.length===1?'':'s')+'</span>';
+}
 const PG_AUTOMATION_REFERENCE_MODES=[
  {id:'dv-filmmaker',signal:'dv',mode:'dolbyVisionFilmMaker',name:'Dolby Vision Filmmaker'},
  {id:'dv-cinema',signal:'dv',mode:'dolbyVisionCinemaBright',name:'Dolby Vision Cinema Home'},
@@ -725,6 +885,17 @@ function pgAutomationNewRecipe(target){
  pgAutomation.supportedValues=pgAutomationClone(defaults.settings);pgAutomationRenderSettingsEditor();
  pgAutomationDisplayTypeChanged();
 }
+// The object to POST as a recipe. A recipe is a source, never a derivative, so
+// it must not carry source_recipe: a queue item added from recipe A and then
+// saved as recipe B would otherwise claim to descend from A, and every job
+// added from B would badge against A. Dropping the id lets the server assign a
+// fresh one; keepId is set only when editing an existing recipe in place.
+function pgAutomationRecipeForSave(item,keepId){
+ const recipe=pgAutomationClone(item);
+ if(!keepId)delete recipe.id;
+ delete recipe.source_recipe;
+ return recipe;
+}
 async function pgAutomationSaveRecipe(){
  const button=pgAutomationEl('EditorSave');if(button.disabled||pgAutomation.editorSaving)return;button.disabled=true;
  // A compatibility reply can land while a recipe POST is in flight; this flag
@@ -734,7 +905,7 @@ async function pgAutomationSaveRecipe(){
  try{
   const item=pgAutomationRecipeFromForm();
   if(pgAutomation.editorTarget==='recipe'||pgAutomationChecked('SaveAsRecipe')){
-   const recipe=pgAutomationClone(item);if(pgAutomation.editorTarget!=='recipe')delete recipe.id;
+   const recipe=pgAutomationRecipeForSave(item,pgAutomation.editorTarget==='recipe');
    await pgAutomationRequest('recipes',{recipe});
   }
   if(pgAutomation.editorTarget!=='recipe'){
@@ -800,7 +971,15 @@ async function pgAutomationDeleteRecipe(index){
 function pgAutomationQueueAdd(){
  const value=pgAutomationValue('RecipeSelect','');if(value===''){pgAutomationNotice('Choose a saved recipe or use Add item.',true);return;}
  const recipe=pgAutomation.recipes[Number(value)];if(!recipe)return;
- pgAutomation.queue.items.push(pgAutomationSnapshot(recipe));pgAutomationSaveDraft();pgAutomationRenderQueue();
+ // Record where the job came from so the drift badge can compare it against the
+ // recipe later. source_recipe survives editing (pgAutomationSnapshot keeps
+ // unknown keys, and pgAutomationRecipeFromForm assigns over the snapshot), and
+ // is stripped again if the job is ever saved back as its own recipe. The id is
+ // what pgAutomationDeleteRecipe uses, so it is stable; a recipe without one
+ // cannot be looked up, so there is nothing to stamp.
+ const item=pgAutomationSnapshot(recipe);
+ if(recipe.id!=null)item.source_recipe=recipe.id;
+ pgAutomation.queue.items.push(item);pgAutomationSaveDraft();pgAutomationRenderQueue();
 }
 function pgAutomationQueueLocked(index){
  if(!pgAutomation.editingRunId)return false;
@@ -839,7 +1018,7 @@ function pgAutomationRenderQueue(){
  pgAutomationEl('StartButton').style.display=pgAutomation.editingRunId?'none':'';
  pgAutomationEl('QueueItems').innerHTML=pgAutomation.queue.items.length?pgAutomation.queue.items.map((item,i)=>{
   const locked=pgAutomationQueueLocked(i);
-  return '<div class="auto-item" data-queue-index="'+i+'"><div><span class="auto-number">'+(i+1)+'</span>'+(locked?'':'<button type="button" class="auto-reorder" aria-label="Reorder job '+(i+1)+': '+pgAutomationEscape(item.name)+'" title="Drag to reorder; arrow keys move up or down" onpointerdown="pgAutomationDragStart(event,'+i+')" onkeydown="pgAutomationReorderKey(event,'+i+')">⠿</button>')+'</div><div><strong>'+pgAutomationEscape(item.name||'Job '+(i+1))+'</strong>'+pgAutomationJobSummary(item)+'<details class="auto-job-details"><summary>Settings and targets</summary>'+pgAutomationItemSummary(item)+'</details></div><div class="auto-actions">'+(locked?'<span class="auto-muted">'+pgAutomationEscape(item.status||'Locked')+'</span>':'<button class="btn btn-sm btn-secondary" onclick="pgAutomationQueueEdit('+i+')">Configure</button><details class="auto-menu"><summary aria-label="Actions for job '+(i+1)+'">More</summary><div class="auto-menu-panel"><button class="btn btn-sm btn-secondary" '+(i===0||pgAutomationQueueLocked(i-1)?'disabled ':'')+'onclick="pgAutomationQueueMove('+i+',-1)">Move up</button><button class="btn btn-sm btn-secondary" '+(i===pgAutomation.queue.items.length-1||pgAutomationQueueLocked(i+1)?'disabled ':'')+'onclick="pgAutomationQueueMove('+i+',1)">Move down</button><button class="btn btn-sm btn-secondary" onclick="pgAutomationQueueDuplicate('+i+')">Duplicate job</button><button class="btn btn-sm btn-secondary" onclick="pgAutomationQueueRemove('+i+')">Remove job</button></div></details>')+'</div></div>';
+  return '<div class="auto-item" data-queue-index="'+i+'"><div><span class="auto-number">'+(i+1)+'</span>'+(locked?'':'<button type="button" class="auto-reorder" aria-label="Reorder job '+(i+1)+': '+pgAutomationEscape(item.name)+'" title="Drag to reorder; arrow keys move up or down" onpointerdown="pgAutomationDragStart(event,'+i+')" onkeydown="pgAutomationReorderKey(event,'+i+')">⠿</button>')+'</div><div><strong>'+pgAutomationEscape(item.name||'Job '+(i+1))+'</strong>'+pgAutomationDriftBadge(item)+pgAutomationJobSummary(item)+'<details class="auto-job-details"><summary>Settings and targets</summary>'+pgAutomationItemSummary(item)+'</details></div><div class="auto-actions">'+(locked?'<span class="auto-muted">'+pgAutomationEscape(item.status||'Locked')+'</span>':'<button class="btn btn-sm btn-secondary" onclick="pgAutomationQueueEdit('+i+')">Configure</button><details class="auto-menu"><summary aria-label="Actions for job '+(i+1)+'">More</summary><div class="auto-menu-panel"><button class="btn btn-sm btn-secondary" '+(i===0||pgAutomationQueueLocked(i-1)?'disabled ':'')+'onclick="pgAutomationQueueMove('+i+',-1)">Move up</button><button class="btn btn-sm btn-secondary" '+(i===pgAutomation.queue.items.length-1||pgAutomationQueueLocked(i+1)?'disabled ':'')+'onclick="pgAutomationQueueMove('+i+',1)">Move down</button><button class="btn btn-sm btn-secondary" onclick="pgAutomationQueueDuplicate('+i+')">Duplicate job</button><button class="btn btn-sm btn-secondary" onclick="pgAutomationQueueRemove('+i+')">Remove job</button></div></details>')+'</div></div>';
  }).join(''):'<div class="auto-empty"><strong>No jobs in this queue</strong><p class="auto-muted">Add a job below, or select another queue above to see its jobs.</p></div>';
 }
 function pgAutomationQueueEdit(index){if(!pgAutomationQueueLocked(index))pgAutomationOpenEditor('queue',pgAutomation.queue.items[index],index);}
