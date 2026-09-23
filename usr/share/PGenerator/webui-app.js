@@ -3803,15 +3803,24 @@ async function systemBackupWaitForReboot(){
  }
  systemBackupSetStatus('Could not confirm that PGenerator+ restarted. Reload this page after the device is back online.',true);
 }
-// Chromium browsers (Chrome, Arc, Edge, Brave) block non-text downloads from a
+// Chromium browsers (Chrome, Arc, Edge, Brave) block most downloads from a
 // plain-HTTP page, leaving a fully transferred "Unconfirmed NNNNNN.crdownload"
 // that looks stalled (issue #35). The reporter saw no prompt; Chrome 154 offers
-// the file from the download history's item menu.
-function systemBackupInsecureDownloadHint(){
+// the file from the download history's item menu. There, .txt, .csv and .json
+// were not blocked; .pgbackup, .icc, .cube, .3dl, .ccss, .ccmx, .chc and .html
+// were.
+function insecureDownloadHint(filename){
  if(window.isSecureContext)return '';
  // userAgentData is secure-context only, so it is absent exactly here.
  if(!/\bChrome\//.test(navigator.userAgent||''))return '';
- return ' If the browser leaves it as "Unconfirmed" or .crdownload, it blocked the file because this page uses HTTP: open chrome://downloads, then choose \u22EE > Download insecure file.';
+ if(/\.(txt|csv|json)$/i.test(String(filename||'')))return '';
+ return 'If the browser leaves '+(filename||'the file')+' as "Unconfirmed" or .crdownload, it blocked it because this page uses HTTP: open chrome://downloads, then choose \u22EE > Download insecure file.';
+}
+// Deferred so the hint replaces the caller's own "Downloaded" toast rather
+// than being overwritten by it.
+function noteInsecureDownload(filename){
+ const hint=insecureDownloadHint(filename);
+ if(hint)setTimeout(()=>toast(hint,true),0);
 }
 async function exportSystemSettings(){
  const btn=document.getElementById('exportSystemSettingsBtn');
@@ -3832,7 +3841,8 @@ async function exportSystemSettings(){
   link.download=filename;
   document.body.appendChild(link);link.click();link.remove();
   URL.revokeObjectURL(link.href);
-  systemBackupSetStatus('System backup downloaded ('+(blob.size/1048576).toFixed(1)+' MB).'+systemBackupInsecureDownloadHint(),false);
+  const hint=insecureDownloadHint(filename);
+  systemBackupSetStatus('System backup downloaded ('+(blob.size/1048576).toFixed(1)+' MB).'+(hint?' '+hint:''),false);
   toast('System backup downloaded');
  }catch(error){
   systemBackupSetStatus(error&&error.message?error.message:'System backup failed',true);
@@ -4144,6 +4154,7 @@ function meterDownloadBlob(blob,filename){
  a.click();
  a.remove();
  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+ noteInsecureDownload(filename);
 }
 
 function meterFilenameBase(filename){
