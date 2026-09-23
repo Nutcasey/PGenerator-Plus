@@ -12560,6 +12560,9 @@ sub webui_idle_card_kit (@) {
 sub webui_idle_card_model (@) {
  # $hdmi_info is a per-thread copy from start-up; the info cache follows applies.
  my %conf=%pgenerator_conf;
+ # Resolve transport through the renderer's policy, including retired values
+ # that may still be present in a saved configuration.
+ $conf{dv_transport}=&pg_dv_transport_mode($conf{dv_transport});
  my $mode_line=&read_from_file("$info_dir/GET_HDMI_INFO.info");
  $mode_line=$hdmi_info if(!defined($mode_line) || $mode_line!~/\d+x\d+/);
  my $requested=PGIdleCard::requested_signal(\%conf,$mode_line);
@@ -12644,7 +12647,7 @@ sub webui_idle_card_pattern (@) {
  my $started=&webui_idle_card_now();
  &webui_idle_card_cleanup();
  my $model=&webui_idle_card_model();
- my $levels=PGIdleCard::text_levels($signal_mode,$pgenerator_conf{"dv_transport"});
+ my $levels=PGIdleCard::text_levels($signal_mode,&pg_dv_transport_mode());
  my $scale=$h/1080;
  $scale=0.5 if($scale < 0.5);
  $scale=2.5 if($scale > 2.5);
@@ -12726,8 +12729,10 @@ sub webui_idle_card_tick (@) {
    my $model=&webui_idle_card_model();
    my $signal_mode=&webui_pattern_signal_mode("");
    my $fresh=PGIdleCard::model_signature($model,"$signal_mode:".($w_s||1920).":".($h_s||1080));
-   if($fresh ne ($shown->{signature}||"")) {
-    &log("WebUI: idle card content changed; redrawing");
+   my $renew_positions=$now >= ($shown->{renew_at}||0);
+   if($fresh ne ($shown->{signature}||"") || $renew_positions) {
+    &log($renew_positions ? "WebUI: idle card movement sequence expired; redrawing"
+     : "WebUI: idle card content changed; redrawing");
     my $result=&webui_pattern('{"name":"screensaver","only_if_idle":true,"only_if_unowned":true}');
     my $reply=eval { JSON::PP::decode_json($result) } || {};
     if(($reply->{status}||"") ne "ok" || $reply->{unchanged}) {
@@ -12809,8 +12814,16 @@ sub webui_idle_card_status_json (@) {
 # codes are close to invisible on a monitor that is not in HDR.
 sub webui_idle_card_preview_png (@) {
  my $model=&webui_idle_card_model_cached();
- my $file="$var_dir/running/idle_card_preview.png";
- $file=~s{//+}{/}g;
+ # GET workers can render concurrently. Read only this request's image and
+ # keep it outside the renderer lane's idle_card_*.png cleanup namespace.
+ my $image=eval { File::Temp->new(TEMPLATE=>"idle_preview_XXXXXXXX",SUFFIX=>".png",DIR=>"$var_dir/running",UNLINK=>1) };
+ if(!$image) {
+  my $error=$@||"unknown error";
+  $error=~s/\s+$//;
+  &log("WebUI: idle card preview creation failed: $error");
+  return (undef,"The preview image could not be created.");
+ }
+ my $file=$image->filename();
  my $error=&webui_idle_card_render($model,{value=>232,label=>150,black=>0},1,$file);
  return (undef,$error) if($error ne "");
  my $data="";
@@ -13793,6 +13806,10 @@ elsif($pat eq "" && $name eq "uploaded_diag_video") {
  }
  $idle_card_image->unlink_on_destroy(0) if($idle_card_image);
  if(ref($idle_card_shown) eq "HASH") {
+  # Renew even unchanging content after one complete movement sequence. Use
+  # monotonic time from installation so slow rendering cannot age it early.
+  $idle_card_shown->{renew_at}=&webui_idle_card_now()+$PGIdleCard::HOP_COUNT*$PGIdleCard::HOP_MS/1000;
+  $idle_card_shown->{card}{shown_at}=time();
   $_idle_card{shown}=$idle_card_shown;
   # Retire old images only after the new command has been installed. A
   # cancelled render must leave the displayed card and its metadata intact.

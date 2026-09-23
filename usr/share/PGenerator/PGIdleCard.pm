@@ -539,11 +539,11 @@ sub _im_text {
  return $text;
 }
 
-# A multi-line label; blank cells keep a space so every column has the same
-# line count and the rows stay level across columns.
+# A multi-line label; zero-width spaces keep blank cells from being trimmed
+# by ImageMagick, so headers and mismatch markers stay level with their rows.
 sub _column {
  my ($lines,$font,$size,$fill,$spacing)=@_;
- my $text=join("\n",map { _im_text($_ eq "" ? " " : $_) } @$lines);
+ my $text=join("\n",map { _im_text($_ eq "" ? "\x{200b}" : $_) } @$lines);
  return ("(","-font",$font,"-pointsize",$size,"-interline-spacing",$spacing,"-fill",$fill,"label:$text",")");
 }
 
@@ -584,7 +584,9 @@ sub convert_arguments {
  push @args,_gap($px->(30),1);
  push @args,_column(\@requested,$body,$row_size,$label,$px->(8));
  push @args,_gap($px->(14),1);
- push @args,_column(\@markers,$body,$row_size,$value,$px->(8));
+ # Recent ImageMagick 6/7 releases reject an entirely whitespace label.
+ # With no differences the surrounding gaps provide the empty marker space.
+ push @args,_column(\@markers,$body,$row_size,$value,$px->(8)) if(grep { $_ ne "" } @markers);
  push @args,_gap($px->(14),1);
  push @args,_column(\@sent,$body,$row_size,$value,$px->(8));
  push @args,"+append",")";

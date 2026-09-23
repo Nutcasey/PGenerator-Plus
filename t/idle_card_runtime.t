@@ -37,11 +37,13 @@ local *main::video_program_stop=sub {};
 local *main::create_return_file=sub {};
 local *main::webui_reload_pgenerator_conf=sub {};
 local *main::webui_pattern_signal_mode=sub {'sdr'};
+local *main::pg_dv_transport_mode=sub {'standard'};
 local *main::webui_pattern_max_luma=sub {100};
 local *main::webui_meter_simulation_enabled=sub {0};
 local *main::pattern_log_patch_request=sub {};
 local *main::load_new_pattern_file=sub {};
 local *main::stats=sub {};
+my $real_model=\&main::webui_idle_card_model;
 local *main::webui_idle_card_model=sub {
  return PGIdleCard::card_model(PGIdleCard::requested_signal({signal_mode=>'sdr'},'1920x1080 @ 60'),{},{});
 };
@@ -179,6 +181,102 @@ is(PGAutomation::decode_json($main::_idle_card_status)->{state},'held','cancelle
 $owner=''; $render_hook=undef; $now+=5;
 main::webui_idle_card_tick();
 is(PGAutomation::decode_json($main::_idle_card_status)->{state},'showing','cancelled refresh retries promptly after ownership clears');
+
+# Unchanged content must eventually travel to fresh positions. Expiry uses
+# the monotonic clock, independent of the browser's wall-clock shown_at.
+reset_idle(); request($auto);
+my $sequence_state=$main::_idle_card{shown};
+my $sequence_command=read_pattern();
+$sequence_state->{card}{shown_at}=1;
+$now=$sequence_state->{renew_at}-1;
+main::webui_idle_card_tick();
+is(read_pattern(),$sequence_command,'unchanged card keeps its sequence until expiry');
+$now+=61; $render_hook=sub {$owner='measurement series'};
+main::webui_idle_card_tick();
+is(read_pattern(),$sequence_command,'ownership acquired during renewal preserves the sequence');
+is($main::_idle_card{shown},$sequence_state,'cancelled renewal preserves its expired deadline and displayed positions');
+is(PGAutomation::decode_json($main::_idle_card_status)->{state},'held','cancelled position renewal reports ownership hold');
+$owner=''; $render_hook=undef; $now+=5;
+main::webui_idle_card_tick();
+isnt(read_pattern(),$sequence_command,'position renewal retries promptly after ownership clears');
+is($main::_idle_card{shown}{signature},$sequence_state->{signature},'unchanged model receives the new sequence');
+isnt(PGAutomation::encode_json($main::_idle_card{shown}{card}{positions}),
+ PGAutomation::encode_json($sequence_state->{card}{positions}),'new sequence has fresh positions');
+is($main::_idle_card{shown}{renew_at},$now+2400,'successful renewal schedules another complete forty-minute sequence');
+
+# Saved transport values must pass through the same policy as the renderer.
+# Exercise both policies so retiring LLDV cannot leave a stale label or codes.
+{
+ local $main::pgenerator_conf{signal_mode}='dv';
+ local $main::pgenerator_conf{dv_transport}='lldv';
+ local *main::read_from_file=sub {'1920x1080 @ 60'};
+ local *main::webui_idle_card_readback=sub {return ()};
+ local *main::webui_idle_card_kit=sub {{}};
+ local $PGIdleCard::DV_LEVELS{lldv}={value=>60,label=>50,black=>16};
+ for my $policy ('standard','lldv') {
+  local *main::pg_dv_transport_mode=sub {$policy};
+  my $model=$real_model->();
+  my ($transport)=grep {$_->{label} eq 'DV transport'} @{$model->{rows}};
+  is($transport->{requested},$policy eq 'lldv' ? 'Low latency' : 'Standard',"requested transport follows $policy policy");
+  is($model->{headline},$policy eq 'lldv' ? 'Dolby Vision LL' : 'Dolby Vision',"headline follows $policy policy");
+  my $render=\&main::webui_idle_card_render;
+  my $levels;
+  local *main::webui_idle_card_render=sub {$levels=$_[1]; return $render->(@_)};
+  my @candidate=main::webui_idle_card_pattern(1920,1080,'dv','16,16,16');
+  is($candidate[1],'',"card renders under $policy policy");
+  is_deeply($levels,$PGIdleCard::DV_LEVELS{$policy},"text codes follow $policy policy");
+ }
+ is($main::pgenerator_conf{dv_transport},'lldv','observing transport does not rewrite the saved setting');
+}
+
+# Preview writers overlap across workers. Finish one while the other has a
+# partial image, and run renderer cleanup while both temporary files exist.
+{
+ my $ready=Thread::Queue->new();
+ my @release=map {Thread::Queue->new()} 1..2;
+ my @workers;
+ for my $index (0..1) {
+  push @workers,threads->create(sub {
+   local *main::webui_idle_card_render=sub {
+    my $file=$_[3];
+    open(my $fh,'>',$file) or die $!; print $fh "partial-$index"; close $fh;
+    $ready->enqueue($file);
+    $release[$index]->dequeue();
+    open($fh,'>',$file) or die $!; print $fh "complete-$index"; close $fh;
+    return '';
+   };
+   return [main::webui_idle_card_preview_png()];
+  });
+ }
+ my @files=map {$ready->dequeue()} 1..2;
+ isnt($files[0],$files[1],'concurrent previews have distinct output files');
+ main::webui_idle_card_cleanup();
+ ok(-f $files[0] && -f $files[1],'renderer cleanup preserves both active previews');
+ $release[0]->enqueue('finish');
+ is_deeply($workers[0]->join(),['complete-0',''],'first response reads its own complete preview');
+ $release[1]->enqueue('finish');
+ is_deeply($workers[1]->join(),['complete-1',''],'second response reads its own complete preview');
+ ok(!-e $files[0] && !-e $files[1],'completed previews remove both temporary files');
+}
+for my $failure ('return-error','exception','unreadable') {
+ my $file;
+ local *main::webui_idle_card_render=sub {
+  $file=$_[3];
+  die "injected preview exception\n" if $failure eq 'exception';
+  return 'injected preview error' if $failure eq 'return-error';
+  unlink($file); return '';
+ };
+ my ($png,$error)=eval {main::webui_idle_card_preview_png()};
+ ok(!defined($png) && ($error||$@),"preview $failure is reported");
+ ok(!-e $file,"preview $failure reclaims its temporary file");
+}
+{
+ local *File::Temp::new=sub {die "injected temporary file creation failure\n"};
+ my ($png,$error)=eval {main::webui_idle_card_preview_png()};
+ is($@,'','preview file creation failure does not escape the request handler');
+ ok(!defined($png),'failed preview creation returns no image');
+ like($error,qr/preview image could not be created/,'preview creation failure identifies the operation');
+}
 
 # Failed conversions and exceptions must reclaim both the candidate and
 # older interrupted attempts without retiring the installed image/preview.
