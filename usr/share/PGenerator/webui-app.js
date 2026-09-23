@@ -3803,14 +3803,15 @@ async function systemBackupWaitForReboot(){
  }
  systemBackupSetStatus('Could not confirm that PGenerator+ restarted. Reload this page after the device is back online.',true);
 }
-// Chromium browsers (Chrome, Arc, Edge, Brave) hold non-text downloads from a
-// plain-HTTP page as "Unconfirmed NNNNNN.crdownload" until the user chooses
-// Keep; the file is fully transferred but looks stalled (issue #35).
-function systemBackupKeepHint(){
+// Chromium browsers (Chrome, Arc, Edge, Brave) block non-text downloads from a
+// plain-HTTP page, leaving a fully transferred "Unconfirmed NNNNNN.crdownload"
+// that looks stalled (issue #35). The reporter saw no prompt; Chrome 154 offers
+// the file from the download history's item menu.
+function systemBackupInsecureDownloadHint(){
  if(window.isSecureContext)return '';
  // userAgentData is secure-context only, so it is absent exactly here.
  if(!/\bChrome\//.test(navigator.userAgent||''))return '';
- return ' If the browser lists it as "Unconfirmed" or .crdownload, open its downloads list and choose Keep.';
+ return ' If the browser leaves it as "Unconfirmed" or .crdownload, it blocked the file because this page uses HTTP: open chrome://downloads, then choose \u22EE > Download insecure file.';
 }
 async function exportSystemSettings(){
  const btn=document.getElementById('exportSystemSettingsBtn');
@@ -3831,7 +3832,7 @@ async function exportSystemSettings(){
   link.download=filename;
   document.body.appendChild(link);link.click();link.remove();
   URL.revokeObjectURL(link.href);
-  systemBackupSetStatus('System backup downloaded ('+(blob.size/1048576).toFixed(1)+' MB).'+systemBackupKeepHint(),false);
+  systemBackupSetStatus('System backup downloaded ('+(blob.size/1048576).toFixed(1)+' MB).'+systemBackupInsecureDownloadHint(),false);
   toast('System backup downloaded');
  }catch(error){
   systemBackupSetStatus(error&&error.message?error.message:'System backup failed',true);
