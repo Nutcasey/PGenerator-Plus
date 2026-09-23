@@ -36,8 +36,15 @@ const html=execFileSync('perl',['-I.','-Iusr/share/PGenerator','-e','require "we
   });
   await new Promise(r=>setTimeout(r,80));
   assert.ok(await page.$eval('#tableProbe',e=>e.scrollTop>100));
-  await page.$eval('#tableProbe',e=>{e.scrollTop=0;});
-  await new Promise(r=>setTimeout(r,80));
+  // A scripted scroll pauses follow only when the browser dispatches the
+  // scroll event on a later frame. Await that event, not a fixed sleep: on a
+  // loaded runner the polls can otherwise win and scroll back (608 !== 0).
+  const userScroll=(sel,top)=>page.$eval(sel,(e,top)=>new Promise((resolve,reject)=>{
+   const timer=setTimeout(()=>reject(new Error('no scroll event from #'+e.id)),2000);
+   e.addEventListener('scroll',()=>{clearTimeout(timer);resolve();},{once:true});
+   e.scrollTop=top;
+  }),top);
+  await userScroll('#tableProbe',0);
   await page.evaluate(()=>{for(let i=0;i<12;i++)pgAutomationMarkLiveTableRow();});
   assert.equal(await page.$eval('#tableProbe',e=>e.scrollTop),0);
   assert.equal(await page.$eval('#scrollProbe button',e=>e.hidden),false);
@@ -59,8 +66,7 @@ const html=execFileSync('perl',['-I.','-Iusr/share/PGenerator','-e','require "we
   assert.equal(await page.$$eval('.auto-live-row',els=>els.length),2,'both visible views highlight their own latest reading');
   assert.ok(await page.$eval('#tableProbe',e=>e.scrollTop>100));
   assert.ok(await page.$eval('#observerTable',e=>e.scrollTop>100));
-  await page.$eval('#tableProbe',e=>{e.scrollTop=0;});
-  await new Promise(r=>setTimeout(r,80));
+  await userScroll('#tableProbe',0);
   await page.evaluate(()=>{
    // Width and DPR changes replace these sections in the real graph renderer.
    document.querySelector('#liveSlot').innerHTML=tableFixture('scrollProbe','tableProbe');

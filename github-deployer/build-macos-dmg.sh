@@ -23,7 +23,11 @@ trap cleanup EXIT HUP INT TERM
 unzip -q "$zip_path" -d "$build_dir/root"
 
 if command -v hdiutil >/dev/null 2>&1; then
-  hdiutil create -volname "$volume" -srcfolder "$build_dir/root/PGenerator-GitHub-Deployer" \
+  # Pass the parent so the image holds the PGenerator-GitHub-Deployer folder
+  # itself, matching the Linux path below and README-MACOS.md: the app must
+  # be dragged out, since it writes .server.pid beside server.py and the
+  # image is read-only.
+  hdiutil create -volname "$volume" -srcfolder "$build_dir/root" \
     -format UDZO -ov "$output"
   exit 0
 fi

@@ -37,7 +37,7 @@ APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
 # Shown in the dashboard and reported by /api/health so a support thread can
 # establish which console someone is running. Bump when behaviour changes.
-DEPLOYER_BUILD = "1.3"
+DEPLOYER_BUILD = "1.4"
 # The console's own files as they appear in the repository snapshot. They are
 # not deployable, but they are extracted alongside the snapshot so the running
 # console can notice that the repository carries a different version of itself:
@@ -802,6 +802,25 @@ while IFS="$(printf '\\t')" read -r idx mode check rel; do
   fi
 done < "$manifest"
 modules="$stage/tree/usr/share/PGenerator"
+if [ -d "$modules" ]; then
+  # Backfill with the installed module directory, never overwriting what
+  # this upload staged, so a module LEFT OUT of the selection still resolves
+  # itself into this same tree. Several usr/share/PGenerator modules locate
+  # their own shared directory from their own __FILE__ at compile time
+  # (`unshift @INC, "$directory/../share/PGenerator"` in usr/sbin scripts,
+  # `use lib File::Basename::dirname(__FILE__)` in some .pm files). If such
+  # a module is not part of this upload, it loads from its real installed
+  # path, and its own self-location re-prioritizes /usr/share/PGenerator
+  # ahead of $modules for the REST of this perl -c process (@INC is
+  # process-global) -- so a sibling's new export in the staged tree goes
+  # unseen even though the file on disk is correct. (2026-09-21 incident:
+  # PGAutomation.pm's own `unshift @INC, $directory` shadowed a staged
+  # PGLGCapabilities.pm export this way and wrongly failed the check.)
+  # `cp -an` never overwrites an already-staged file, so the files actually
+  # being deployed still win; a failure here degrades to the old behaviour
+  # rather than aborting the deploy.
+  cp -an /usr/share/PGenerator/. "$modules/" 2>/dev/null || true
+fi
 while IFS="$(printf '\\t')" read -r idx mode check rel; do
   if [ "$check" = "perl" ]; then
     # Siblings being uploaded in this same batch take precedence over the
